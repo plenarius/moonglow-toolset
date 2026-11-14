@@ -270,6 +270,22 @@ mod tests {
         let layer = got.nwsync.as_ref().unwrap().layer.as_ref().unwrap();
         assert_eq!((layer.haks.clone(), layer.by_origins), (vec!["gone1".to_string()], true));
 
+        // A module kept in one file, its server named beside it
+        // (`NAME.moonglow.toml`): opened, its content there too.
+        let path = dir.join("mod/krezk.mod");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut one = module(&["gone1", "there", "gone2"], "mine");
+        one.save_as(&crate::ModuleLocation::Archive(path.clone())).unwrap();
+        let beside = format!("[nwsync]\nsource = \"{url}\"\n");
+        std::fs::write(dir.join("mod/krezk.moonglow.toml"), beside).unwrap();
+        let one = Module::open(&path).unwrap();
+        assert!(one.project_file.warnings.is_empty(), "{:?}", one.project_file.warnings);
+        let got = one.game_data(&gi).unwrap();
+        let layer = got.nwsync.as_ref().unwrap().layer.as_ref().unwrap();
+        assert_eq!(layer.from, mg_nwsync::ManifestFrom::GameStorage);
+        assert!(got.missing_haks.is_empty(), "{:?}", got.missing_haks);
+        assert_eq!(&*got.game.resman.get(&x).unwrap(), &synced[..]);
+
         // No manifest of this server here.
         m.project_file.nwsync_source = Some("https://other.example.org".into());
         let got = m.game_data(&gi).unwrap();

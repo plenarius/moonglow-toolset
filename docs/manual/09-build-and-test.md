@@ -243,7 +243,9 @@ password.
 A persistent world whose players download its haks through NWSync can
 be opened without the hak files: Moonglow reads the haks' content from
 the same NWSync server. Name the server in the project file
-(`moonglow.toml` in a nasher project or module folder):
+(`moonglow.toml` in a nasher project or module folder; for a module kept
+in one file, the file named by it beside it: `Layonara_8-1.moonglow.toml`
+beside `Layonara_8-1.mod`):
 
 ```toml
 [nwsync]

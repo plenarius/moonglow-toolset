@@ -1187,9 +1187,9 @@ impl ProjectFile {
             let (key, _) = entry;
             let section = key.get_ref().as_ref();
             // (A .mod's folder holds other modules: what is a checkout's,
-            // and the builder's own file, are a project folder's.)
-            if beside && matches!(section, "claims" | "commands" | "nwsync" | "plugins" | "builder")
-            {
+            // and the builder's own file, are a project folder's. Its
+            // `[nwsync]` server is read, but not what runs a command.)
+            if beside && matches!(section, "claims" | "commands" | "plugins" | "builder") {
                 r.warn(
                     key.span().start,
                     format!(
@@ -1423,6 +1423,11 @@ impl ProjectFile {
                 ("nwsync", _) => {
                     for e in r.section(entry) {
                         match e.0.get_ref().as_ref() {
+                            "upload" if beside => r.warn(
+                                e.0.span().start,
+                                "upload is not read beside a module kept in one file (.mod): it \
+                                 is a module folder's or a nasher project's",
+                            ),
                             "upload" => {
                                 if let Some(c) = r.upload(e, own) {
                                     self.nwsync_upload = Some(c);
@@ -1440,9 +1445,16 @@ impl ProjectFile {
                             }
                             // (A folder Moonglow writes gigabytes into: the
                             // builder's to choose, never a checkout's.)
+                            "cache" if beside => r.warn(
+                                e.0.span().start,
+                                "cache is read from a builder's own file alone, which a module \
+                                 kept in one file (.mod) has none of: Moonglow's own cache is \
+                                 used",
+                            ),
                             "cache" if !own => r.warn(
                                 e.0.span().start,
-                                "cache is read from your own file alone (.moonglow/user.toml):                                  it is where Moonglow writes what it downloads",
+                                "cache is read from your own file alone (.moonglow/user.toml): \
+                                 it is where Moonglow writes what it downloads",
                             ),
                             "keep" => match e.1.get_ref() {
                                 DeValue::Integer(i) if i.radix() == 10 => {
@@ -3047,7 +3059,40 @@ keeper_variable = "tdod_store"
         std::fs::write(dir.join("krezk.moonglow.toml"), "[nwsync]\nupload = \"x\"\n").unwrap();
         let p = ProjectFile::read_at(&Place::beside(&module).unwrap());
         assert!(p.nwsync_upload.is_none());
-        assert!(p.warnings[0].contains("[nwsync] is not read beside a module"), "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("upload is not read beside a module"), "{:?}", p.warnings);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Beside a `.mod` (`NAME.moonglow.toml`), `[nwsync]` names the
+    /// server its content is read from, which manifest and how many a
+    /// prune keeps; its `cache` is a builder's own file's, which a `.mod`
+    /// has none of (Moonglow's own cache is used), and `upload` runs a
+    /// command, a project's: both said and left out.
+    #[test]
+    fn a_mod_reads_its_nwsync_server_beside_it() {
+        let dir = mg_testkit::scratch_dir("mg-pf-nwsync-mod");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Layonara_8-1.mod");
+        crate::Module::new().save_as(&ModuleLocation::Archive(path.clone())).unwrap();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::write(
+            dir.join("Layonara_8-1.moonglow.toml"),
+            format!(
+                "[nwsync]\nsource = \"https://nwsync.example.org\"\nmanifest = \"{sha}\"\n\
+                 keep = 2\ncache = \"/big/nwsync\"\nupload = \"rsync {{part}} x:/y\"\n"
+            ),
+        )
+        .unwrap();
+        let m = crate::Module::open(&path).unwrap();
+        let p = &m.project_file;
+        let s = p.nwsync_settings().unwrap();
+        assert_eq!(s.url, "https://nwsync.example.org");
+        assert_eq!(s.manifest, mg_nwsync::Wanted::Pinned(mg_nwsync::parse_sha1(sha).unwrap()));
+        assert_eq!((s.cache, p.nwsync_keep), (None, Some(2)));
+        assert!(p.nwsync_upload.is_none());
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(p.warnings[0].starts_with("Layonara_8-1.moonglow.toml:5: cache is read from"));
+        assert!(p.warnings[1].starts_with("Layonara_8-1.moonglow.toml:6: upload is not read"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
