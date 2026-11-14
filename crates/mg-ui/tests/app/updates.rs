@@ -12,7 +12,7 @@ use crate::common::*;
 fn release_answer(tag: &str) -> String {
     serde_json::json!({
         "tag_name": tag,
-        "html_url": format!("https://github.com/jadzziaa/moonglow-toolset/releases/tag/{tag}"),
+        "html_url": format!("https://github.com/{}/releases/tag/{tag}", mg_update::release::REPO),
         "draft": false,
         "prerelease": false,
     })

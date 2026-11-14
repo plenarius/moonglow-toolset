@@ -48,9 +48,29 @@ impl Version {
         Version::parse(mg_core::release::version()).expect("the release is semver")
     }
 
-    /// A pre-release.
+    /// A pre-release: one with a pre-release part, but for this build's
+    /// fork's own releases (`4.2.0-layonara.1`, where the build's channel
+    /// is `layonara`: [`crate::release::CHANNEL`]).
     pub fn is_pre(&self) -> bool {
-        self.pre.is_some()
+        self.is_pre_in(crate::release::CHANNEL)
+    }
+
+    /// [`Version::is_pre`] on the fork whose versions carry `channel`
+    /// (none: upstream's).
+    pub fn is_pre_in(&self, channel: &str) -> bool {
+        match &self.pre {
+            None => false,
+            Some(_) if channel.is_empty() => true,
+            // (`layonara.1` is the fork's release; `layonara.1.rc.1` or
+            // `rc.1` a pre-release.)
+            Some(p) => {
+                let mut ids = p.split('.');
+                let fork = ids.next() == Some(channel)
+                    && ids.next().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                    && ids.next().is_none();
+                !fork
+            }
+        }
     }
 
     /// As the packages' names have it: `3.3.0`, `3.3.0-rc.1`.
@@ -131,7 +151,18 @@ mod tests {
         // A pre-release comes before its release.
         assert!(v("2.5.0-rc.1") < v("2.5.0"));
         assert!(v("2.5.0-rc.1") > v("2.4.0"));
-        assert!(v("2.5.0-rc.1").is_pre() && !v("2.5.0").is_pre());
+        assert!(v("2.5.0-rc.1").is_pre_in("") && !v("2.5.0").is_pre_in(""));
+        // A fork's releases, on the fork; upstream's pre-releases there.
+        assert!(v("4.2.0-layonara.1").is_pre_in(""));
+        assert!(!v("4.2.0-layonara.1").is_pre_in("layonara"));
+        assert!(!v("4.2.0").is_pre_in("layonara"));
+        assert!(v("4.2.0-layonara.1.rc.1").is_pre_in("layonara"));
+        assert!(v("4.2.0-rc.1").is_pre_in("layonara"));
+        assert!(v("4.2.0-layonaraX.1").is_pre_in("layonara"));
+        // And in order: the fork's counter, then upstream's next version.
+        assert!(v("4.2.0-layonara.2") > v("4.2.0-layonara.1"));
+        assert!(v("4.2.0-layonara.10") > v("4.2.0-layonara.9"));
+        assert!(v("4.3.0-layonara.1") > v("4.2.0-layonara.9"));
         for bad in
             ["", "2.4", "2.4.0.1", "two.4.0", "2..0", "2.4.0-", "+2.4.0", "2.-4.0", "2.4.0-a..b"]
         {

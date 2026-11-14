@@ -17,25 +17,48 @@ pub struct Api {
     pub downloads: String,
 }
 
+/// The repository whose releases this build checks (`owner/name`):
+/// upstream's, or a fork's that `packaging/release-source` names (read
+/// when Moonglow is built: `build.rs`). A fork's build never takes
+/// upstream's releases for its own, nor upstream's key.
+pub const REPO: &str = env!("MOONGLOW_RELEASE_REPO");
+
+/// Upstream's repository.
+pub const UPSTREAM: &str = "jadzziaa/moonglow-toolset";
+
+/// The word a fork's versions carry (`layonara`: `4.2.0-layonara.1`),
+/// which on the fork makes a release, not a pre-release; empty for
+/// upstream's.
+pub const CHANNEL: &str = env!("MOONGLOW_RELEASE_CHANNEL");
+
+/// Whether this is a fork's build (its releases are not upstream's).
+pub fn is_fork() -> bool {
+    REPO != UPSTREAM
+}
+
 /// GitHub's latest release of Moonglow (REST API): drafts and pre-releases
 /// are never it.
 pub const LATEST_API: &str =
-    "https://api.github.com/repos/jadzziaa/moonglow-toolset/releases/latest";
+    concat!("https://api.github.com/repos/", env!("MOONGLOW_RELEASE_REPO"), "/releases/latest");
 
 /// The releases, newest first: Include pre-releases asks for these.
-pub const LIST_API: &str =
-    "https://api.github.com/repos/jadzziaa/moonglow-toolset/releases?per_page=20";
+pub const LIST_API: &str = concat!(
+    "https://api.github.com/repos/",
+    env!("MOONGLOW_RELEASE_REPO"),
+    "/releases?per_page=20"
+);
 
 /// The releases' page, where a release's own page isn't known.
-pub const RELEASES_PAGE: &str = "https://github.com/jadzziaa/moonglow-toolset/releases/latest";
+pub const RELEASES_PAGE: &str =
+    concat!("https://github.com/", env!("MOONGLOW_RELEASE_REPO"), "/releases/latest");
 
 impl Default for Api {
     fn default() -> Api {
         Api {
             latest: LATEST_API.into(),
             list: LIST_API.into(),
-            pages: "https://github.com/jadzziaa/moonglow-toolset/releases/".into(),
-            downloads: "https://github.com/jadzziaa/moonglow-toolset/releases/download/".into(),
+            pages: format!("https://github.com/{REPO}/releases/"),
+            downloads: format!("https://github.com/{REPO}/releases/download/"),
         }
     }
 }
@@ -156,7 +179,7 @@ mod tests {
         serde_json::json!({
             "tag_name": tag,
             "name": format!("Moonglow Toolset {tag}"),
-            "html_url": format!("https://github.com/jadzziaa/moonglow-toolset/releases/tag/{tag}"),
+            "html_url": format!("https://github.com/{REPO}/releases/tag/{tag}"),
             "draft": draft,
             "prerelease": pre,
             "body": "## What's new\n\n- Updates install from the app.",
@@ -164,7 +187,7 @@ mod tests {
                 {
                     "name": "SHA256SUMS",
                     "size": 300,
-                    "browser_download_url": format!("https://github.com/jadzziaa/moonglow-toolset/releases/download/{tag}/SHA256SUMS"),
+                    "browser_download_url": format!("https://github.com/{REPO}/releases/download/{tag}/SHA256SUMS"),
                 },
                 {
                     "name": "evil.AppImage",
@@ -185,10 +208,7 @@ mod tests {
             parse_latest(&answer("v2.10.0", false, false).to_string(), &api).unwrap().unwrap();
         assert_eq!(latest.version, v("2.10.0"));
         assert_eq!(latest.tag, "v2.10.0");
-        assert_eq!(
-            latest.page,
-            "https://github.com/jadzziaa/moonglow-toolset/releases/tag/v2.10.0"
-        );
+        assert_eq!(latest.page, format!("https://github.com/{REPO}/releases/tag/v2.10.0"));
         assert!(latest.notes.starts_with("## What's new"));
         // Its downloads, but not a link elsewhere.
         assert_eq!(latest.assets.len(), 1);
@@ -228,5 +248,22 @@ mod tests {
         );
         assert_eq!(newest(vec![]), None);
         assert!(parse_list(r#"{"message":"Not Found"}"#, &api).is_err());
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    /// The build's releases: upstream's with no channel, or a fork's with
+    /// one; every address of the API is the repository's.
+    #[test]
+    fn the_releases_are_this_build_s() {
+        assert_eq!(is_fork(), !CHANNEL.is_empty());
+        let api = Api::default();
+        for url in [&api.latest, &api.list, &api.pages, &api.downloads] {
+            assert!(url.contains(&format!("/{REPO}/")), "{url}");
+        }
+        assert!(RELEASES_PAGE.contains(REPO));
     }
 }

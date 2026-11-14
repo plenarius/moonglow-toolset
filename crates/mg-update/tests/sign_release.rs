@@ -89,13 +89,14 @@ if [[ $1 == -S ]]; then printf 'signature' > SHA256SUMS.minisig; fi
     assert!(uploaded.join("SHA256SUMS.minisig").exists());
     let log = std::fs::read_to_string(&log).unwrap();
     let comment = mg_update::verify::trusted_comment("v9.9.9");
+    // (This build's repository: a fork's, where packaging/release-source
+    // names one.)
+    let repo = mg_update::release::REPO;
     let expected = [
-        "gh release download v9.9.9 --repo jadzziaa/moonglow-toolset --dir".to_string(),
+        format!("gh release download v9.9.9 --repo {repo} --dir"),
         format!("minisign [-S] [-s] [{}] [-m] [SHA256SUMS] [-t] [{comment}]", key.display()),
         format!("minisign [-V] [-p] [{}] [-m] [SHA256SUMS]", public.display()),
-        "gh release upload v9.9.9 --repo jadzziaa/moonglow-toolset --clobber SHA256SUMS \
-         SHA256SUMS.minisig"
-            .to_string(),
+        format!("gh release upload v9.9.9 --repo {repo} --clobber SHA256SUMS SHA256SUMS.minisig"),
     ];
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), expected.len(), "{log}");

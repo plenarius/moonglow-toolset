@@ -55,6 +55,53 @@ them together. The ID is provisional until the project has a public home, as
 is the AppStream metadata's missing homepage (`appstreamcli validate` warns
 about it).
 
+## A fork's releases
+
+A fork that ships builds of its own (Layonara's: `plenarius/moonglow-toolset`,
+branch `layonara`) names itself in `release-source` beside this file:
+
+```text
+repo = plenarius/moonglow-toolset
+channel = layonara
+# key = layonara-minisign.pub
+```
+
+Read when Moonglow is built (`crates/mg-update/build.rs`,
+`apps/moonglow/build.rs`), it makes the build check the fork's releases
+for updates (Help › Check for Updates…, the daily check), never
+upstream's: a fork's build never replaces itself with upstream's, which
+lacks the fork's features. Without the file a build is upstream's, as
+before.
+
+- **Versions** carry the channel: `4.2.0-layonara.1`, upstream's version
+  the fork is based on and the fork's own count (the `version` line of
+  `Cargo.toml`, as for any release). On the fork such a version is a
+  release, not a pre-release (`mg_update::Version::is_pre`); any other
+  pre-release part (`4.3.0-rc.1`) is a
+  pre-release, offered only with Include pre-releases. The release workflow
+  refuses a build whose version lacks `-<channel>.N`, and a tag that
+  isn't `v` and the version.
+- **The key.** Upstream's `minisign.pub` is never used for a fork's
+  build. Without a key of the fork's own (`key`, a file here), a fork's
+  build tells of a newer release and links its page, and installs
+  nothing. To have it install signed updates:
+  1. make a key pair of the fork's on the owner's machine:
+     `minisign -G -p packaging/layonara-minisign.pub -s ~/.minisign/moonglow-plenarius.key`;
+  2. commit the public key, and uncomment `key = layonara-minisign.pub`
+     in `release-source` (builds made after that have it);
+  3. sign each release before publishing it, as below:
+     `packaging/sign-release.sh v4.2.0-layonara.2` (with `release-source`
+     it uploads to the fork's repository, checks against the fork's key
+     and reads the secret key from `~/.minisign/moonglow-<owner>.key`,
+     unless `MOONGLOW_MINISIGN_KEY` says otherwise).
+  A build made before the key was committed keeps linking the page: the
+  first signed release is installed by hand once.
+- **The Scoop bucket** (`bucket/`) is upstream's: a fork's release
+  doesn't update it.
+- **The Windows installer** keeps upstream's `AppId`: installing a
+  fork's build replaces an upstream install of Moonglow (and the other
+  way around), as one Moonglow on the machine.
+
 ## Signing a release
 
 Moonglow installs an update only when the release's `SHA256SUMS` (the

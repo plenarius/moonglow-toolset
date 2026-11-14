@@ -7,6 +7,12 @@ name: Release
 # (packaging/sign-release.sh: SHA256SUMS and its minisign signature,
 # which the app checks before installing an update); the secret key is
 # never given to this workflow.
+#
+# A fork's build (packaging/release-source names its repository and the
+# channel word of its versions, 4.2.0-layonara.1) checks the fork's
+# releases, never upstream's: its tag must be v and the version
+# Cargo.toml says, the channel in it, so that neither can be taken for
+# the other's.
 on:
   push:
     tags: ["v*"]
@@ -19,12 +25,41 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-# Caches are saved by develop alone (as ci.yml's): a tag's could only be
-# read by that tag's runs again, and GitHub keeps 10 GB per repository,
-# so each release's evicted develop's tests' caches.
+# Caches are saved by develop (a fork's: layonara) alone (as ci.yml's):
+# a tag's could only be read by that tag's runs again, and GitHub keeps
+# 10 GB per repository, so each release's evicted develop's tests'
+# caches.
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version, and the tag's
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          field() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" packaging/release-source 2>/dev/null | head -n 1; }
+          repo=$(field repo); channel=$(field channel)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Moonglow $version, releases of ${repo:-jadzziaa/moonglow-toolset}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n $repo && $repo != "$GITHUB_REPOSITORY" ]]; then
+            echo "::warning::packaging/release-source names $repo, this is $GITHUB_REPOSITORY"
+          fi
+          if [[ -n $channel && $version != *-"$channel".* ]]; then
+            echo "::error::a $channel build's version is to carry -$channel.N (4.2.0-$channel.1), not $version"
+            exit 1
+          fi
+          if [[ $GITHUB_REF == refs/tags/* && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "::error::the tag $GITHUB_REF_NAME is not v$version, the version Cargo.toml says"
+            exit 1
+          fi
+
   linux:
     name: AppImage
+    needs: version
     # The oldest supported Ubuntu: the image runs where glibc and libstdc++
     # are at least this new.
     runs-on: ubuntu-22.04
@@ -33,7 +68,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/layonara' }}
       - name: Libraries
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: appimagetool
@@ -53,13 +88,14 @@ jobs:
 
   windows:
     name: Windows installer
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/layonara' }}
       - name: Inno Setup
         run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
       - name: Build
@@ -73,6 +109,7 @@ jobs:
 
   macos:
     name: macOS disk image
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +118,7 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/layonara' }}
       - name: Build
         run: packaging/macos/build-app.sh
       - uses: actions/upload-artifact@v4
@@ -92,7 +129,7 @@ jobs:
   release:
     name: Draft release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, windows, macos]
+    needs: [version, linux, windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,4 +141,6 @@ jobs:
       - name: Draft the release
         env:
           GH_TOKEN: ${{ github.token }}
+        # (Never marked a pre-release by its version: a fork's -channel.N
+        # is a release on the fork.)
         run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "Moonglow Toolset $GITHUB_REF_NAME" --generate-notes dist/*
