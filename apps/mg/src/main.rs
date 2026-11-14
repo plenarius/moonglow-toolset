@@ -1347,6 +1347,42 @@ enum Cmd {
         #[arg(long, value_name = "N")]
         sample: Option<usize>,
     },
+    /// Write a module's haks (and talk table) from its NWSync content, as
+    /// mg serve does for its server: those the server hands out, from the
+    /// game's NWSync storage and Moonglow's cache (mg nwsync-pull first
+    /// for what neither has), each hak as the manifest's origins file
+    /// names its resources, or the resources spread over the module's
+    /// haks where the server publishes none. Kept in the cache: a hak
+    /// written before is not written again. With --out, put in DIR/hak
+    /// and DIR/tlk (hard links where they can be, else copies), for a
+    /// server of your own.
+    NwsyncHaks {
+        #[command(flatten)]
+        source: nwsync_read::Source,
+        /// Put the haks in DIR/hak and the talk table in DIR/tlk (a
+        /// server's user directory, or any folder; not your own NWN
+        /// folder).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Every hak the origins file names, not only the module's.
+        #[arg(long)]
+        all: bool,
+        /// Copies in --out, not hard links.
+        #[arg(long)]
+        copy: bool,
+        /// How many haks are written at once.
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+    },
+    /// Take out of Moonglow's NWSync cache what no manifest kept needs:
+    /// data files, written haks, manifests. Kept: the module's manifest
+    /// (where a module is given), the newest each server named, and the
+    /// last used (--keep). The game's NWSync storage is never touched.
+    /// (Not mg nwsync-prune, which prunes a server's repository.)
+    NwsyncCachePrune {
+        #[command(flatten)]
+        args: nwsync_read::PruneArgs,
+    },
     /// Import an ERF, or loose files and folders, into a module and save
     /// it. What an ERF was made from (stamped by Moonglow's export) is
     /// said, with a warning when the module's git checkout is at another
@@ -2318,7 +2354,7 @@ fn model_info(
     Ok(out)
 }
 
-fn install(cli: &Cli) -> Result<GameInstall> {
+pub(crate) fn install(cli: &Cli) -> Result<GameInstall> {
     let mut gi = match &cli.root {
         Some(r) => GameInstall::new(r, None, "en"),
         None => {
@@ -3173,6 +3209,7 @@ fn run(cli: &Cli) -> Result<Output> {
                 stdin: true,
                 args: server_args.clone(),
                 project: None,
+                progress: !cli.json,
             };
             let started = std::time::Instant::now();
             let bold = !cli.json && io::stdout().is_terminal();
@@ -3247,6 +3284,7 @@ fn run(cli: &Cli) -> Result<Output> {
                     env: env.clone(),
                     preload: preload.clone(),
                     args: server_args.clone(),
+                    progress: !cli.json,
                     ..Default::default()
                 },
             };
@@ -3508,6 +3546,7 @@ fn run(cli: &Cli) -> Result<Output> {
                 args: server_args.clone(),
                 // (The project's own talk table, made for the server.)
                 project: Some(project.clone()),
+                progress: !cli.json,
                 ..Default::default()
             };
             let mut wrong: Option<anyhow::Error> = None;
@@ -5070,6 +5109,11 @@ fn run(cli: &Cli) -> Result<Output> {
         }
         Cmd::NwsyncStatus { source, online } => nwsync_read::status(cli, source, *online)?,
         Cmd::NwsyncPull { source, jobs, sample } => nwsync_read::pull(cli, source, *jobs, *sample)?,
+        Cmd::NwsyncHaks { source, out, all, copy, jobs } => {
+            let a = nwsync_read::HakArgs { out: out.clone(), all: *all, copy: *copy, jobs: *jobs };
+            nwsync_read::haks(cli, source, &a)?
+        }
+        Cmd::NwsyncCachePrune { args } => nwsync_read::cache_prune(cli, args)?,
         Cmd::NwsyncPrune { repository, min_age, dry_run, upload } => {
             let p = mg_module::nwsync::prune(repository, *min_age, *dry_run)
                 .map_err(anyhow::Error::msg)?;

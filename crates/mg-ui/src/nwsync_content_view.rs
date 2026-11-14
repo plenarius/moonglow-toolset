@@ -11,11 +11,17 @@
 //! and has Cancel; what was downloaded stays, so a Sync canceled or cut
 //! off goes on from there the next time. Once it is done the NWSync layer
 //! is put in again (the newer manifest, or the one there was none of).
+//!
+//! **Clean Up Cache…** prunes Moonglow's cache ([`mg_nwsync::prune`]): it
+//! says first what would go (a dry run), and removes it when asked. Kept:
+//! the module's manifest, the newest each server named, and the last used
+//! (`[nwsync] keep`, 3).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mg_nwsync::fetch::{self, Fetch, Pulled, Step};
+use mg_nwsync::prune::{Keep, Pruned};
 use mg_nwsync::{Settings, Survey};
 use mg_resman::GameInstall;
 
@@ -33,6 +39,7 @@ struct Run {
 enum Made {
     Looked(Result<Survey, String>),
     Synced(Result<Pulled, String>),
+    Pruned(Result<Pruned, String>),
 }
 
 /// The NWSync Content window, and the module's NWSync content as it was
@@ -46,6 +53,11 @@ pub struct NwSyncContent {
     pub survey: Option<Survey>,
     /// What the last Sync did, in a line.
     pub synced: Option<String>,
+    /// What a clean-up of the cache would remove (its dry run), until it
+    /// is done or called off.
+    pub prune: Option<Pruned>,
+    /// What the last clean-up removed, in a line.
+    pub pruned: Option<String>,
     pub error: Option<String>,
     run: Option<Arc<Run>>,
     /// The requests (the tests' own; none: HTTP, `fetch::Client`).
@@ -172,6 +184,63 @@ fn sync(app: &mut Moonglow, ctx: &egui::Context) {
     );
 }
 
+/// What a clean-up keeps: the manifest in the game data and the one
+/// pinned, and as many last used as the project says.
+fn keep_of(app: &Moonglow, settings: &Settings) -> Keep {
+    let mut keep = Keep::default();
+    if let Some(n) = app.ws.as_ref().and_then(|ws| ws.module.project_file.nwsync_keep) {
+        keep.recent = n;
+    }
+    if let mg_nwsync::Wanted::Pinned(sha) = settings.manifest {
+        keep.manifests.push(sha);
+    }
+    if let Some(Ok(l)) = app.nwsync_content.mounted.as_ref().map(|m| &m.layer) {
+        keep.manifests.push(l.sha1);
+    }
+    keep
+}
+
+/// Cleans up the cache, on a thread: a dry run, or the clean-up itself.
+pub(crate) fn prune(app: &mut Moonglow, dry_run: bool, ctx: Option<&egui::Context>) {
+    let (Some(settings), Some(install)) = (settings(app), app.install.clone()) else { return };
+    if app.nwsync_content.running() {
+        return;
+    }
+    let Some(cache) = mg_module::nwsync_content::cache_of(&settings) else { return };
+    let keep = keep_of(app, &settings);
+    app.nwsync_content.error = None;
+    app.nwsync_content.pruned = None;
+    if !dry_run {
+        app.nwsync_content.prune = None;
+    }
+    start(
+        app,
+        false,
+        move |_| {
+            Made::Pruned((|| {
+                let game = mg_module::nwsync_content::game_storage(&install)?;
+                mg_nwsync::prune::prune(&cache, game.as_ref(), &keep, dry_run)
+            })())
+        },
+        ctx,
+    );
+}
+
+/// What a clean-up removed, or would.
+fn pruned_line(p: &Pruned) -> String {
+    let manifests = match p.removed.len() {
+        0 => String::new(),
+        n => format!(", {}", count(n, "manifest")),
+    };
+    format!(
+        "{} ({}, {}{manifests}; {} kept)",
+        megabytes(p.bytes()),
+        count(p.data_files, "data file"),
+        count(p.haks, "written hak"),
+        count(p.kept.len(), "manifest")
+    )
+}
+
 /// Opens the window, and looks at what is here.
 pub(crate) fn open(app: &mut Moonglow) {
     app.nwsync_content.open = true;
@@ -195,6 +264,23 @@ pub(crate) fn poll(app: &mut Moonglow) {
             app.nwsync_content.error = Some(e);
         }
         Made::Synced(Ok(p)) => synced(app, p),
+        Made::Pruned(Err(e)) => {
+            app.nwsync_content.prune = None;
+            app.nwsync_content.error = Some(e);
+        }
+        Made::Pruned(Ok(p)) if p.dry_run => {
+            if let Some(why) = &p.data_left {
+                app.nwsync_content.error = Some(why.clone());
+            }
+            app.nwsync_content.prune = Some(p);
+        }
+        Made::Pruned(Ok(p)) => {
+            let line = format!("Removed {}", pruned_line(&p));
+            app.log.info(format!("NWSync content: cache cleaned up: {}", pruned_line(&p)));
+            app.nwsync_content.pruned = Some(line);
+            app.nwsync_content.prune = None;
+            look(app, None);
+        }
     }
 }
 
@@ -279,6 +365,7 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     let c = &mut app.nwsync_content;
     let mut open = true;
     let (mut go, mut cancel, mut close) = (false, false, false);
+    let (mut look_prune, mut remove, mut unprune) = (false, false, false);
     let step = c.run.as_ref().and_then(|r| *r.step.lock().unwrap_or_else(|e| e.into_inner()));
     crate::widgets::dialog(ctx, "NWSync Content", &mut open)
         .collapsible(false)
@@ -378,6 +465,29 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
             if let Some(line) = &c.synced {
                 ui.label(line);
             }
+            if let Some(p) = &c.prune {
+                ui.separator();
+                if p.bytes() == 0 {
+                    ui.label("Nothing to clean up: the cache holds only what is kept.");
+                    if ui.button("OK").clicked() {
+                        unprune = true;
+                    }
+                } else {
+                    ui.label(format!("Clean up would remove {}.", pruned_line(p)));
+                    ui.horizontal(|ui| {
+                        remove = ui
+                            .add_enabled(!c.running(), egui::Button::new("Remove"))
+                            .on_hover_text(
+                                "Remove from Moonglow's cache what no kept manifest needs",
+                            )
+                            .clicked();
+                        unprune = ui.button("Keep Everything").clicked();
+                    });
+                }
+            }
+            if let Some(line) = &c.pruned {
+                ui.label(line);
+            }
             if let Some(e) = &c.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
@@ -389,11 +499,18 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
                 if c.syncing() {
                     cancel = ui.button("Cancel").clicked();
                 }
+                look_prune = ui
+                    .add_enabled(!c.running(), egui::Button::new("Clean Up Cache…"))
+                    .on_hover_text(
+                        "Say what of Moonglow's cache no kept manifest needs (data files, \
+                         written haks, older manifests), to remove it",
+                    )
+                    .clicked();
                 close = ui.button("Close").clicked();
             });
             ui.weak(
-                "Downloads go to Moonglow's own cache; the game's NWSync storage is read, never \
-                 changed.",
+                "Downloads and haks written for testing go to Moonglow's own cache; the game's \
+                 NWSync storage is read, never changed.",
             );
         });
     if c.running() {
@@ -407,5 +524,14 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     }
     if go {
         sync(app, ctx);
+    }
+    if unprune {
+        app.nwsync_content.prune = None;
+    }
+    if look_prune {
+        prune(app, true, Some(ctx));
+    }
+    if remove {
+        prune(app, false, Some(ctx));
     }
 }
