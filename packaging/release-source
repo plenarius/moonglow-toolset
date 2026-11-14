@@ -1,0 +1,16 @@
+# The releases this build of Moonglow checks for updates: a fork's own,
+# not upstream's (packaging/README.md, "A fork's releases"). Read when
+# Moonglow is built (crates/mg-update/build.rs, apps/moonglow/build.rs)
+# and by packaging/sign-release.sh. Without this file a build checks
+# jadzziaa/moonglow-toolset's and installs what upstream's key signed.
+#
+# repo:    the GitHub repository whose releases are checked.
+# channel: the pre-release word of the fork's versions (4.2.0-layonara.1):
+#          on the fork, such a version is a release, not a pre-release.
+# key:     the fork's minisign public key, a file in packaging/ (as
+#          minisign -G writes it). Without one, a fork build says a newer
+#          release is out and links its page, and installs nothing.
+#          Upstream's packaging/minisign.pub is never used for a fork.
+repo = plenarius/moonglow-toolset
+channel = layonara
+key = layonara-minisign.pub

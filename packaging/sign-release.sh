@@ -14,15 +14,33 @@
 # there). minisign asks for the key's password.
 #
 #   MOONGLOW_MINISIGN_KEY  the secret key (default ~/.minisign/moonglow.key)
-#   MOONGLOW_MINISIGN_PUB  the public key (default packaging/minisign.pub)
-#   MOONGLOW_REPO          the repository (default jadzziaa/moonglow-toolset)
+#   MOONGLOW_MINISIGN_PUB  the public key (default packaging/minisign.pub,
+#                          or the fork's that packaging/release-source names)
+#   MOONGLOW_REPO          the repository (default jadzziaa/moonglow-toolset,
+#                          or the fork's that packaging/release-source names)
 set -euo pipefail
 
 tag=${1:?usage: packaging/sign-release.sh vX.Y.Z}
-repo=${MOONGLOW_REPO:-jadzziaa/moonglow-toolset}
-key=${MOONGLOW_MINISIGN_KEY:-$HOME/.minisign/moonglow.key}
 here=$(cd "$(dirname "$0")" && pwd)
-pub=${MOONGLOW_MINISIGN_PUB:-$here/minisign.pub}
+# A fork's releases (packaging/release-source): its repository and its
+# own key, never upstream's.
+source_field() {
+    [[ -f $here/release-source ]] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" \
+        "$here/release-source" | head -n 1
+}
+fork_repo=$(source_field repo)
+fork_key=$(source_field key)
+if [[ -n $fork_repo ]]; then
+    repo=${MOONGLOW_REPO:-$fork_repo}
+    default_pub=$here/${fork_key:-no-key-named-in-release-source.pub}
+    key=${MOONGLOW_MINISIGN_KEY:-$HOME/.minisign/moonglow-${fork_repo%%/*}.key}
+else
+    repo=${MOONGLOW_REPO:-jadzziaa/moonglow-toolset}
+    default_pub=$here/minisign.pub
+    key=${MOONGLOW_MINISIGN_KEY:-$HOME/.minisign/moonglow.key}
+fi
+pub=${MOONGLOW_MINISIGN_PUB:-$default_pub}
 
 [[ $tag == v* ]] || { echo "the tag is v and the version: v3.3.0" >&2; exit 1; }
 [[ -f $pub ]] || { echo "no public key at $pub: make the key first (packaging/README.md)" >&2; exit 1; }

@@ -220,6 +220,15 @@ impl Updates {
             );
         };
         if self.key.is_none() {
+            // (A fork's build: its own releases, never upstream's.)
+            if mg_update::release::is_fork() {
+                return Some(format!(
+                    "This build of Moonglow is {}'s, and has no key to check a download against \
+                     yet, so it doesn't install updates: download the new release from its \
+                     page.",
+                    mg_update::release::REPO
+                ));
+            }
             return Some(
                 "This build of Moonglow has no key to check a download against, so it doesn't \
                  install updates: download the new release from its page."
@@ -1033,7 +1042,7 @@ mod tests {
     fn answer(tag: &str, pre: bool) -> String {
         serde_json::json!({
             "tag_name": tag,
-            "html_url": format!("https://github.com/jadzziaa/moonglow-toolset/releases/tag/{tag}"),
+            "html_url": format!("https://github.com/{}/releases/tag/{tag}", mg_update::release::REPO),
             "draft": false,
             "prerelease": pre,
         })

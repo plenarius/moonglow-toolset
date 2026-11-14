@@ -808,7 +808,8 @@ fn main() -> eframe::Result<()> {
 }
 
 /// The key the releases' checksums are signed with, built in from
-/// `packaging/minisign.pub` (`build.rs`); none until the owner commits it.
+/// `packaging/minisign.pub`, or a fork's own (`build.rs`); none until the
+/// owner commits it.
 fn update_key() -> Option<mg_update::PublicKey> {
     let key = option_env!("MOONGLOW_UPDATE_KEY")?;
     match mg_update::PublicKey::parse(key) {
