@@ -80,6 +80,7 @@ pub enum Id {
     CompileModels,
     BuildModule,
     PublishNwsync,
+    NwsyncContent,
     Verify,
     /// The module saved to a copy and read back (`mg roundtrip`).
     RoundTrip,
@@ -281,6 +282,7 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::CompileModels),
             Do(Id::BuildModule),
             Do(Id::PublishNwsync),
+            Do(Id::NwsyncContent),
             Do(Id::Verify),
             Do(Id::RoundTrip),
             Do(Id::TestModule),
@@ -549,6 +551,11 @@ impl Id {
                 "publish-nwsync",
                 "Publish to NWSync…",
                 "The module's haks and talk table, for players' games to download",
+            ),
+            Id::NwsyncContent => (
+                "nwsync-content",
+                "NWSync Content…",
+                "The module's haks read from its NWSync server, and the download of what is missing",
             ),
             Id::Verify => ("verify", "Verify Module", ""),
             Id::RoundTrip => (
@@ -846,6 +853,7 @@ impl Id {
             | Id::CompileModels
             | Id::BuildModule
             | Id::PublishNwsync
+            | Id::NwsyncContent
             | Id::Verify
             | Id::RoundTrip
             | Id::GoToStart
@@ -1016,6 +1024,7 @@ impl Id {
                 return;
             }
             Id::PublishNwsync => return crate::nwsync_view::open(app),
+            Id::NwsyncContent => return crate::nwsync_content_view::open(app),
             Id::AreaStatistics => {
                 app.area_stats = shown_area(app);
                 if app.area_stats.is_some() {

@@ -1154,6 +1154,7 @@ pub(crate) fn runs_from_field(id: Id) -> bool {
         | Id::CompileModels
         | Id::BuildModule
         | Id::PublishNwsync
+        | Id::NwsyncContent
         | Id::Verify
         | Id::RoundTrip
         | Id::TestModule
