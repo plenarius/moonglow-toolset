@@ -13,4 +13,4 @@
 #          Upstream's packaging/minisign.pub is never used for a fork.
 repo = plenarius/moonglow-toolset
 channel = layonara
-# key = layonara-minisign.pub
+key = layonara-minisign.pub

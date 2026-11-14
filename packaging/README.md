@@ -63,7 +63,7 @@ branch `layonara`) names itself in `release-source` beside this file:
 ```text
 repo = plenarius/moonglow-toolset
 channel = layonara
-# key = layonara-minisign.pub
+key = layonara-minisign.pub
 ```
 
 Read when Moonglow is built (`crates/mg-update/build.rs`,
@@ -84,7 +84,10 @@ before.
 - **The key.** Upstream's `minisign.pub` is never used for a fork's
   build. Without a key of the fork's own (`key`, a file here), a fork's
   build tells of a newer release and links its page, and installs
-  nothing. To have it install signed updates:
+  nothing. Layonara's fork has its key since 4.2.0-layonara.1:
+  `layonara-minisign.pub` (key ID `EBB36075B15C361E`; the secret key,
+  password protected, is the owner's `~/.minisign/moonglow-plenarius.key`).
+  How a fork gets one:
   1. make a key pair of the fork's on the owner's machine:
      `minisign -G -p packaging/layonara-minisign.pub -s ~/.minisign/moonglow-plenarius.key`;
   2. commit the public key, and uncomment `key = layonara-minisign.pub`
