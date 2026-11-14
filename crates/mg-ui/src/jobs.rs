@@ -197,6 +197,9 @@ impl Moonglow {
         if self.references.reading() {
             return Some("the references being read");
         }
+        if self.nwsync_content.running() {
+            return Some("NWSync content being looked at or downloaded");
+        }
         if self.updates.checking() {
             return Some("an update check");
         }
