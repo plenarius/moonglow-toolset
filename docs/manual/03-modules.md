@@ -728,9 +728,12 @@ beside it, named by it, as its folder holds other modules too:
 `krezk.moonglow.toml` (and `krezk.variables.toml`, below) beside
 `krezk.mod` (since Moonglow 2.13.0). There, what is a checkout's or a
 builder's own is not read (the log says so): `[claims]`, `[commands]`,
-`[nwsync]`, `[plugins]`, `[builder]` and `.moonglow/user.toml` are a module
-folder's or a nasher project's. Without the file, Moonglow does what it
-does for any module.
+`[plugins]`, `[builder]`, `[nwsync]`'s `upload` and `cache`, and
+`.moonglow/user.toml` are a module folder's or a nasher project's. The
+rest of `[nwsync]` is read there (`source`, `manifest`, `keep`; Layonara's
+fork), so a `.mod` handed out with its file beside it opens
+with its NWSync server's content, kept in Moonglow's own cache. Without
+the file, Moonglow does what it does for any module.
 
 The file is UTF-8 text, as is `.moonglow/user.toml`. One with a
 character typed in another encoding (a comment saved as Windows-1252,
@@ -858,9 +861,9 @@ Names are matched by globs, whatever their case: `*` any characters,
 | `[claims] protected` | areas (ResRefs, globs) whose Tag and ResRef are [kept](#protected-areas), besides those the table says are merged | none |
 | `[commands]` | the project's [commands](#the-projects-commands), each by its name (letters, digits, `_`, `-`): its text, or `{ run = "…", windows = "…", unix = "…", label = "…" }` (`windows` and `unix` in place of `run` on those systems; `label` its name in the menu) | none |
 | `[nwsync] upload` | the command [Upload](09-build-and-test.md#uploading-to-the-web-server) (Build › Publish to NWSync) runs to send the NWSync folder to the web server, once for each part in turn (`{part}`: `data`, `manifests`, `latest`; `{folder}` the folder), in the folder: its text, or `{ run = "…", windows = "…", unix = "…", input = true }`. Asked about before it first runs, as the commands are. In `.moonglow/user.toml` too, where it wins over the team's | the one in Options › Folders |
-| `[nwsync] source` | the NWSync server players download the module's haks and talk table from, as nwserver's `-nwsyncurl` gives it (`"https://nwsync.example.org"`): Moonglow reads that content from it, [without the hak files](09-build-and-test.md#nwsync-content-instead-of-haks), from the game's own NWSync storage and Moonglow's cache, over the haks on disk. In `.moonglow/user.toml` too, where it wins over the team's. Since Moonglow 4.2.0 (Layonara's fork) | the haks are read from disk alone |
+| `[nwsync] source` | the NWSync server players download the module's haks and talk table from, as nwserver's `-nwsyncurl` gives it (`"https://nwsync.example.org"`): Moonglow reads that content from it, [without the hak files](09-build-and-test.md#nwsync-content-instead-of-haks), from the game's own NWSync storage and Moonglow's cache, over the haks on disk. In `.moonglow/user.toml` too, where it wins over the team's, and beside a `.mod` (`krezk.moonglow.toml`). Since Moonglow 4.2.0 (Layonara's fork) | the haks are read from disk alone |
 | `[nwsync] manifest` | which of the server's manifests: `"latest"` (the newest the server names, or the newest here when it can't be asked), or one manifest's SHA-1, to stay on it. In `.moonglow/user.toml` too, where it wins | `"latest"` |
-| `[nwsync] cache` | the folder Moonglow downloads NWSync data into (a whole path; a first download of a persistent world's content can be gigabytes). From `.moonglow/user.toml` alone: the team's file can't choose where Moonglow writes | `nwsync` in Moonglow's cache folder (`~/.cache/moonglow`, `%LOCALAPPDATA%\Moonglow\cache`, `~/Library/Caches/Moonglow`) |
+| `[nwsync] cache` | the folder Moonglow downloads NWSync data into (a whole path; a first download of a persistent world's content can be gigabytes). From `.moonglow/user.toml` alone: the team's file can't choose where Moonglow writes (a `.mod`'s file beside it neither: it has no `.moonglow/user.toml`, so the default is used) | `nwsync` in Moonglow's cache folder (`~/.cache/moonglow`, `%LOCALAPPDATA%\Moonglow\cache`, `~/Library/Caches/Moonglow`) |
 | `[nwsync] keep` | how many manifests last used a clean-up of Moonglow's NWSync cache keeps besides the module's own ([Cleaning up the cache](09-build-and-test.md#cleaning-up-the-cache)). In `.moonglow/user.toml` too, where it wins | 3 |
 | `[plugins] folder` | the folder of the project's own plugins, from the project's root, inside it ([A project's own plugins](15-plugins.md#a-projects-own-plugins)) | `plugins` |
 | `[plugins."<plugin id>"]` | the values of a plugin's settings of scope `project`, by setting (the id in quotes: it has dots in it). The Plugins window's Settings… and the plugin itself write them here, the rest of the file as written | the settings' defaults |
