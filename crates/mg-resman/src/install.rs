@@ -631,16 +631,65 @@ fn native_path(user: &Path, raw: &str) -> Option<PathBuf> {
     None
 }
 
-/// The player's NWN folder where the game puts it on this system.
+/// The player's NWN folder where the game puts it on this system: on
+/// Windows and macOS in the Documents folder ([`documents_dir`]).
 pub fn default_user_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        env::var_os("USERPROFILE")
-            .map(|h| PathBuf::from(h).join("Documents").join("Neverwinter Nights"))
-    } else if cfg!(target_os = "macos") {
-        env::var_os("HOME").map(|h| PathBuf::from(h).join("Documents/Neverwinter Nights"))
+    if cfg!(any(windows, target_os = "macos")) {
+        documents_dir().map(|d| d.join("Neverwinter Nights"))
     } else {
         env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/Neverwinter Nights"))
     }
+}
+
+/// The Windows Documents folder, where the game asks Windows for it (the
+/// known folder `FOLDERID_Documents`): moved elsewhere, as OneDrive does
+/// (`%USERPROFILE%\OneDrive\Documents`; a builder's report: the user
+/// folder was not found), where it was moved to. `%USERPROFILE%\Documents`
+/// when Windows doesn't say; elsewhere, `$HOME/Documents`.
+pub fn documents_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(dir) = known_documents_dir() {
+        return Some(dir);
+    }
+    let home = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    Some(PathBuf::from(home).join("Documents"))
+}
+
+/// `SHGetKnownFolderPath(FOLDERID_Documents)`, where it answers.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn known_documents_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    };
+    let mut path: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the out pointer is a valid place for the answer; no token
+    // (null) is the current user's.
+    let hr = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_Documents,
+            KF_FLAG_DEFAULT as _,
+            std::ptr::null_mut(),
+            &mut path,
+        )
+    };
+    let dir = if hr >= 0 && !path.is_null() {
+        // SAFETY: on success `path` is a NUL-terminated wide string the
+        // call allocated, read up to its NUL before it is freed.
+        let wide = unsafe {
+            let len = (0..).take_while(|&i| *path.add(i) != 0).count();
+            std::slice::from_raw_parts(path, len)
+        };
+        Some(PathBuf::from(std::ffi::OsString::from_wide(wide)))
+    } else {
+        None
+    };
+    // SAFETY: the string is freed with CoTaskMemFree, as the call asks,
+    // also when it failed (null, or what it allocated); once.
+    unsafe { CoTaskMemFree(path as *const _) };
+    dir.filter(|d| d.is_absolute())
 }
 
 impl ResMan {
@@ -744,6 +793,23 @@ impl ResMan {
 #[cfg(test)]
 mod install_tests {
     use super::*;
+
+    /// The Documents folder is a whole path: on Windows where Windows
+    /// keeps it (OneDrive's, when it moved it there), elsewhere the home
+    /// folder's; the user folder is in it on Windows and macOS.
+    #[test]
+    fn the_documents_folder_is_where_the_system_keeps_it() {
+        let Some(docs) = documents_dir() else { return };
+        assert!(docs.is_absolute(), "{docs:?}");
+        if cfg!(windows) {
+            assert!(docs.file_name().is_some(), "{docs:?}");
+        } else if let Some(home) = env::var_os("HOME") {
+            assert_eq!(docs, PathBuf::from(home).join("Documents"));
+        }
+        if cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(default_user_dir(), Some(docs.join("Neverwinter Nights")));
+        }
+    }
 
     /// On Windows the game in Steam's usual folder (or a library it
     /// lists, GOG's or Beamdog's) is found without a look at any other

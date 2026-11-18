@@ -51,7 +51,7 @@ user folder (where your modules, haks, talk tables and override live):
 | System | Game | User folder |
 | --- | --- | --- |
 | Linux | `~/.local/share/Steam/steamapps/common/Neverwinter Nights` (also Steam's Flatpak) | `~/.local/share/Neverwinter Nights` |
-| Windows | `C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights` | `Documents\Neverwinter Nights` |
+| Windows | `C:\Program Files (x86)\Steam\steamapps\common\Neverwinter Nights` | `Documents\Neverwinter Nights`, in the Documents folder Windows names (OneDrive's, `OneDrive\Documents`, where OneDrive keeps it), as the game finds it |
 | macOS | `~/Library/Application Support/Steam/steamapps/common/Neverwinter Nights` | `~/Documents/Neverwinter Nights` |
 
 A game in another Steam library (on a second drive, say) is found too:
