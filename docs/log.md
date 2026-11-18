@@ -1,5 +1,8 @@
 # Update log
 
+## 2026-11-18
+* **Update** (Layonara's fork): Release 4.2.0-layonara.2 prepared: the version (`Cargo.toml`), for the 2026-11-14 changes (a `.mod`'s project file names its NWSync server; the Windows Documents folder found where Windows keeps it).
+
 ## 2026-11-14
 * **Update** (Layonara's fork): [Modules](manual/03-modules.md#the-project-file-moonglowtoml) and [NWSync content instead of haks](manual/09-build-and-test.md#nwsync-content-instead-of-haks): a `.mod`'s project file beside it (`NAME.moonglow.toml`) names its NWSync server (`[nwsync] source`, `manifest`, `keep`); its `upload` and `cache` are still not read there, and the log says so (a builder's report: a `.mod` handed out with its file opened with no NWSync server). Tests: `a_mod_reads_its_nwsync_server_beside_it`, `a_module_s_nwsync_content_over_its_haks` (mg-module).
 * **Fix** (Layonara's fork): On Windows the game's user folder is found in the Documents folder Windows names (the known folder `FOLDERID_Documents`, as the game asks for it), so a Documents folder OneDrive moved (`%USERPROFILE%\OneDrive\Documents`) is found; `%USERPROFILE%\Documents` when Windows doesn't say ([Getting started](manual/01-getting-started.md)). A builder's report: "NWN user folder: Empty: none", and no NWSync storage or haks. `mg_resman::documents_dir` (`windows-sys`, Windows alone). Test: `the_documents_folder_is_where_the_system_keeps_it` (mg-resman).

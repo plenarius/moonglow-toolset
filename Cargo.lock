@@ -2646,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "mg"
-version = "4.2.0-layonara.1"
+version = "4.2.0-layonara.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "moonglow"
-version = "4.2.0-layonara.1"
+version = "4.2.0-layonara.2"
 dependencies = [
  "eframe",
  "egui",
