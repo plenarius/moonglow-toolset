@@ -554,6 +554,130 @@ pub struct DockLayout {
     pub wide_width: Option<u16>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One of the three Area Right Dock panes (`Palette`, `Preview`,
+/// `Properties`), used in [`AreaRightLayout`] to keep a builder-arranged
+/// layout in settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AreaRightPanel {
+    Palette,
+    Preview,
+    Properties,
+}
+
+impl AreaRightPanel {
+    pub const ALL: [Self; 3] = [Self::Palette, Self::Preview, Self::Properties];
+}
+
+/// Custom arrangement of the Area editor's Right Dock columns, stacked
+/// sections and tab bars ([`Settings::area_right_layout`]).
+///
+/// Each outer element is a vertical column (1 column, or 2 columns side by
+/// side on ultrawide monitors); each column is a top-to-bottom list of
+/// sections; each section is a list of tabbed panes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AreaRightLayout {
+    pub columns: Vec<Vec<Vec<AreaRightPanel>>>,
+}
+
+impl AreaRightLayout {
+    pub fn two_columns() -> Self {
+        Self {
+            columns: vec![
+                vec![vec![AreaRightPanel::Palette, AreaRightPanel::Preview]],
+                vec![vec![AreaRightPanel::Properties]],
+            ],
+        }
+    }
+
+    pub fn stacked() -> Self {
+        Self {
+            columns: vec![vec![
+                vec![AreaRightPanel::Palette, AreaRightPanel::Preview],
+                vec![AreaRightPanel::Properties],
+            ]],
+        }
+    }
+
+    pub fn one_tab_bar() -> Self {
+        Self {
+            columns: vec![vec![vec![
+                AreaRightPanel::Palette,
+                AreaRightPanel::Preview,
+                AreaRightPanel::Properties,
+            ]]],
+        }
+    }
+
+    /// Deduplicates panes, drops empty sections and columns, caps at two
+    /// columns, and ensures every [`AreaRightPanel`] appears once.
+    pub fn normalized(&self) -> Self {
+        let mut seen = [false; 3];
+        let idx = |p: AreaRightPanel| match p {
+            AreaRightPanel::Palette => 0,
+            AreaRightPanel::Preview => 1,
+            AreaRightPanel::Properties => 2,
+        };
+        let mut columns: Vec<Vec<Vec<AreaRightPanel>>> = Vec::new();
+        for col in &self.columns {
+            let mut clean_col: Vec<Vec<AreaRightPanel>> = Vec::new();
+            for sec in col {
+                let mut clean_sec: Vec<AreaRightPanel> = Vec::new();
+                for &p in sec {
+                    let i = idx(p);
+                    if !seen[i] {
+                        seen[i] = true;
+                        clean_sec.push(p);
+                    }
+                }
+                if !clean_sec.is_empty() {
+                    clean_col.push(clean_sec);
+                }
+            }
+            if !clean_col.is_empty() {
+                if columns.len() >= 2 {
+                    columns[1].extend(clean_col);
+                } else {
+                    columns.push(clean_col);
+                }
+            }
+        }
+        if columns.is_empty() {
+            return Self::two_columns();
+        }
+        for p in AreaRightPanel::ALL {
+            if !seen[idx(p)] {
+                columns.last_mut().unwrap()[0].push(p);
+            }
+        }
+        Self { columns }
+    }
+
+    /// Returns columns with [`AreaRightPanel::Properties`] removed, dropping
+    /// any section or column that becomes empty.
+    pub fn without_properties(&self) -> Vec<Vec<Vec<AreaRightPanel>>> {
+        let norm = self.normalized();
+        norm.columns
+            .into_iter()
+            .filter_map(|col| {
+                let kept: Vec<Vec<AreaRightPanel>> = col
+                    .into_iter()
+                    .filter_map(|sec| {
+                        let s: Vec<_> =
+                            sec.into_iter().filter(|&p| p != AreaRightPanel::Properties).collect();
+                        (!s.is_empty()).then_some(s)
+                    })
+                    .collect();
+                (!kept.is_empty()).then_some(kept)
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -610,6 +734,11 @@ pub struct Settings {
     /// the Right Dock shows no Tile Properties section (U5). An older
     /// Moonglow ignores it.
     pub hide_tile_properties: bool,
+    /// Properties was hidden manually with its close button or View menu /
+    /// Area Header switch: only Properties is hidden while Palette and Preview
+    /// stay visible. Written only when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_properties: bool,
     /// The area view's Animations switch is off: creatures and other
     /// placed objects hold still.
     pub still_objects: bool,
@@ -772,6 +901,17 @@ pub struct Settings {
     /// narrower window), each the width of its own layout. `None`: not
     /// chosen there, 741.
     pub right_dock_width_wide: Option<u32>,
+    /// The Right Dock's width dragged to in the wide layout (`>= 2560`)
+    /// when the Area Right Dock stands in a single column (stacked
+    /// half-height, one tab bar, or with Properties closed). Kept apart from
+    /// `right_dock_width_wide` (two columns). Written only when chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_dock_width_wide_one: Option<u32>,
+    /// Custom arrangement of the Area Right Dock panes (`Palette`,
+    /// `Preview`, `Properties`). `None`: the shell's default (two columns
+    /// when wide, stacked otherwise). Written only when customized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area_right_layout: Option<AreaRightLayout>,
     /// The docks' layout for each kind of editor (by `Tab::kind`: "area",
     /// "script"…), as the builder left it (M4's U2): which panel is in
     /// front of each of the Right Dock's sections and of the Bottom Dock,
@@ -935,9 +1075,11 @@ pub struct Settings {
     pub drag_windows_anywhere: bool,
     /// Options > General: Minimize Toolset on test module.
     pub minimize_on_test: bool,
-    /// Options > General: Start a Steam copy through Steam for a test is
-    /// off (the game is started bare: no overlay, no Workshop content).
-    pub test_without_steam: bool,
+    // (`test_without_steam`, Options > General's Start a Steam copy of the
+    // game through Steam for a test, unticked, was retired in 5.1.0: a
+    // test follows Read Steam Workshop content,
+    // [`Settings::test_through_steam`]. An older file's is read and
+    // dropped, as any field this version does not have.)
     /// Options > General: Create backups of modules off (Aurora's default:
     /// on; the module as it was kept as `<name>.BackupMod` at each save).
     pub no_backups: bool,
@@ -1033,7 +1175,9 @@ pub struct Settings {
     /// started through Steam reads it. Off by default, as Aurora: an item
     /// subscribed to for play is not the module's (builders' asks; the
     /// setting was `no_workshop`, on by default, until 1.38, and is read
-    /// anew, so it is off for everyone until turned on).
+    /// anew, so it is off for everyone until turned on). It also decides
+    /// whether a test starts a Steam copy of the game through Steam
+    /// ([`Settings::test_through_steam`]).
     pub read_workshop: bool,
     /// Options > Folders: Read userpatch.ini's haks, as the game reads
     /// them. Off by default, as Aurora (the same reason).
@@ -1457,6 +1601,16 @@ impl Settings {
         self.game_shaders.unwrap_or(GAME_SHADERS_BY_DEFAULT)
     }
 
+    /// Whether Test Module starts a Steam copy of the game through Steam,
+    /// so that it loads the Workshop items subscribed to: where Moonglow
+    /// reads them too (Read Steam Workshop content), and only there, so
+    /// that the test and Moonglow's views show the same content (the
+    /// owner's ruling of 2026-11-22; a separate option, on by default,
+    /// had the test load what the views left out).
+    pub fn test_through_steam(&self) -> bool {
+        self.read_workshop
+    }
+
     /// The model viewer's Shadow switch ([`Settings::model_shadows`]).
     pub fn model_shadows(&self) -> bool {
         self.model_shadows.unwrap_or(true)
@@ -1714,6 +1868,45 @@ mod tests {
         let on = Settings { close_cancels: true, ..Settings::default() };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert!(back.close_cancels);
+    }
+
+    /// A 5.0.0 file with `test_without_steam` either way, and Read Steam
+    /// Workshop content either way, reads without an error, nothing
+    /// unread or kept aside, and is written back without the field: a
+    /// builder who reads the Workshop keeps tests through Steam, one who
+    /// doesn't (the default) gets them without Steam, whatever the old
+    /// field said (the owner's ruling of 2026-11-22).
+    #[test]
+    fn an_old_file_with_test_without_steam_reads_and_tests_follow_the_workshop() {
+        let tip = include_str!("../tests/fixtures/settings-tip-icons-only-false.ron").trim_end();
+        assert!(tip.contains("test_without_steam:false,") && tip.contains("read_workshop:false,"));
+        let dir = mg_testkit::scratch_dir("settings-old-test-without-steam");
+        let key = "moonglow-settings";
+        for without in [false, true] {
+            for workshop in [false, true] {
+                let text = tip
+                    .replace("test_without_steam:false,", &format!("test_without_steam:{without},"))
+                    .replace("read_workshop:false,", &format!("read_workshop:{workshop},"));
+                let (read, unread) = Settings::read_fields(&text).expect("it reads");
+                assert!(unread.is_empty(), "{unread:?}");
+                assert_eq!(read.read_workshop, workshop, "the Workshop as it was");
+                assert_eq!(read.test_through_steam(), workshop, "{without} {workshop}");
+                assert!(!read.saved_text().contains("test_without_steam"), "written without it");
+                let path = dir.join(format!("app-{without}-{workshop}.ron"));
+                let kv = std::collections::HashMap::from([(key.to_string(), text.clone())]);
+                std::fs::write(&path, ron::to_string(&kv).unwrap()).unwrap();
+                let r = Settings::read_eframe(&path, key);
+                assert!(r.unread.is_empty() && r.problem().is_none(), "{:?}", r.problem());
+                assert_eq!(r.kept, None, "nothing kept aside");
+                assert_eq!(r.settings, read);
+                let json =
+                    format!("{{\"test_without_steam\":{without},\"read_workshop\":{workshop}}}");
+                let from_json: Settings = serde_json::from_str(&json).unwrap();
+                assert_eq!(from_json.test_through_steam(), workshop, "{json}");
+            }
+        }
+        // Never touched: no Steam for a test.
+        assert!(!Settings::default().test_through_steam());
     }
 
     #[test]
@@ -2503,7 +2696,10 @@ mod tests {
             let back = read.saved_text();
             assert!(!back.contains("toolbar_icons_only"), "written without it");
             let old = fields_of(text).expect("fields");
-            let kept: Vec<_> = old.into_iter().filter(|(n, _)| n != "toolbar_icons_only").collect();
+            // (`test_without_steam` was retired in 5.1.0 too.)
+            let retired = ["toolbar_icons_only", "test_without_steam"];
+            let kept: Vec<_> =
+                old.into_iter().filter(|(n, _)| !retired.contains(&n.as_str())).collect();
             // (Three fields came after the file, two from develop's
             // Builders' asks and M5's W1's: written at their defaults, the
             // rest as it was.)
@@ -2544,5 +2740,75 @@ mod tests {
             .unwrap();
             assert_eq!(from_json, read, "JSON with the field reads as without it");
         }
+    }
+
+    #[test]
+    fn area_right_layout_normalizes_and_drops_properties_cleanly() {
+        let dirty = AreaRightLayout {
+            columns: vec![
+                vec![],
+                vec![vec![AreaRightPanel::Preview, AreaRightPanel::Preview], vec![]],
+                vec![vec![AreaRightPanel::Palette]],
+                vec![vec![AreaRightPanel::Properties]],
+            ],
+        };
+        let norm = dirty.normalized();
+        assert_eq!(
+            norm.columns,
+            vec![
+                vec![vec![AreaRightPanel::Preview]],
+                vec![vec![AreaRightPanel::Palette], vec![AreaRightPanel::Properties]],
+            ]
+        );
+        assert_eq!(
+            AreaRightLayout::two_columns().without_properties(),
+            vec![vec![vec![AreaRightPanel::Palette, AreaRightPanel::Preview]]]
+        );
+        assert_eq!(
+            AreaRightLayout::stacked().without_properties(),
+            vec![vec![vec![AreaRightPanel::Palette, AreaRightPanel::Preview]]]
+        );
+        assert_eq!(
+            AreaRightLayout::one_tab_bar().without_properties(),
+            vec![vec![vec![AreaRightPanel::Palette, AreaRightPanel::Preview]]]
+        );
+        assert_eq!(AreaRightLayout::default().normalized(), AreaRightLayout::two_columns());
+    }
+
+    #[test]
+    fn hide_properties_and_area_right_layout_omit_defaults_and_merge() {
+        let started = Settings::default();
+        let plain = started.saved_text();
+        assert!(!plain.contains("hide_properties"), "{plain}");
+        assert!(!plain.contains("right_dock_width_wide_one"), "{plain}");
+        assert!(!plain.contains("area_right_layout"), "{plain}");
+
+        let mut theirs = started.clone();
+        theirs.hide_properties = true;
+        theirs.right_dock_width_wide_one = Some(360);
+        theirs.area_right_layout = Some(AreaRightLayout::stacked());
+        let saved = theirs.saved_text();
+        assert!(saved.contains("hide_properties:true"), "{saved}");
+        assert!(saved.contains("right_dock_width_wide_one:Some(360)"), "{saved}");
+        assert!(saved.contains("area_right_layout:Some("), "{saved}");
+
+        // Another untouched window keeps theirs.
+        let merged: Settings = ron::from_str(&started.saved_over(&started, &saved)).unwrap();
+        assert!(merged.hide_properties);
+        assert_eq!(merged.right_dock_width_wide_one, Some(360));
+        assert_eq!(merged.area_right_layout, Some(AreaRightLayout::stacked()));
+
+        // Their reset to defaults is kept over our unchanged view of it.
+        let reset = started.saved_text();
+        let merged: Settings = ron::from_str(&theirs.saved_over(&theirs, &reset)).unwrap();
+        assert!(!merged.hide_properties);
+        assert_eq!(merged.right_dock_width_wide_one, None);
+        assert_eq!(merged.area_right_layout, None);
+
+        // Our own customization wins over theirs reset.
+        let mut mine = started.clone();
+        mine.area_right_layout = Some(AreaRightLayout::one_tab_bar());
+        let merged: Settings = ron::from_str(&mine.saved_over(&started, &reset)).unwrap();
+        assert_eq!(merged.area_right_layout, Some(AreaRightLayout::one_tab_bar()));
     }
 }

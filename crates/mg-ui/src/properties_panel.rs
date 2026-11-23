@@ -139,6 +139,24 @@ fn open_on(app: &Moonglow, area: ResRef, paths: &[GffPath]) -> Option<Tab> {
     docked.chain(app.panes_tabs.iter().flatten()).find(|t| theirs(t)).cloned()
 }
 
+/// The Hide Properties button's name (`hide_button`).
+pub const HIDE_PROPERTIES: &str = "Hide Properties";
+/// Its tip.
+pub const HIDE_PROPERTIES_TIP: &str = "Hide only the Properties panel";
+
+/// Icon button that hides only the Properties panel without hiding Palette
+/// or Preview.
+pub(crate) fn hide_button(ui: &mut Ui) -> bool {
+    let button = mg_uikit::IconButton::new(mg_uikit::Icon::Close, HIDE_PROPERTIES).icon_only(true);
+    ui.add(button).on_hover_text(HIDE_PROPERTIES_TIP).clicked()
+}
+
+/// Whether `editor`'s area currently has one or more editable objects of the
+/// same kind selected (not empty ground, the start location, or mixed kinds).
+pub(crate) fn editable_selected(app: &Moonglow, editor: Option<&Tab>) -> bool {
+    area_of(editor).is_some_and(|a| matches!(selected(app, a), Selected::Objects(_, _)))
+}
+
 /// Open in Tab, on the panel's header (at its bar's end, before the
 /// dock's fold button where that is there too): enabled while objects of
 /// one kind are selected. Whether it was clicked.
@@ -153,7 +171,8 @@ pub(crate) fn open_in_tab_button(app: &Moonglow, ui: &mut Ui, editor: Option<&Ta
 
 /// Opens today's Properties window on the selection of `editor`'s area
 /// (Open in Tab): a tab or a window, as Options' Open editors says, with
-/// OK and Cancel; on the page the panel shows.
+/// OK and Cancel; on the page the panel shows. Marks `Properties` popped out
+/// for this area until the popped-out tab is closed or popped back in.
 pub(crate) fn open_in_tab(app: &mut Moonglow, editor: Option<&Tab>) {
     let Some(area) = area_of(editor) else { return };
     let Some(tab) = window_of(app, area) else { return };
@@ -167,6 +186,17 @@ pub(crate) fn open_in_tab(app: &mut Moonglow, editor: Option<&Tab>) {
         && let Some(page) = app.panel_pages.get(&restype).copied()
     {
         app.blueprint_pages.insert((git, first), page);
+    }
+    pop_out(app, tab);
+}
+
+/// Opens `tab` (an object's Properties, or several objects', in a tab or
+/// a window) and closes the docked Properties pane of its area while it
+/// is open: Open in Tab, the right-click menus' Properties and a triple
+/// click on a Module Tree or Outliner row all do so.
+pub(crate) fn pop_out(app: &mut Moonglow, tab: Tab) {
+    if let Tab::Instance { area, .. } | Tab::Instances { area, .. } = &tab {
+        app.props_popped_out.insert(*area);
     }
     app.actions.push(Action::OpenTab(tab));
 }
@@ -236,17 +266,22 @@ pub(crate) fn panel(
     let focus = std::mem::take(&mut app.props_focus);
     if !titled {
         let mut opened = false;
+        let mut hidden = false;
         let margin = egui::Margin { left: 8, right: 4, top: 2, bottom: 2 };
         egui::Frame::new().inner_margin(margin).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.weak(detail(app, editor));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    hidden = hide_button(ui);
                     opened = open_in_tab_button(app, ui, editor);
                 });
             });
         });
         if opened {
             open_in_tab(app, editor);
+        }
+        if hidden {
+            app.settings.hide_properties = true;
         }
     }
     let (kind, indices) = match selected(app, area) {
@@ -306,10 +341,14 @@ pub(crate) fn panel(
     page = Some(pages[at]);
     app.panel_pages.insert(restype, pages[at]);
     // The page beside it, 8 in from the rail and 4 from the dock's edge,
-    // 8 under its top (the boards' `.content`); on one scroll, those are
-    // each page's margins, the scroll's bar at the dock's edge.
+    // 8 under its top and 4 above its foot (the boards' `.content`); on
+    // one scroll, those are each page's margins, the scroll's bar at the
+    // dock's edge. (At least a point high where the dock is that short.)
     let room = whole.with_min_x(whole.left() + mg_uikit::pages::PAGE_RAIL + 8.0);
-    let room = room.with_max_x(room.right() - 4.0).with_min_y(room.top() + 8.0);
+    let room = room
+        .with_max_x(room.right() - 4.0)
+        .with_min_y(room.top() + 8.0)
+        .with_max_y((whole.bottom() - 4.0).max(room.top() + 9.0));
     let room = match one_scroll {
         true => whole.with_min_x(whole.left() + mg_uikit::pages::PAGE_RAIL),
         false => room,
@@ -376,13 +415,11 @@ pub(crate) fn panel(
 }
 
 /// Whether the Properties panel drawn by `host` stands every page on one
-/// scroll: in the Right Dock of the wide layout alone (the WideArea board
-/// draws them so; Main, LightArea, Floating and AreaPaint at 1600 draw
-/// one page, and so does a dragged out area's window). By the window's
-/// width (`Yields::wide`), not the dock's or a column's, so that a seam
-/// or an edge dragged never turns it over.
+/// scroll: only in a dedicated full-height column of the Right Dock on
+/// ultrawide (`app.props_full_height`). When stacked half-height or tabbed in
+/// one column (even on ultrawide), it uses the single-page rail instead.
 pub(crate) fn one_scroll(app: &Moonglow, host: crate::shell::Host) -> bool {
-    host == crate::shell::Host::Dock && app.yields.wide
+    host == crate::shell::Host::Dock && app.yields.wide && app.props_full_height
 }
 
 /// What the panel says in place of the fields, in a page's room (8 in).

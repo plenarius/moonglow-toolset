@@ -3,7 +3,7 @@ type: Manual Page
 title: Blueprints
 description: Blueprints - the palettes in the Right Dock (types, Standard and Custom, search, List and Gallery, Group by, categories, the right-click menu), the Appearance Gallery, the blueprint editors (header with OK and Cancel, the page list and pages on one scroll, sections in columns, each kind's pages including a creature's Sound set and Faction on Basic), the wizards, Update Instances, and instances in the Properties panel.
 tags: [manual, blueprints, palettes]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-22T00:08:19Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T04:50:05Z }
 ---
 
 # Blueprints
@@ -447,7 +447,8 @@ to another, and a held item's own Properties, are for one at a time.
 
 Update Instances remakes each object placed from a blueprint, as Aurora's
 does. It keeps where the object stands, which way it faces, a trigger's
-or encounter's outline and a visual transform. Everything else comes from
+or encounter's outline (and an encounter's own outline color) and a
+visual transform. Everything else comes from
 the blueprint, including the object's tag, name, scripts, local variables
 and a door's transition. A window lists the objects it would change:
 - **Every area**, or **Only** the area shown (named).
@@ -1284,7 +1285,9 @@ has none).
 Triggers: Basic (generic, area transition or trap), Area Transition, Trap,
 Scripts, Advanced, Variables, Visuals, Comments. Encounters: Basic (difficulty, spawn option,
 the fewest and most creatures it spawns, 1 to 8: a minimum typed above the
-maximum raises the maximum to it, as Aurora's does; respawns), **Creature List** (from the creature palette, with unique
+maximum raises the maximum to it, as Aurora's does; respawns; on a
+placed encounter, its **Outline color** in the area view, Moonglow's own:
+see [Areas](04-areas.md)), **Creature List** (from the creature palette, with unique
 creatures marked; right-click a palette row and choose **Properties** to
 open the creature's blueprint), Scripts, Advanced, Variables, Comments.
 
@@ -1343,32 +1346,44 @@ selected, that its menu's **Adjust Location…** places it exactly. In an area a
 holds, in a project that keeps those read-only, the fields are only
 looked at.
 
-A double click on an object, in the area's view or on its row in the
-module tree or the Outliner, shows the panel in front, the Right Dock
-unfolded on it (in a window under 1400 points wide, its Properties tab
-between Palette and Preview); the object is selected, whatever key is
-held (a second click with Ctrl would take it out of the selection: a
-double click keeps it, with the others). In the panel's narrow room the
-pages fit its width: the fields fill it, the rows of several controls
-wrap, and a page's tables stand their columns under one another (a
-creature's ability scores show each total and bonus as "12 (+1)", the
-racial modifier in its tip). With the keyboard on the pages' icons (F6),
-Up and Down show the page before or after. In the wide layout (a window
-2560 points wide or more, [The main window](02-main-window.md)) the
-panel shows every page on one scroll instead, each under its heading
-in the icons' order, and the icons are its index: the page at the top
-is marked, a page clicked comes to the top (the page at the top
-clicked again brings its heading back), the wheel scrolls through
-them all, and Tab goes from page to page, the field it reaches scrolled
-into sight. Only the pages in sight are drawn. The page at the top is
-kept for each type of object, as the page shown is in a narrower
-window: another
-chest shows the place the last one was left at, and a narrower window
-shows that page alone. **Open in Tab**, at the
-panel's header's end (under 1400, at its top), and right-click ›
-**Properties** open the Properties window, a tab or a window as Tools › Options › General ›
-Open editors says, with **OK** and **Cancel**; while it is open, the
-panel leaves those objects' fields to it. Changing an instance changes
-neither its blueprint nor other instances. **Reuse › Add to
+A double click on an object in the area's view shows the Properties
+panel in front, the Right Dock unfolded on it (in a window under 1400
+points wide, its Properties tab between Palette and Preview); the object
+is selected, whatever key is held (a second click with Ctrl would take
+it out of the selection: a double click keeps it, with the others). A
+double click on its row in the module tree or the Outliner goes to it
+instead, and a third click opens its Properties in a tab or window, as
+below. **Hide Properties**, the × at the panel's header's end, hides the
+Properties pane alone until **View › Properties Panel** brings it back.
+In the panel's narrow room the pages fit its width: the fields fill it,
+scripts and conversations stay compactly aligned with their **…** and
+**Edit** on one line, and a page's tables stand their columns under one
+another (a creature's ability scores show each total and bonus as
+"12 (+1)", the racial modifier in its tip). With the keyboard on the
+pages' icons (F6), Up and Down show the page before or after. In the
+wide layout (a window 2560 points wide or more, [The main
+window](02-main-window.md)) the panel hides while nothing editable is
+selected, once the click is over: in **Two Columns** its column goes
+and the area gets that width back, in **Stacked** the palettes take the
+dock's whole height, and in **One Tab Bar** its tab leaves the bar. In
+its own full-height column (**Two Columns**) it shows every page on
+one scroll instead, each under its heading in the icons' order, and
+the icons are its index: the page at the top is marked, a page clicked
+comes to the top (the page at the top clicked again brings its heading
+back), the wheel scrolls through them all, and Tab goes from
+page to page, the field it reaches scrolled into sight. Only the pages
+in sight are drawn. The page at the top is kept for each type of object,
+as the page shown is in a narrower window: another chest shows the place
+the last one was left at, and a narrower window shows that page alone.
+**Stacked (Half-Height)** keeps it under the palettes at half the
+dock's height, one page shown. **Open in Tab**, at the panel's header's
+end (under 1400, at its top), an object's right-click › **Properties**
+(in the area's view, the module tree or the Outliner) and a triple click
+on its row open the Properties window, a tab or a window as Tools ›
+Options › General › Open editors says, with **OK** and **Cancel**, and
+close the docked Properties pane while it is open; **Pop In**, beside
+Maximize/Restore on the window's bar (or beside OK and Cancel on a
+docked Properties tab), puts them back in the Right Dock. Changing an instance changes neither its blueprint nor other
+instances. **Reuse › Add to
 Palette** (its right-click menu) turns an instance into a new custom
 blueprint, and **Update Instances** on a blueprint remakes its instances from it.

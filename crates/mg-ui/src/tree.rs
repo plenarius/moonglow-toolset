@@ -733,18 +733,11 @@ fn area_contents(ws: &Workspace, game: Option<&GameData>, area: ResRef) -> AreaC
 /// What was asked of an object in an area's list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Asked {
-    /// Shown in the area's view.
+    /// Shown and focused in the area's view.
     Go,
-    /// Selected in the area's view, the camera left where it is (a click
-    /// on the Outliner's row: its area is the one in front).
+    /// Selected in the area's view, the camera left where it is.
     Select,
     Properties,
-    /// Gone to (from the module tree) or selected (from the Outliner) and
-    /// shown in the Properties panel in front, the Right Dock unfolded (a
-    /// double click on its row, as on the object in the view: ruling Q1
-    /// and the coordinator's of U6's review); its menu's Properties opens
-    /// the window.
-    ShowProperties,
     /// Its variables, in the Variables window (as Aurora's list offers).
     Variables,
     /// In the model viewer, as it is placed.
@@ -793,6 +786,9 @@ pub(crate) fn contents_ui(
     commands: &[crate::plugins::PluginCommand],
     // The module tree's rows, or the Outliner's.
     look: Look,
+    // Whether the area is read-only here (another builder holds it): its
+    // menu leaves out Adjust Location…, as the area view's does.
+    read_only: bool,
 ) -> bool {
     let outliner = matches!(look, Look::Outliner { .. });
     let hide_empty = matches!(look, Look::Tree { hide_empty: true, .. });
@@ -964,14 +960,12 @@ pub(crate) fn contents_ui(
                     let r = if outliner {
                         // (Its name, and its tag weak after it, cut to the
                         // panel's width: `LightArea_crop_outl.png`.)
-                        let how = "Click to select it in the area, double-click for its \
-                                   Properties. Right-click for more.";
+                        let how = "Click to select, double-click to go to it, triple-click for Properties.";
                         let label = object_label(&object.name, &object.tag);
                         let row = mg_uikit::TreeRow::new(name).second(&object.tag).label(label);
                         row.selected(is_marked).show(ui).on_hover_ui(tip(how))
                     } else {
-                        let how = "Click to go to it in the area, double-click for its \
-                                   Properties. Right-click for more.";
+                        let how = "Click to select, double-click to go to it, triple-click for Properties.";
                         // (The kit's row, its fill across the whole row.)
                         // With tags shown, its name and its tag dimmed
                         // after it, as the Outliner's (said `Name (tag)`,
@@ -992,13 +986,14 @@ pub(crate) fn contents_ui(
                         // Chosen with the others (after the rows are laid
                         // out: `tree_rows`).
                         *picked = Some((TreeAt::Object(area, *kind, index), command, shift));
+                    } else if r.triple_clicked() {
+                        // (The second click went to it; the third opens its
+                        // Properties, as its menu's Properties does.)
+                        *go = Some((area, *kind, index, Asked::Properties));
                     } else if r.double_clicked() {
-                        *go = Some((area, *kind, index, Asked::ShowProperties));
+                        *go = Some((area, *kind, index, Asked::Go));
                     } else if r.clicked() {
-                        // (The Outliner's area is the one in front: its
-                        // click selects there, the camera where it is.)
-                        let asked = if outliner { Asked::Select } else { Asked::Go };
-                        *go = Some((area, *kind, index, asked));
+                        *go = Some((area, *kind, index, Asked::Select));
                     }
                     if r.clicked() {
                         *clicked = Some(TreeAt::Object(area, *kind, index));
@@ -1028,6 +1023,9 @@ pub(crate) fn contents_ui(
                             ("Properties", Asked::Properties),
                         ] {
                             if asked == Asked::Preview && (several || !previewable(*kind)) {
+                                continue;
+                            }
+                            if asked == Asked::Adjust && read_only {
                                 continue;
                             }
                             if asked == Asked::Variables {
@@ -2388,6 +2386,8 @@ fn tree_rows(app: &mut Moonglow, ui: &mut Ui, filter: &Needle, fold: Option<bool
                     }
                     if out {
                         let now = read_of(ws, k.resref);
+                        let access = ws.module.project_file.access(k.resref);
+                        let read_only = matches!(access, mg_module::claims::Access::ReadOnly(_));
                         match app.area_contents.get(&k.resref).filter(|c| c.0 == now) {
                             Some((_, contents)) => {
                                 let in_hand = app
@@ -2420,6 +2420,7 @@ fn tree_rows(app: &mut Moonglow, ui: &mut Ui, filter: &Needle, fold: Option<bool
                                     &mut keys,
                                     &menu_commands,
                                     Look::Tree { hide_empty, tags },
+                                    read_only,
                                 );
                                 picked = keys.picked.or(picked);
                                 together |= keys.together;
@@ -2963,7 +2964,9 @@ pub(crate) fn typed_row<T: Copy>(
         i.events.retain(|e| {
             let egui::Event::Text(t) = e else { return true };
             let on = going_on || !letters.is_empty();
-            let name_s = |c: char| (!c.is_whitespace() && !c.is_control()) || (c == ' ' && on);
+            let name_s = |c: char| {
+                (!c.is_whitespace() && !c.is_control() && (c != '.' || on)) || (c == ' ' && on)
+            };
             let taken = !t.is_empty() && t.chars().all(name_s);
             if taken {
                 letters.extend(t.chars());
@@ -3047,16 +3050,11 @@ pub(crate) fn act_on_object(
         }
         Asked::Properties if targets.len() > 1 => {
             let paths = targets.iter().copied().map(path).collect();
-            app.actions.push(Action::OpenTab(Tab::Instances { area, paths }));
+            crate::properties_panel::pop_out(app, Tab::Instances { area, paths });
         }
         Asked::Properties => {
             let path = path((kind, index));
-            app.actions.push(Action::OpenTab(Tab::Instance { area, path }));
-        }
-        Asked::ShowProperties => {
-            let then = if in_tree { Asked::Go } else { Asked::Select };
-            act_on_object(app, ui, (area, kind, index, then), together, menu_commands, in_tree);
-            app.actions.push(Action::ShowProperties(area));
+            crate::properties_panel::pop_out(app, Tab::Instance { area, path });
         }
         Asked::Variables => crate::widgets::open_variables(app, git, path((kind, index))),
         Asked::Preview => {
@@ -3099,7 +3097,20 @@ pub(crate) fn act_on_object(
             }
             app.actions.push(Action::OpenTab(Tab::Area(area)));
         }
-        Asked::Select => select_in_view(app, area, vec![(kind, index)]),
+        Asked::Select => {
+            if in_tree {
+                app.tree_object = Some((area, kind, index));
+                app.tree_object_pending = false;
+                app.tree_objects = Some((area, [(kind, index)].into()));
+                app.tree_objects_anchor =
+                    Some(Anchor::new(&app.area_contents, area, (kind, index)));
+                app.area_select = Some((area, vec![(kind, index)]));
+                select_in_view(app, area, vec![(kind, index)]);
+                app.actions.push(Action::OpenTab(Tab::Area(area)));
+            } else {
+                select_in_view(app, area, vec![(kind, index)]);
+            }
+        }
         Asked::Copy => {
             // As Copy in the area's view: pasted in any area (Ctrl+V),
             // each as high above the ground as it stands (the area's
@@ -3195,6 +3206,7 @@ pub(crate) fn select_in_view(app: &mut Moonglow, area: ResRef, selection: Vec<Pl
         if !selection.is_empty() {
             view.tile_mode = false;
             view.tile_selection.clear();
+            view.start_selected = false;
         }
         view.selection = selection;
     }
