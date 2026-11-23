@@ -136,7 +136,24 @@ pub struct Plugins {
     /// The open panels (API 0.6), by plugin and panel id: what each
     /// showed last, and its render under way.
     pub panels: std::collections::HashMap<(String, String), crate::plugin_kinds::PanelState>,
+    /// The network plugins' commands reach (API 0.10), made when one
+    /// first does: HTTPS, and the system's keychain for sign-ins.
+    pub network: Option<mg_plugin::Network>,
+    /// What a sign-in's question's buttons asked for, done the next frame
+    /// it is drawn: the page opened (true), or the code copied.
+    sign_in_asked: Option<bool>,
 }
+
+/// What a plugin's job holds of the network: the network, and the hosts
+/// the user allowed it (kept in the settings, `net:HOST`, once it ends).
+#[derive(Clone)]
+struct NetGrants {
+    network: mg_plugin::Network,
+    allowed: Arc<Mutex<std::collections::BTreeSet<String>>>,
+}
+
+/// How a host the user allowed a plugin is kept among its grants.
+const NET_GRANT: &str = "net:";
 
 /// A pane whose selection a plugin's command may run on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,6 +607,8 @@ struct JobHost {
     answers: RefCell<VecDeque<Option<Answer>>>,
     /// An event's job: what was allowed before is not asked again.
     granted: Option<Granted>,
+    /// A plugin's job that may reach the network (API 0.10).
+    net: Option<NetGrants>,
 }
 
 impl Host for JobHost {
@@ -614,7 +633,28 @@ impl Host for JobHost {
         self.ask.is_some() && self.answers.borrow().is_empty()
     }
 
+    fn network(&self) -> Option<mg_plugin::Network> {
+        self.net.as_ref().map(|n| n.network.clone())
+    }
+
     fn ask(&self, question: &Question) -> Option<Answer> {
+        // (Hosts allowed once are not asked about again.)
+        if let (Question::Network { hosts, .. }, Some(net)) = (question, &self.net) {
+            if hosts
+                .iter()
+                .all(|h| net.allowed.lock().unwrap_or_else(|e| e.into_inner()).contains(h))
+            {
+                return Some(Answer::Yes);
+            }
+            let answer = match self.answers.borrow_mut().pop_front() {
+                Some(answer) => answer,
+                None => self.ask.as_ref()?.ask(question.clone(), &self.progress),
+            };
+            if answer == Some(Answer::Yes) {
+                net.allowed.lock().unwrap_or_else(|e| e.into_inner()).extend(hosts.iter().cloned());
+            }
+            return answer;
+        }
         // (A folder chosen, a yes: not what a form was filled with.)
         let lasting = matches!(question, Question::Folder { .. } | Question::Confirm(_));
         let key = format!("{question:?}");
@@ -671,6 +711,7 @@ pub(crate) fn check_findings(
                 ask: None,
                 answers: RefCell::default(),
                 granted: None,
+                net: None,
             });
             let input = Input {
                 settings: Some(settings.clone()),
@@ -1188,11 +1229,84 @@ impl Moonglow {
     }
 
     /// Forgets what a plugin's events were allowed (it asks again): when
-    /// it is enabled or disabled, removed, or installed anew.
+    /// it is enabled or disabled, removed, or installed anew. The hosts
+    /// it was allowed go too, and it is signed out of its sign-ins.
     pub fn forget_plugin_grants(&mut self, id: &str) {
         let of = |p: &str| p.split_once(' ').is_some_and(|(i, _)| i == id);
         self.plugins.granted.retain(|name, _| !of(name));
         self.settings.plugin_grants.retain(|(p, _, _)| !of(p));
+        self.sign_out_plugin(id);
+    }
+
+    /// Signs a plugin out of the services its manifest signs in to (API
+    /// 0.10): its tokens revoked at the issuer, on a thread, and deleted
+    /// from the keychain.
+    pub fn sign_out_plugin(&mut self, id: &str) {
+        let found = (self.plugins.installed.iter())
+            .filter_map(|i| i.plugin.as_ref().ok())
+            .find(|p| p.manifest.id == id && !p.manifest.signins.is_empty())
+            .map(|p| p.manifest.signins.clone());
+        let Some(signins) = found else { return };
+        let net = self.plugin_network();
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            for decl in &signins {
+                let _ = mg_plugin::signin::sign_out(&net, &id, decl);
+            }
+        });
+    }
+
+    /// The network plugins reach, made the first time it is asked for.
+    pub fn plugin_network(&mut self) -> mg_plugin::Network {
+        self.plugins
+            .network
+            .get_or_insert_with(|| {
+                let transport = Arc::new(mg_plugin::net::Http::new(false));
+                let keychain = Box::new(mg_plugin::signin::OsKeychain);
+                mg_plugin::Network::new(transport, Arc::new(mg_plugin::SignIns::new(keychain)))
+            })
+            .clone()
+    }
+
+    /// The network for a job of `plugin`, if its manifest declares hosts,
+    /// with the hosts the user allowed it before.
+    fn net_grants(&mut self, plugin: &Plugin) -> Option<NetGrants> {
+        if plugin.manifest.hosts().is_empty() {
+            return None;
+        }
+        let name = grants_name(plugin);
+        let allowed: std::collections::BTreeSet<String> = (self.settings.plugin_grants.iter())
+            .filter(|(p, _, a)| *p == name && a == "yes")
+            .filter_map(|(_, q, _)| q.strip_prefix(NET_GRANT).map(str::to_string))
+            .collect();
+        let network = self.plugin_network();
+        Some(NetGrants { network, allowed: Arc::new(Mutex::new(allowed)) })
+    }
+
+    /// Keeps the hosts a plugin's job was allowed among its grants (and in
+    /// what its events hold of them, which would put back the old list).
+    fn keep_net_grants(&mut self, name: &str, allowed: &Mutex<std::collections::BTreeSet<String>>) {
+        let allowed = allowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for host in allowed {
+            let question = format!("{NET_GRANT}{host}");
+            let kept = &mut self.settings.plugin_grants;
+            if !kept.iter().any(|(p, q, _)| p == name && *q == question) {
+                kept.push((name.to_string(), question.clone(), "yes".into()));
+            }
+            if let Some(g) = self.plugins.granted.get(name) {
+                g.lock().unwrap_or_else(|e| e.into_inner()).insert(question, Answer::Yes);
+            }
+        }
+    }
+
+    /// The hosts a plugin was allowed to reach, as kept (by its id: what
+    /// the Plugins tab shows every frame hashes no files).
+    pub fn plugin_hosts_allowed(&self, id: &str) -> Vec<String> {
+        let of = |p: &str| p.split_once(' ').is_some_and(|(i, _)| i == id);
+        (self.settings.plugin_grants.iter())
+            .filter(|(p, _, a)| of(p) && a == "yes")
+            .filter_map(|(_, q, _)| q.strip_prefix(NET_GRANT).map(str::to_string))
+            .collect()
     }
 
     /// Puts what the events' jobs were allowed into the settings, for the
@@ -1697,6 +1811,9 @@ impl Moonglow {
         self.plugins.form = None;
         self.plugins.ask = ask;
         let plugin_name = name.clone();
+        let net = plugin.as_ref().and_then(|p| self.net_grants(p));
+        let job_net = net.clone();
+        let net_kept = (plugin.as_ref().map(grants_name)).zip(net.map(|n| n.allowed));
         self.start_job(
             format!("{name}: {heading}"),
             move |job| {
@@ -1706,11 +1823,15 @@ impl Moonglow {
                     ask: job_ask,
                     answers: RefCell::new(answers),
                     granted,
+                    net: job_net,
                 });
                 let input = Input::new(job.module.clone(), job.game.clone());
                 run(input, host)
             },
             move |app, result| {
+                if let Some((name, allowed)) = &net_kept {
+                    app.keep_net_grants(name, allowed);
+                }
                 app.plugin_finished(&job_name, &title, console, quiet, result, &log);
                 // (Its panels show what it did.)
                 if let Some(p) = &plugin {
@@ -2048,6 +2169,40 @@ pub(crate) fn question_ui(
             ui.weak("It can read the files in the folder you choose, and nothing outside it.");
             Foot::new().main("Choose Folder…", true).cancel()
         }
+        Question::Network { plugin, hosts } => {
+            ui.label(format!("{plugin} wants to send and receive data with {}.", hosts.join(", ")));
+            ui.weak(
+                "It can send what it reads of your module there. You are asked once; Forget \
+                 on the Plugins tab takes it back.",
+            );
+            Foot::new().main("Allow", true).no_enter().leave("Don't Allow")
+        }
+        Question::SignIn(code) => {
+            match app.plugins.sign_in_asked.take() {
+                Some(true) => {
+                    let at = code.uri_complete.as_deref().unwrap_or(&code.uri);
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(at));
+                }
+                Some(false) => ui.ctx().copy_text(code.code.clone()),
+                None => {}
+            }
+            // (The issuer answering ends the wait: drawn again to see it.)
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+            ui.label(format!("{} signs you in to {}.", code.plugin, code.service));
+            ui.horizontal(|ui| {
+                ui.label("Go to");
+                ui.monospace(&code.uri);
+            });
+            ui.horizontal(|ui| {
+                ui.label("and enter");
+                ui.label(egui::RichText::new(&code.code).monospace().strong().size(18.0));
+            });
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Waiting for you to approve it there…");
+            });
+            Foot::new().main("Open Browser", true).button("Copy Code", true).cancel()
+        }
     };
     preview_picked(app, picked);
     Some((foot, question))
@@ -2100,6 +2255,26 @@ pub(crate) fn question_answer(
             if main || back {
                 let values = form_values(app, question, &page.fields).clone();
                 ask.answer(Some(Answer::Page { values: named(&page.fields, &values), back }));
+            } else if cancelled {
+                ask.answer(None);
+            }
+        }
+        Question::Network { .. } => {
+            if main {
+                ask.answer(Some(Answer::Yes));
+            }
+            if cancelled {
+                ask.answer(Some(Answer::No));
+            }
+        }
+        Question::SignIn(code) => {
+            // (The issuer answered: the job reads what it said.)
+            if code.waiting.done() {
+                ask.answer(Some(Answer::Yes));
+            } else if main {
+                app.plugins.sign_in_asked = Some(true);
+            } else if pressed.clicked("Copy Code") {
+                app.plugins.sign_in_asked = Some(false);
             } else if cancelled {
                 ask.answer(None);
             }
@@ -2361,6 +2536,13 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
     let (mut reload, mut toggle, mut run_console, mut install) = (false, None, false, false);
     let mut remove = None;
     let mut forgotten = None;
+    let mut sign_out = None;
+    let hosts_allowed: std::collections::HashMap<String, Vec<String>> = (app.plugins.installed)
+        .iter()
+        .filter_map(|i| i.plugin.as_ref().ok())
+        .filter(|p| !p.manifest.hosts().is_empty())
+        .map(|p| (p.manifest.id.clone(), app.plugin_hosts_allowed(&p.manifest.id)))
+        .collect();
     let (mut toggle_project, mut open_settings, mut run_tests) = (None, None, None);
     let allowed: std::collections::HashMap<String, usize> = (app.plugins.installed.iter())
         .filter_map(|i| i.plugin.as_ref().ok())
@@ -2383,7 +2565,8 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
                  and panels. It reads the open module and the game data \
              and hands back changes that Undo takes back; it cannot reach your files, the \
              network or other programs, but for a file or a folder you choose for it and \
-             what you allow it to write there. Each is off until you enable it.",
+             what you allow it to write there, and the hosts it names once you allow them. \
+             Each is off until you enable it.",
         );
         ui.weak(format!(
             "Plugins are experimental: the plugin API ({}) is new, and a later release may \
@@ -2565,6 +2748,11 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
                             };
                             ui.weak(format!("{by}License: {}.", m.license));
                             adds(ui, m);
+                            // What it may reach, shown before it is ever enabled.
+                            if !m.network.is_empty() || !m.signins.is_empty() {
+                                let allowed = hosts_allowed.get(&m.id).cloned().unwrap_or_default();
+                                net_line(ui, m, &allowed, &mut sign_out);
+                            }
                             let allowed = allowed.get(&m.id).copied().unwrap_or(0);
                             if allowed > 0 {
                                 ui.horizontal(|ui| {
@@ -2573,7 +2761,8 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
                                     ));
                                     let forget = ui.small_button("Forget").on_hover_text(
                                         "It asks again for the folder it writes into, \
-                                             and for your leave",
+                                             the hosts it reaches and for your leave, and is \
+                                             signed out",
                                     );
                                     if forget.clicked() {
                                         forgotten = Some(m.id.clone());
@@ -2629,6 +2818,10 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
     if let Some(id) = forgotten {
         app.forget_plugin_grants(&id);
     }
+    if let Some(id) = sign_out {
+        app.sign_out_plugin(&id);
+        app.log.info(format!("{id}: signed out"));
+    }
     if reload {
         app.plugins.install_note = None;
         app.load_plugins();
@@ -2642,6 +2835,41 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
     if run_console {
         app.run_console();
     }
+}
+
+/// A plugin's hosts on the Plugins tab: those it talks to and signs in
+/// at, which of them the user allowed, and Sign Out for its sign-ins.
+fn net_line(
+    ui: &mut egui::Ui,
+    m: &mg_plugin::Manifest,
+    allowed: &[String],
+    sign_out: &mut Option<String>,
+) {
+    let mut parts = Vec::new();
+    if !m.network.is_empty() {
+        parts.push(format!("Talks to: {}", m.network.join(", ")));
+    }
+    let issuers: Vec<String> = m.signins.iter().map(|s| s.host()).collect();
+    if !issuers.is_empty() {
+        parts.push(format!("signs in at {}", issuers.join(", ")));
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(parts.join(", "));
+        let state = if allowed.is_empty() {
+            "asks before its first request".to_string()
+        } else {
+            format!("allowed: {}", allowed.join(", "))
+        };
+        ui.weak(format!("({state})"));
+        if !m.signins.is_empty()
+            && ui
+                .small_button("Sign Out")
+                .on_hover_text("Revoke its sign-in and delete it from the system's keychain")
+                .clicked()
+        {
+            *sign_out = Some(m.id.clone());
+        }
+    });
 }
 
 /// The most width the Plugins tab's page takes: its lines are read, not

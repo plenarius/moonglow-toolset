@@ -2736,3 +2736,64 @@ fn u29_pictures_project_plugins_asked() {
         }
     }
 }
+
+/// API 0.10: a plugin's leave to reach its hosts is asked once, kept
+/// among its grants (`net:HOST`) and listed on the Plugins tab; Forget
+/// takes it back, and it asks again.
+#[test]
+fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
+    struct Stub;
+    impl mg_plugin::net::Transport for Stub {
+        fn send(&self, _: &mg_plugin::net::Request) -> Result<mg_plugin::net::Response, String> {
+            Ok(mg_plugin::net::Response { status: 200, headers: Vec::new(), body: b"ok".to_vec() })
+        }
+    }
+    let dir = mg_testkit::scratch_dir("ui-plugin-network");
+    let plugins = dir.join("plugins");
+    let p = plugins.join("net");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(
+        p.join("plugin.cfg"),
+        "[plugin]\nid = \"t.net\"\nname = \"Net\"\nversion = \"1\"\napi = \"0.10\"\n\
+         license = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
+         [command]\nid = \"get\"\ntitle = \"Get\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("main.luau"),
+        "local mg = require('@moonglow')\n\
+         mg.command('get', function(ctx)\n\
+           ctx.log:info('got ' .. ctx.net:request({ url = 'https://areas.example.org/x' }).body)\n\
+         end)\n",
+    )
+    .unwrap();
+    let mut app = app_with(Vec::new());
+    app.open_module(&sample_module(&dir));
+    app.plugin_dir = Some(plugins);
+    app.load_plugins();
+    let sign_ins = std::sync::Arc::new(mg_plugin::SignIns::in_memory());
+    app.plugins.network = Some(mg_plugin::Network::new(std::sync::Arc::new(Stub), sign_ins));
+    let mut h = harness(app, 1200.0, 900.0);
+    h.run();
+    h.state_mut().enable_plugin("t.net", true);
+    let got = |h: &Harness<'_, Moonglow>| {
+        h.state().log.entries.iter().filter(|(_, m)| m == "Net: got ok").count()
+    };
+    h.state_mut().plugins.answers.push_back(Some(mg_plugin::Answer::Yes));
+    h.state_mut().run_plugin_command("t.net", "get");
+    h.run_steps(4);
+    assert_eq!(got(&h), 1, "{:?}", h.state().log.entries);
+    assert_eq!(h.state().plugin_hosts_allowed("t.net"), ["areas.example.org"]);
+    // Not asked again (there is no answer to give).
+    h.state_mut().run_plugin_command("t.net", "get");
+    h.run_steps(4);
+    assert_eq!(got(&h), 2, "{:?}", h.state().log.entries);
+    // Forgotten: asked again, and a no is a no.
+    h.state_mut().forget_plugin_grants("t.net");
+    assert!(h.state().plugin_hosts_allowed("t.net").is_empty());
+    h.state_mut().plugins.answers.push_back(Some(mg_plugin::Answer::No));
+    h.state_mut().run_plugin_command("t.net", "get");
+    h.run_steps(4);
+    assert_eq!(got(&h), 2);
+    assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
+}

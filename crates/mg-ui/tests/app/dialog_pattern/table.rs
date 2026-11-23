@@ -35,7 +35,9 @@ pub(crate) const ORDERS: &[(&str, &[&str], Option<&str>)] = &[
     ("jobs.rs:window#1 Folder", &["Choose Folder…", "Cancel"], None),
     ("jobs.rs:window#1 Form", &["OK", "Cancel"], None),
     ("jobs.rs:window#1 Message", &["OK"], None),
+    ("jobs.rs:window#1 Network", &["Allow", "Don't Allow"], None),
     ("jobs.rs:window#1 Page", &["< Back", "Next >", "Cancel"], Some(PAGE)),
+    ("jobs.rs:window#1 SignIn", &["Open Browser", "Copy Code", "Cancel"], None),
     ("levelup_view.rs:window#1", &["OK", "Cancel"], None),
     ("manual.rs:about_window#1", &[], None),
     ("module_folder.rs:ui#1", &["Open Directory", "Open .mod File", "Cancel"], None),
@@ -121,6 +123,8 @@ pub(crate) const ENTER_WITHHELD: &[&str] = &[
     "project_commands.rs:window#1",
     // A plugin's Confirm (Yes: grants what it asks).
     "jobs.rs:window#1 Confirm",
+    // A plugin's leave to reach its hosts (Allow: grants it).
+    "jobs.rs:window#1 Network",
     // Changed Outside Moonglow (Keep Moonglow's: overwrites the file).
     "outside.rs:window#1",
 ];

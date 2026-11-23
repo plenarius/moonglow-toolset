@@ -264,6 +264,7 @@ pub(crate) fn run_wizard(
     host: Rc<dyn Host>,
 ) -> Result<Outcome, PluginError> {
     let sh = shared(plugin, input, &host);
+    sh.net.open.set(true);
     let canceled = std::cell::Cell::new(false);
     let reads_only = |what: &str| -> mlua::Result<()> {
         if changed(&sh) {

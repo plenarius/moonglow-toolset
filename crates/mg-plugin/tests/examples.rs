@@ -88,6 +88,7 @@ fn every_example_registers_what_it_declares() {
     assert_eq!(
         ids,
         [
+            "example.area-share",
             "example.builder-tags",
             "example.creature-report",
             "example.creature-sheet",
@@ -888,6 +889,8 @@ fn the_reference_says_what_the_code_has() {
             "ctx.ui" => "Ui",
             "ctx.hak" => "Hak",
             "ctx.terrain" => "Terrain",
+            "ctx.net" => "Net",
+            "ctx.signin" => "SignIn",
             "ctx.settings" => "Settings",
             "ctx.event" => "Event",
             "area" => "Area",
@@ -905,7 +908,7 @@ fn the_reference_says_what_the_code_has() {
         let Some(said) = call else { continue };
         let Some((owner, member)) = name.rsplit_once(['.', ':']) else { continue };
         let typed = match owner {
-            "mg" | "mg.twoda" | "mg.tlk" | "mg.vars" => {
+            "mg" | "mg.twoda" | "mg.tlk" | "mg.vars" | "mg.json" => {
                 let member = name.strip_prefix("mg.").unwrap_or(name);
                 typed_parameters(&types, None, member)
             }
@@ -981,6 +984,7 @@ fn the_type_file_has_the_whole_api() {
             Some(("mg", member)) => mg.contains_key(member).unwrap(),
             Some(("twoda", member)) => type_block(&types, "TwoDa").contains(&format!(" {member}:")),
             Some(("tlk", member)) => type_block(&types, "Tlk").contains(&format!(" {member}:")),
+            Some(("mg.json", member)) => types.contains(&format!("    {member} = ")),
             Some((ctx, member)) => {
                 // `ctx.module:gff` is `gff` of the type of `ctx.module`.
                 let of = match ctx {
@@ -991,6 +995,8 @@ fn the_type_file_has_the_whole_api() {
                     "ctx.ui" => "Ui",
                     "ctx.hak" => "Hak",
                     "ctx.terrain" => "Terrain",
+                    "ctx.net" => "Net",
+                    "ctx.signin" => "SignIn",
                     "area" => "Area",
                     "file" => "File",
                     "folder" => "Folder",

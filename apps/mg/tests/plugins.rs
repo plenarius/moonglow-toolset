@@ -1245,3 +1245,47 @@ fn a_wizard_is_answered_from_the_command_line() {
     assert!(ok);
     assert_eq!(listed["plugins"][0]["panels"][0]["refresh"], json!(["edits", "selection"]));
 }
+
+/// API 0.10: `mg plugin run` reaches no network unless it is named;
+/// `--allow-network-insecure` reaches a server on this computer.
+#[test]
+fn a_plugin_reaches_the_network_only_as_allowed() {
+    use std::io::{Read, Write};
+    let dir = mg_testkit::scratch_dir("mg-plugin-network");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{\"rev\":7}");
+        }
+    });
+    let plugin = dir.join("net");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("plugin.cfg"),
+        "[plugin]\nid = \"t.net\"\nname = \"Net\"\nversion = \"1\"\napi = \"0.10\"\n\
+         license = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
+         [command]\nid = \"get\"\ntitle = \"Get\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plugin.join("main.luau"),
+        format!(
+            "local mg = require('@moonglow')\n\
+             mg.command('get', function(ctx)\n\
+               local r = ctx.net:request({{ url = 'http://127.0.0.1:{port}/v1' }})\n\
+               ctx.log:info('rev ' .. tostring(mg.json.decode(r.body).rev))\n\
+             end)\n"
+        ),
+    )
+    .unwrap();
+    let module = module(&dir);
+    let (m, p) = (module.to_str().unwrap(), plugin.to_str().unwrap());
+    let (ok, out) = mg(&["plugin", "run", m, p, "get", "--dry-run"]);
+    assert!(!ok && out.to_string().contains("no network here"), "{out}");
+    let (ok, out) = mg(&["plugin", "run", m, p, "get", "--dry-run", "--allow-network-insecure"]);
+    assert!(ok && out.to_string().contains("rev 7"), "{out}");
+}

@@ -9,10 +9,11 @@ pub use mg_module::project_plugins::SettingValue;
 use mg_rules::ObjectKind;
 
 /// The plugin API this Moonglow serves (a manifest's `api`).
-pub const API: &str = "0.9";
+pub const API: &str = "0.10";
 /// The APIs a plugin may be written for: each later one has all of the
 /// ones before.
-pub const APIS: [&str; 9] = ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9"];
+pub const APIS: [&str; 10] =
+    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10"];
 
 /// What a manifest says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,6 +43,63 @@ pub struct Manifest {
     pub importers: Vec<ImporterDecl>,
     pub wizards: Vec<WizardDecl>,
     pub panels: Vec<PanelDecl>,
+    /// The hosts its code may send to and receive from (`[network]`, API
+    /// 0.10), once the user allows it: exact names, in lower case.
+    pub network: Vec<String>,
+    /// The services it signs the user in to (`[signin]`, API 0.10).
+    pub signins: Vec<SigninDecl>,
+}
+
+/// An OAuth 2.0 sign-in a plugin declares (`[signin]`, API 0.10): the
+/// host runs the device flow and keeps its tokens; the plugin names it
+/// by its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigninDecl {
+    pub id: String,
+    /// The OpenID issuer (its discovery document is under it).
+    pub issuer: String,
+    /// The public client's id (a device-flow client has no secret).
+    pub client: String,
+    pub scopes: String,
+}
+
+impl SigninDecl {
+    /// The issuer's host name.
+    pub fn host(&self) -> String {
+        crate::net::Url::parse(&self.issuer).map(|u| u.host).unwrap_or_default()
+    }
+}
+
+impl Manifest {
+    /// Every host its code may reach: the declared ones, then its sign-ins'
+    /// issuers, each once.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut all = self.network.clone();
+        for s in &self.signins {
+            let host = s.host();
+            if !all.contains(&host) {
+                all.push(host);
+            }
+        }
+        all
+    }
+}
+
+/// Whether a `[network]` host is a plain DNS name: lower-case labels of
+/// letters, digits and `-`, at least two, the last not all digits (no IP
+/// literals, wildcards or ports).
+fn is_host_name(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    let label_ok = |l: &&str| {
+        (1..=63).contains(&l.len())
+            && l.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    };
+    host.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(label_ok)
+        && !labels.last().is_some_and(|l| l.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// An exporter a plugin adds to File › Export (API 0.6): it writes a file
@@ -1086,6 +1144,8 @@ impl Manifest {
         let (mut commands, mut checks) = (Vec::<CommandDecl>::new(), Vec::<CheckDecl>::new());
         let mut events = Vec::<EventDecl>::new();
         let mut settings = Vec::<SettingDecl>::new();
+        let (mut network, mut signins) = (None::<(usize, Vec<String>)>, Vec::<SigninDecl>::new());
+        let mut since_0_10: Option<(usize, String)> = None;
         // (What API 0.6 added, read into a manifest of its own, and the
         // first section of it, for the error of an earlier `api`.)
         let mut of_0_6 = Manifest::default();
@@ -1151,6 +1211,8 @@ impl Manifest {
                         importers: Vec::new(),
                         wizards: Vec::new(),
                         panels: Vec::new(),
+                        network: Vec::new(),
+                        signins: Vec::new(),
                     });
                 }
                 "command" => {
@@ -1247,10 +1309,51 @@ impl Manifest {
                     since_0_6.get_or_insert((s.line, s.name.clone()));
                     kind_0_6(s, &mut of_0_6)?;
                 }
+                "network" => {
+                    since_0_10.get_or_insert((s.line, s.name.clone()));
+                    if network.is_some() {
+                        return Err(format!("line {}: a second [network] section", s.line));
+                    }
+                    let get = keys(s, &["hosts"])?;
+                    let hosts: Vec<String> = list_of(required(s, "hosts", get("hosts"))?);
+                    if let Some(h) = hosts.iter().find(|h| !is_host_name(h)) {
+                        return Err(format!(
+                            "line {}: {h:?} is not a host's name (lower case, no wildcards, IP \
+                             addresses or ports: \"api.example.org\")",
+                            s.line
+                        ));
+                    }
+                    network = Some((s.line, hosts));
+                }
+                "signin" => {
+                    since_0_10.get_or_insert((s.line, s.name.clone()));
+                    let get = keys(s, &["id", "issuer", "client", "scopes"])?;
+                    let id = id_of(s, get("id"))?;
+                    if signins.iter().any(|d| d.id == id) {
+                        return Err(format!("line {}: a second sign-in {id:?}", s.line));
+                    }
+                    let issuer = required(s, "issuer", get("issuer"))?;
+                    let url = crate::net::Url::parse(issuer)
+                        .map_err(|e| format!("line {}: the issuer {issuer:?}: {e}", s.line))?;
+                    if !url.secure && !url.local {
+                        return Err(format!("line {}: the issuer must be https://", s.line));
+                    }
+                    let scopes = match get("scopes") {
+                        "" => "openid",
+                        given => given,
+                    };
+                    signins.push(SigninDecl {
+                        id,
+                        issuer: issuer.to_string(),
+                        client: required(s, "client", get("client"))?.to_string(),
+                        scopes: scopes.split_whitespace().collect::<Vec<_>>().join(" "),
+                    });
+                }
                 other => {
                     return Err(format!(
                         "line {}: no section [{other}] (there are [plugin], [command], [check], \
-                         [event], [setting], [exporter], [importer], [wizard] and [panel])",
+                         [event], [setting], [exporter], [importer], [wizard], [panel], \
+                         [network] and [signin])",
                         s.line
                     ));
                 }
@@ -1331,6 +1434,16 @@ impl Manifest {
                 plugin.api
             ));
         }
+        if let Some((line, name)) = since_0_10
+            && api_before(&plugin.api, "0.10")
+        {
+            return Err(format!(
+                "line {line}: [{name}] is plugin API 0.10; the manifest says api = {:?}",
+                plugin.api
+            ));
+        }
+        plugin.network = network.map(|(_, h)| h).unwrap_or_default();
+        plugin.signins = signins;
         plugin.exporters = of_0_6.exporters;
         plugin.importers = of_0_6.importers;
         plugin.wizards = of_0_6.wizards;
@@ -1454,8 +1567,42 @@ severity = "error"
         }
         let e = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.6\"")).unwrap_err();
         assert!(e.contains("plugin API 0.7") && e.contains("\"fix-tags\""), "{e}");
-        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.10\"")).unwrap_err();
-        assert!(later.contains("0.10"), "{later}");
+        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.11\"")).unwrap_err();
+        assert!(later.contains("0.11"), "{later}");
+    }
+
+    /// API 0.10: the hosts a plugin talks to, and the services it signs
+    /// in to; held to plain names and https.
+    #[test]
+    fn a_plugin_declares_its_hosts_and_sign_ins() {
+        let with = |extra: &str| {
+            Manifest::parse(&format!(
+                "{}\n{extra}",
+                SAMPLE.replace("api = \"0.1\"", "api = \"0.10\"")
+            ))
+        };
+        let m = with(
+            "[network]\nhosts = \"builders.layonara.com, files.example.org\"\n\n[signin]\n\
+             id = \"layonara\"\nissuer = \"https://auth.layonara.com/application/o/x/\"\n\
+             client = \"x\"\nscopes = \"openid  profile offline_access\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.network, ["builders.layonara.com", "files.example.org"]);
+        assert_eq!(m.signins[0].scopes, "openid profile offline_access");
+        assert_eq!(m.signins[0].host(), "auth.layonara.com");
+        assert_eq!(m.hosts(), ["builders.layonara.com", "files.example.org", "auth.layonara.com"]);
+        for bad in ["*.example.org", "10.0.0.1", "example.org:443", "Example.org", "localhost", ""]
+        {
+            let e = with(&format!("[network]\nhosts = \"{bad}\"\n")).unwrap_err();
+            assert!(e.contains("host") || e.contains("needs hosts"), "{bad}: {e}");
+        }
+        let e =
+            with("[signin]\nid = \"a\"\nissuer = \"http://auth.example.org/\"\nclient = \"c\"\n");
+        assert!(e.unwrap_err().contains("https://"));
+        let e = with("[signin]\nid = \"a\"\nissuer = \"https://a.org/\"\n").unwrap_err();
+        assert!(e.contains("needs client"), "{e}");
+        let old = Manifest::parse(&format!("{SAMPLE}\n[network]\nhosts = \"a.example.org\"\n"));
+        assert!(old.unwrap_err().contains("[network] is plugin API 0.10"));
     }
 
     /// API 0.5: a command for placed objects alone or blueprints alone,

@@ -151,6 +151,11 @@ minisign = "0.10"
 # Windows and macOS builds need nothing of the system's; no gzip, no
 # proxies of the registry. The CLI doesn't call it.)
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# (A plugin's sign-in kept between runs, its refresh token in the system's
+# keychain: Windows' Credential Manager, the macOS Keychain, the Secret
+# Service over zbus, already in the tree; no libdbus or OpenSSL. MIT or
+# Apache-2.0, open-source-cooperative's maintained line.)
+keyring = "4"
 toml = "1"
 # (Writing the project file's plugin tables in place, the rest of it as written.)
 toml_edit = "0.25"

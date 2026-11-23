@@ -3,7 +3,7 @@ type: Manual Page
 title: Writing plugins
 description: Writing plugins - a first plugin, how a plugin runs (events too, a resource's own around a save and the after-create hook), the manifest, reading and editing the module, commands on what is selected, the game's data, talking to the user, settings (ctx.settings, their scopes and where each is kept), files and haks outside the module, areas and terrain, exporters and importers, wizards, panels, checks and the fixes of their findings, several files, trying and testing (a plugin's own tests, mg plugin test), editor types, versions, sharing, and a project's own plugins.
 tags: [manual, plugins, luau]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-21T23:55:14Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 ---
 
 # Writing plugins
@@ -17,7 +17,7 @@ plugin can call. What plugins are to the people who use them is in
 
 You need a text editor and Moonglow. Nothing is compiled or built.
 
-The plugin API is **experimental** (version 0.9): it may change in a
+The plugin API is **experimental** (version 0.10): it may change in a
 later release, and Versions, below, says what that means for a plugin.
 
 ## A first plugin
@@ -123,10 +123,12 @@ has no other way to change anything.
 **A sandbox.** The code has [Luau's own libraries](https://luau.org/library)
 (`string`, `table`, `math`, `utf8`, `bit32`, `buffer`, `vector`,
 `coroutine`, and of `os` only the clock and the date) and `ctx`. There
-are no files of its own choosing, no network, no other programs, and the
-libraries can't be replaced. What it reaches outside the module, the
-user hands it: a file or a folder they choose for it to read, and a hak
-or that folder if they allow it to write ([Outside the module](#outside-the-module)). `print` writes to the log. A job may use 256 MB of memory, and Moonglow holds up to 512 MB more for it (its tables, pictures, edits and files to write: [Limits](17-plugin-api.md#limits)).
+are no files of its own choosing, no network but the hosts its manifest
+declares, no other programs, and the libraries can't be replaced. What
+it reaches outside the module, the user hands it: a file or a folder
+they choose for it to read, a hak or that folder if they allow it to
+write ([Outside the module](#outside-the-module)), and its hosts if they
+allow it to reach them ([The network](#the-network)). `print` writes to the log. A job may use 256 MB of memory, and Moonglow holds up to 512 MB more for it (its tables, pictures, edits and files to write: [Limits](17-plugin-api.md#limits)).
 **Cancel** stops it between any two steps, even in a loop that never
 ends; `pcall` does not catch that.
 
@@ -235,7 +237,7 @@ running the plugin, to list what it adds.
 | `id` | Needed. The plugin's name for programs, the same wherever it is installed: `author.plugin-name`, in lower-case letters, digits, `.`, `-` and `_`. Settings and keys are kept under it, so don't change it between versions. |
 | `name` | Needed. Its name for people. |
 | `version` | Needed. The plugin's own version, as you number it. |
-| `api` | Needed. The plugin API it was written for: `"0.9"`, or an earlier one (`"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
+| `api` | Needed. The plugin API it was written for: `"0.10"`, or an earlier one (`"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
 | `license` | Needed. Its license, as an [SPDX](https://spdx.org/licenses/) name. Moonglow is GPL-3.0, and a plugin runs inside it: choose a license compatible with the GPL (`GPL-3.0-or-later`, `MIT`, `Apache-2.0`…). |
 | `description` | One or two sentences on what it does, shown on the Plugins tab. |
 | `author` | Who wrote it. Repeat the line for each author. |
@@ -323,6 +325,22 @@ importers](#exporters-and-importers)):
 | `title` | Needed. Its name in Plugins › Panels and its tab's (or window's) title. |
 | `hint` | What its tip says. |
 | `refresh` | When it is drawn again besides when it opens, by its Refresh and after a job of the plugin's: `"edits"` (each change of the module), `"selection"` (what is selected changes), both (`"edits, selection"`) or, left out, neither. |
+
+`[network]`, once (since API 0.10; [The network](#the-network)):
+
+| Key | |
+| --- | --- |
+| `hosts` | Needed. The hosts the plugin may send to and receive from, as a list (`"api.example.org, files.example.org"`): exact names in lower case, no wildcards, IP addresses or ports. |
+
+`[signin]`, once for each service the plugin signs the user in to
+(since API 0.10; [Signing in](#signing-in)):
+
+| Key | |
+| --- | --- |
+| `id` | Needed. The id the code names it by (`ctx.signin:start("example")`, `signin = "example"`). |
+| `issuer` | Needed. The OpenID issuer, `https://`: its discovery document is `issuer/.well-known/openid-configuration`, and it must offer the device flow. Its host is reached for signing in alone, and is shown and asked about with `[network]`'s. |
+| `client` | Needed. The client's id, a public client's: a device-flow client has no secret, and a plugin has nowhere to keep one. |
+| `scopes` | The scopes asked for, separated by spaces; `"openid"` if left out. `offline_access` is what gets a refresh token, so that the user signs in once. |
 
 A key or a section Moonglow doesn't know is an error (a misspelled one,
 most likely), and so is a command declared but not registered, or
@@ -732,6 +750,57 @@ step of Undo: say what it writes in its title or its form.
 what the plugin computed (past 64 MB of it, all of a job's haks
 together, what it writes waits in a scratch file rather than in memory
 until the hak is written).
+
+## The network
+
+A plugin that declares hosts (`[network]`; since API 0.10) sends
+requests to them with `ctx.net:request`, over HTTPS, from a command or a
+wizard (a check, an event's handler, a panel's view, an exporter and an
+importer reach none). Before the first, Moonglow asks the user, once for
+all the plugin's hosts; the answer is kept for the plugin's code as it
+is, so a plugin that changes asks again.
+
+```lua
+local r = ctx.net:request({
+  method = "POST",
+  url = "https://areas.example.org/v1/areas/tavern",
+  json = { note = "from Moonglow", are = mg.json.raw(ctx.module:json("tavern.are")) },
+})
+if not r.ok then error("the service answered " .. r.status) end
+local answer = mg.json.decode(r.body)
+```
+
+A GFF goes as its JSON (`ctx.module:json`: what `mg gff` writes, every
+field with its type) and comes back with `ctx.edit:write_json`, one step
+of Undo like any edit. `mg.json` encodes and decodes losslessly: a
+64-bit field's number keeps all its digits, which a Luau number doesn't
+(it is a raw value, which encodes as it was), and `mg.json.raw` puts
+JSON text into a value as it is. An error status is an answer; no answer
+(no connection, 30 seconds gone) is an error, and so is Cancel.
+
+### Signing in
+
+A service that needs the user to sign in is declared with `[signin]`:
+Moonglow runs the OAuth 2.0 device flow against its issuer, shows the
+code, and keeps the tokens; the plugin names the sign-in, and never sees
+a token.
+
+```lua
+mg.command("sign-in", function(ctx)
+  local s = ctx.signin:start("example")      -- the code shown until the user approves it
+  if s.signed_in then ctx.log:info("Signed in as " .. (s.name or "someone")) end
+end)
+
+-- …and in a request: its access token is the Authorization header.
+ctx.net:request({ url = "https://areas.example.org/v1/me", signin = "example" })
+```
+
+The refresh token is kept in the system's keychain; an access token that
+has run out, or is refused, is replaced from it before the request goes
+(once). `ctx.signin:status(id)` says whether the user is signed in,
+without the network, and `ctx.signin:stop(id)` signs out (the issuer is
+told). The example `area-share` (`docs/plugins/examples`) signs in, sends
+an area and fetches it back.
 
 ## Areas and terrain
 
