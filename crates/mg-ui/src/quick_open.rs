@@ -1185,6 +1185,7 @@ pub(crate) fn runs_from_field(id: Id) -> bool {
         | Id::FullScreen
         | Id::ViewTree
         | Id::ViewPalettes
+        | Id::ViewProperties
         | Id::ViewLog
         | Id::CopyLog
         | Id::CloseReport

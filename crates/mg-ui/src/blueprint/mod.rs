@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use egui::Ui;
-use mg_core::{LocString, ResRef, ResType};
+use mg_core::{ResRef, ResType};
 use mg_edit::{Command, Edit, GffPath, lists};
 use mg_gff::{FieldType, Struct, Value};
 use mg_module::palette::BlueprintKind;
@@ -17,9 +17,7 @@ use mg_rules::Choice;
 
 use crate::dialogs::FileKind;
 use crate::text::{decode, encode, with_edited_text};
-use crate::widgets::{
-    FieldTarget, LocStringEdit, VarTableEdit, commit_number, commit_text, resref_field,
-};
+use crate::widgets::{FieldTarget, LocStringEdit, VarTableEdit, commit_number, resref_field};
 use crate::{Action, Moonglow, Tab};
 
 mod creature;
@@ -392,6 +390,18 @@ pub(crate) fn ok_cancel_header(
     viewed: bool,
     tips: [&str; 2],
 ) -> Option<Pressed> {
+    ok_cancel_header_with(ui, title, viewed, tips, false).0
+}
+
+/// [`ok_cancel_header`], optionally with a `Pop In` button before `OK`/`Cancel`
+/// (shown when an instance Properties editor is docked as a main-surface tab).
+fn ok_cancel_header_with(
+    ui: &mut Ui,
+    title: &Title<'_>,
+    viewed: bool,
+    tips: [&str; 2],
+    pop_in: bool,
+) -> (Option<Pressed>, bool) {
     use mg_uikit::KitButton;
     let font = egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE);
     let measure = |text: &str| {
@@ -400,13 +410,20 @@ pub(crate) fn ok_cancel_header(
         galley.size().x
     };
     const GAP: f32 = 8.0;
-    let buttons: Vec<KitButton> = match viewed {
-        true => vec![KitButton::new(None, "Close")],
-        false => vec![
-            KitButton::new(None, "OK").tip(tips[0]),
-            KitButton::new(None, "Cancel").tip(tips[1]),
-        ],
-    };
+    let mut buttons: Vec<KitButton> = Vec::new();
+    if pop_in {
+        buttons.push(
+            KitButton::new(Some(crate::icons::POP_IN), "Pop In")
+                .tip("Put these properties back in the Properties panel"),
+        );
+    }
+    match viewed {
+        true => buttons.push(KitButton::new(None, "Close")),
+        false => {
+            buttons.push(KitButton::new(None, "OK").tip(tips[0]));
+            buttons.push(KitButton::new(None, "Cancel").tip(tips[1]));
+        }
+    }
     let gap = mg_uikit::header::HEADER_GAP;
     let end_width = buttons.iter().map(|b| b.width(ui)).sum::<f32>()
         + gap * (buttons.len() as f32 - 1.0).max(0.0);
@@ -459,13 +476,19 @@ pub(crate) fn ok_cancel_header(
         .show_with_end(ui, end_width, |ui| {
             ui.spacing_mut().item_spacing.x = gap;
             let mut pressed = None;
+            let mut popped_in = false;
             for b in buttons {
                 let words = b.accessible_name().to_string();
                 if ui.add(b).clicked() {
-                    pressed = Some(if words == "Cancel" { Pressed::Cancel } else { Pressed::Ok });
+                    if words == "Pop In" {
+                        popped_in = true;
+                    } else {
+                        pressed =
+                            Some(if words == "Cancel" { Pressed::Cancel } else { Pressed::Ok });
+                    }
                 }
             }
-            pressed
+            (pressed, popped_in)
         });
     out.end
 }
@@ -988,19 +1011,6 @@ impl Form<'_> {
         }
     }
 
-    /// A text field of a localized string, in the talk table's color where
-    /// that is where its text is from, with the StrRef beside it.
-    fn loc_text(
-        &mut self,
-        ui: &mut Ui,
-        label: &str,
-        current: &LocString,
-        multiline: bool,
-        width: f32,
-    ) -> Option<String> {
-        crate::widgets::loc_text(self.app, ui, self.id(label), current, multiline, width)
-    }
-
     /// An item's Properties, from the inventory that holds it (item `index`
     /// of `list` in the struct at `at`): a placed object's item is its own,
     /// edited where it is held; a blueprint's is its blueprint (the
@@ -1426,7 +1436,16 @@ impl Form<'_> {
         self.mark_mixed(ui, label);
         let current = decode(self.root.string(label).unwrap_or_default());
         let id = self.id(label);
-        if let Some(v) = commit_text(self.app, ui, id, &current, true, f32::INFINITY) {
+        let rows = if panel_scroll(ui) { Some(3) } else { Some(6) };
+        if let Some(v) = crate::widgets::commit_text_in(
+            &mut self.app.buffers,
+            ui,
+            id,
+            &current,
+            rows,
+            f32::INFINITY,
+            None,
+        ) {
             self.set(what, label, Value::String(encode(&v)));
         }
         self.hold_text(ui, what, label, &current, false, |text| Value::String(encode(&text)));
@@ -1580,14 +1599,32 @@ impl Form<'_> {
         let current = self.root.locstring(label).cloned().unwrap_or_default();
         let language = crate::text::edit_language().name().unwrap_or("?");
         let mut languages = false;
-        mg_uikit::form::section_heading_with(ui, what, Some(language), |ui| {
-            languages = crate::widgets::languages_button(ui);
-        });
+        let in_panel_scroll = panel_scroll(ui);
+        let duplicate = panel_page(ui).as_deref() == Some(what);
+        if duplicate {
+            // (The panel's page heading already names this page: show only the
+            // language note and the languages button on one compact row.)
+            ui.horizontal(|ui| {
+                ui.weak(language);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    languages = crate::widgets::languages_button(ui);
+                });
+            });
+        } else {
+            mg_uikit::form::section_heading_with(ui, what, Some(language), |ui| {
+                languages = crate::widgets::languages_button(ui);
+            });
+        }
         if languages {
             self.app.loc_edit = Some(LocStringEdit::new(self.target(label), what, &current));
         }
         self.mark_mixed(ui, label);
-        if let Some(v) = self.loc_text(ui, label, &current, true, f32::INFINITY) {
+        // (Three lines inside the panel's scroll of every page, six
+        // elsewhere.)
+        let rows = Some(if in_panel_scroll { 3 } else { 6 });
+        let id = self.id(label);
+        let typed = crate::widgets::loc_text(self.app, ui, id, &current, rows, f32::INFINITY);
+        if let Some(v) = typed {
             self.set_typed(what, label, Value::LocString(with_edited_text(current.clone(), &v)));
         }
         let shown = crate::widgets::loc_shown(self.app, &current).0;
@@ -1839,6 +1876,85 @@ impl Form<'_> {
             if v != current {
                 self.set_int(what, label, i64::from(v), FieldType::Dword);
             }
+        }
+    }
+
+    /// A placed outline's own color (Moonglow's `MG_OutlineColor`, a
+    /// DWORD 0x00BBGGRR the game and Aurora don't read), with the picker
+    /// and its `swatches`, shown as `default` (its kind's) where it has
+    /// none. Each pick is stored at once, one command: a swatch, a color
+    /// typed or pasted; a drag on the picker when the button is let go
+    /// (held, the color is shown, kept for this frame and the next only,
+    /// so it never lands later or on another object). Default takes the
+    /// field off (of each object edited together), enabled where any of
+    /// them has it, of any type.
+    pub(crate) fn outline_color(
+        &mut self,
+        ui: &mut Ui,
+        default: [u8; 3],
+        swatches: &[(&str, [u8; 3])],
+    ) {
+        let label = mg_area::OUTLINE_COLOR;
+        self.mark_mixed(ui, label);
+        let current = mg_rules::placement::outline_color(&self.root);
+        let differs = self.differs(label);
+        let pending_id = self.id(label).with("pending");
+        // (A drag's color, held: kept from the last frame only. A form no
+        // longer drawn while it was held leaves it stale, dropped.)
+        let pass = ui.ctx().cumulative_pass_nr();
+        let pending: Option<[u8; 3]> = ui
+            .data(|d| d.get_temp::<([u8; 3], u64)>(pending_id))
+            .filter(|(_, at)| pass.saturating_sub(*at) <= 1)
+            .map(|(c, _)| c);
+        ui.data_mut(|d| d.remove::<([u8; 3], u64)>(pending_id));
+        let mut rgb = pending.or(current).unwrap_or(default);
+        let mut reset = false;
+        let id = self.id(label);
+        let picked = row(ui, |ui| {
+            let (changed, _open) = ui
+                .push_id(id, |ui| {
+                    let popup = ui.auto_id_with("popup");
+                    let button = crate::color_button::edit_srgb_with(ui, &mut rgb, swatches);
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::ColorButton,
+                            true,
+                            OUTLINE_COLOR_LABEL,
+                        )
+                    });
+                    let changed = button.on_hover_text(OUTLINE_COLOR_TIP).changed();
+                    (changed, egui::Popup::is_id_open(ui.ctx(), popup))
+                })
+                .inner;
+            let picked = (changed || pending.is_some()).then_some(rgb);
+            // (Past MIXED_LIMIT the others aren't looked at: maybe set.
+            // A field of another type, from another tool, reads as no
+            // color and is still taken off.)
+            let set = self.root.get(label).is_some() || differs || self.also.len() > MIXED_LIMIT;
+            let button = egui::Button::new(OUTLINE_COLOR_DEFAULT).small();
+            reset = ui
+                .add_enabled(set, button)
+                .on_hover_text("Draws the outline in its usual color again")
+                .clicked();
+            picked
+        })
+        .inner;
+        if reset {
+            self.set_opt(OUTLINE_COLOR_LABEL, label, None);
+            return;
+        }
+        let Some(v) = picked else { return };
+        // (Dragged on the picker: stored when the button is let go.)
+        if ui.input(|i| i.pointer.any_down()) {
+            ui.data_mut(|d| d.insert_temp(pending_id, (v, pass)));
+            return;
+        }
+        if current != Some(v)
+            || self.several()
+            || self.root.get(label).is_some_and(|_| current.is_none())
+        {
+            let [r, g, b] = v.map(u32::from);
+            self.set(OUTLINE_COLOR_LABEL, label, Value::Dword(r | g << 8 | b << 16));
         }
     }
 
@@ -2127,28 +2243,12 @@ impl Form<'_> {
         let types = [ResType::NSS, ResType::NCS];
         let what = format!("{what} script");
         let current = self.root.resref(label).unwrap_or(ResRef::EMPTY);
-        // (Outside a narrow form, which wraps its rows, the field yields
-        // to its `…` and Edit where the row's room is short: Module
-        // Properties' events at a window of 420 put both past its edge,
-        // U30's #14. The grid's last column's room, which its first
-        // column's labels decide, not a column's width: no feedback.)
-        let yield_to = (!narrow(ui)).then(|| {
-            let s = ui.spacing();
-            let small = egui::TextStyle::Button.resolve(ui.style());
-            let color = ui.visuals().text_color();
-            let edit = ui.fonts_mut(|f| f.layout_no_wrap("Edit".into(), small, color)).size().x;
-            let buttons = s.interact_size.y + edit + 2.0 * s.button_padding.x;
-            let width = ui.available_width() - buttons - 3.0 * s.item_spacing.x - 8.0;
-            width.clamp(SCRIPT_FIELD_LEAST, 160.0)
-        });
-        row(ui, |ui| {
+        let yield_to = resref_beside_buttons(ui);
+        ui.horizontal(|ui| {
             let id = self.id(label);
-            let picked = match yield_to {
-                Some(width) => crate::widgets::with_resref_width(ui, width, |ui| {
-                    resref_field(self.app, ui, id, current, &what, &types)
-                }),
-                None => resref_field(self.app, ui, id, current, &what, &types),
-            };
+            let picked = crate::widgets::with_resref_width(ui, yield_to, |ui| {
+                resref_field(self.app, ui, id, current, &what, &types)
+            });
             if let Some(v) = picked {
                 self.set(&what, label, Value::resref(v));
             }
@@ -2249,8 +2349,13 @@ impl Form<'_> {
     ) {
         self.mark_mixed(ui, label);
         let current = self.root.resref(label).unwrap_or(ResRef::EMPTY);
-        row(ui, |ui| {
-            if let Some(v) = resref_field(self.app, ui, self.id(label), current, what, types) {
+        let yield_to = resref_beside_buttons(ui);
+        ui.horizontal(|ui| {
+            let id = self.id(label);
+            let picked = crate::widgets::with_resref_width(ui, yield_to, |ui| {
+                resref_field(self.app, ui, id, current, what, types)
+            });
+            if let Some(v) = picked {
                 self.set(what, label, Value::resref(v));
             }
             let key = ResKey::new(current, edit);
@@ -2502,6 +2607,22 @@ pub(crate) const NARROW_FORM: f32 = 400.0;
 /// its row's room, held to these.
 const LOC_FIELD: std::ops::Range<f32> = 160.0..360.0;
 
+/// How wide a resref field may be so that its `…` and an **Edit** button
+/// fit beside it on one line, in a narrow Properties panel too (a script's
+/// or a conversation's field; Module Properties' events at a window of 420
+/// put both past its edge, U30's #14). The room left in the row, not a
+/// column's width: no feedback.
+fn resref_beside_buttons(ui: &Ui) -> f32 {
+    let s = ui.spacing();
+    let small = egui::TextStyle::Button.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let edit = ui.fonts_mut(|f| f.layout_no_wrap("Edit".into(), small, color)).size().x;
+    let buttons = s.interact_size.y + edit + 2.0 * s.button_padding.x;
+    let width = ui.available_width() - buttons - 3.0 * s.item_spacing.x - 8.0;
+    let least = if narrow(ui) { 36.0 } else { SCRIPT_FIELD_LEAST };
+    width.clamp(least, 160.0)
+}
+
 /// The least a script's field yields to ([`Form::script`]): about eight
 /// characters of a resref.
 const SCRIPT_FIELD_LEAST: f32 = 60.0;
@@ -2522,8 +2643,24 @@ pub(crate) fn narrow(ui: &Ui) -> bool {
     ui.data(|d| d.get_temp::<bool>(egui::Id::new(NARROW_ID))).unwrap_or(false)
 }
 
+/// Whether the form being drawn is the Properties panel's single-column
+/// all-pages scroll (`AllPages { panel: true }` in the wide layout).
+pub(crate) fn panel_scroll(ui: &Ui) -> bool {
+    ui.data(|d| d.get_temp::<bool>(egui::Id::new(PANEL_SCROLL_ID))).unwrap_or(false)
+}
+
+/// The page name whose own heading was already drawn above its body in
+/// the Properties panel (`None` for a blueprint window without a panel heading).
+fn panel_page(ui: &Ui) -> Option<String> {
+    ui.data(|d| d.get_temp::<String>(egui::Id::new(PANEL_PAGE_ID)))
+}
+
 /// Where [`form_ui`] keeps whether the form it draws is narrow.
 const NARROW_ID: &str = "blueprint-form-narrow";
+/// Where [`form_ui`] keeps whether it is drawing the Properties panel's one scroll.
+const PANEL_SCROLL_ID: &str = "blueprint-form-panel-scroll";
+/// Where [`form_ui`] keeps the current panel page name so sub-headings avoid duplicating it.
+const PANEL_PAGE_ID: &str = "blueprint-form-panel-page";
 
 /// `add` drawn as a narrow form's ([`narrow`]): a panel's fields (the
 /// journal's Entry and Category, M4's U22) fill the room they are given,
@@ -2749,7 +2886,12 @@ pub(crate) fn edit_many(
         false => format!("{kind} properties header"),
     };
     let title = Title { header, icon: crate::tabs::icon(&tab), name: &name, sub: &sub };
-    let pressed = ok_cancel_header(ui, &title, is_viewed || held.is_some(), OK_CANCEL_TIPS);
+    let pop_in = !path.0.is_empty() && app.docked_instance_tabs.contains(&tab);
+    let (pressed, popped_in) =
+        ok_cancel_header_with(ui, &title, is_viewed || held.is_some(), OK_CANCEL_TIPS, pop_in);
+    if popped_in {
+        app.actions.push(Action::PopInProperties(tab.clone()));
+    }
     // (Every page, of several too: their lists are edited on each,
     // `docs/lists-together-proposal.md`.)
     let pages: Vec<&str> =
@@ -2874,6 +3016,35 @@ pub(crate) fn tab_of(key: ResKey, path: &GffPath, also: &[(ResKey, GffPath)]) ->
 /// The name of a blueprint's or placed object's Properties window (or
 /// tab), as a group around its pages and fields.
 pub const WINDOW_GROUP: &str = "Properties window";
+
+/// The placed encounter's Outline color row: its label (the color
+/// button's name, and its undo step's).
+pub const OUTLINE_COLOR_LABEL: &str = "Outline color";
+
+/// The Outline color button's tip.
+pub const OUTLINE_COLOR_TIP: &str =
+    "Moonglow's own color for this outline, which Aurora drops when it saves";
+
+/// The Outline color row's button that takes the color off.
+pub const OUTLINE_COLOR_DEFAULT: &str = "Default";
+
+/// An encounter's outline in the area view, without a color of its own
+/// (red, green, blue).
+pub const ENCOUNTER_OUTLINE: [u8; 3] = [230, 120, 40];
+
+/// The Outline color picker's swatches: colors that stand out from the
+/// ground and the grid in both themes, and from the encounters' orange
+/// and the triggers' green, blue and red. (No black or dark color: lost
+/// on a night area's ground.)
+pub const OUTLINE_SWATCHES: [(&str, [u8; 3]); 7] = [
+    ("Yellow", [250, 220, 50]),
+    ("Lime", [170, 240, 50]),
+    ("Cyan", [40, 220, 230]),
+    ("Violet", [160, 110, 255]),
+    ("Magenta", [240, 70, 200]),
+    ("Rose", [255, 140, 160]),
+    ("White", [245, 245, 245]),
+];
 
 /// The object at `path` of the document `key` as it is now, or `None`
 /// with what is wrong said in `ui` (no module, the object gone, the
@@ -3031,8 +3202,13 @@ pub(crate) fn form_ui(app: &mut Moonglow, ui: &mut Ui, shown: FormShown<'_>) -> 
                     if let Some(readout) = readout {
                         ui.label(egui::RichText::new(readout).small().weak());
                     }
+                    ui.data_mut(|d| {
+                        d.insert_temp(egui::Id::new(PANEL_PAGE_ID), (*title).to_string());
+                    });
                 }
                 read_only_if(ui, viewed, |ui| page_ui(&mut form, ui, restype, page));
+                ui.data_mut(|d| d.remove::<String>(egui::Id::new(PANEL_PAGE_ID)));
+                ui.add_space(12.0);
             });
         }
         // (The window's: every page on one scroll, drawn where in sight.)
@@ -3046,14 +3222,26 @@ pub(crate) fn form_ui(app: &mut Moonglow, ui: &mut Ui, shown: FormShown<'_>) -> 
             // (The panel's one object's place under its first page's
             // heading, as WideArea draws it under Basic.)
             let readout = heading.and_then(|(_, r)| r).filter(|_| panel);
+            if panel {
+                ui.data_mut(|d| d.insert_temp(egui::Id::new(PANEL_SCROLL_ID), true));
+            }
             scroll.show(ui, top, |ui, i| {
                 if i == 0
                     && let Some(readout) = &readout
                 {
                     ui.label(egui::RichText::new(readout).small().weak());
                 }
+                if panel {
+                    ui.data_mut(|d| {
+                        d.insert_temp(egui::Id::new(PANEL_PAGE_ID), pages[i].to_string());
+                    });
+                }
                 read_only_if(ui, viewed, |ui| page_ui(&mut form, ui, restype, pages[i]));
+                if panel {
+                    ui.data_mut(|d| d.remove::<String>(egui::Id::new(PANEL_PAGE_ID)));
+                }
             });
+            ui.data_mut(|d| d.remove::<bool>(egui::Id::new(PANEL_SCROLL_ID)));
         }
     }
     // (The form drawn: what is drawn after it judges its own room.)

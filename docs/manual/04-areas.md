@@ -3,7 +3,7 @@ type: Manual Page
 title: Areas
 description: Areas - the viewer's header and its popovers, minimaps and camera, selecting, arranging and placing objects, Setup Store, duplicate tags, claimed and protected areas, painting placeables, painting terrain, tiles, Area Properties, area sounds and making tilesets.
 tags: [manual, areas, terrain, tiles]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-22T00:08:19Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T06:31:08Z }
 ---
 
 # Areas
@@ -471,6 +471,7 @@ Options › Keyboard):
 | Z, C | move the camera up, down |
 | Ctrl + Shift + wheel, or Ctrl + Shift + middle drag | move the camera up and down, finely |
 | Numpad 5 | look straight down at the whole area (and back to the ground) |
+| F, . | Focus Selection: center and zoom the camera onto the selected objects (framing the bounding box of an encounter or trigger outline, or the start location); `.` also works right after clicking a row in the Outliner or module tree, where letters go to the rows |
 | F10 | select tiles or objects (Aurora's; with the pointer over the area's view, shelf or header) |
 | B | Paint on or off |
 | Ctrl+Alt+R | Reorient Camera: face north again (wherever the pointer is: the area shown last) |
@@ -487,9 +488,10 @@ while it has the keys ([Conversations](06-conversations.md)).
 
 | Do | To |
 | --- | --- |
-| Click | select an object (the one whose model is under the pointer: a click through an arch reaches what is behind it) |
+| Click | select an object (the one whose model is under the pointer: a click through an arch reaches what is behind it). An object standing inside a trigger's or an encounter's outline is clicked, dragged and right-clicked as itself, the outline selected or not; where outlines alone are under the pointer, repeated plain clicks cycle through the overlapping triggers and encounters, and a right-click keeps the one selected (for Add Spawn Point) |
+| Shift + click | add the object to the current selection (Shift + click on empty ground keeps the current selection) |
 | Ctrl + click | add it to the selection, or take it out |
-| Drag on the ground | select the objects in the box |
+| Drag on the ground | select the objects in the box (**Shift + drag** adds the boxed objects to the current selection) |
 | Drag the selection | move it over the ground |
 | Alt + right drag | turn the selected objects |
 | Drag the ring around them | turn them as the pointer goes round |
@@ -505,8 +507,8 @@ while it has the keys ([Conversations](06-conversations.md)).
 | Delete | delete them |
 | Escape | select nothing (it drops a drag, a brush or a paste first) |
 | Ctrl+C, Ctrl+X, Ctrl+V | copy, cut, paste (in this area or another): the copies follow the pointer, each outlined by its model's box, and Q and E turn them together before the click puts them down |
-| Double-click (with Ctrl too) | the object's Properties, in the Right Dock's Properties panel, in front, the object selected ([Blueprints](05-blueprints.md#instances)); its row's double click in the module tree or the Outliner the same |
-| A row of the Outliner (the Left Dock, under its tabs) | select its object, with Ctrl and Shift as in the view; while it shows, it follows the selection, and the module tree stays where you left it: see [The Outliner](02-main-window.md#the-outliner) |
+| Double-click | open the object's Properties in the Right Dock's Properties panel, the object selected ([Blueprints](05-blueprints.md#instances)); on overlapping triggers and encounters, one of them already selected, that one's (the first click's cycling is taken back); a double click on a row in the module tree or the Outliner focuses the camera on the object instead, and a triple click there opens its Properties in a tab or window |
+| A row of the Outliner or module tree (the Left Dock) | single-click selects its object without moving the camera (with Ctrl and Shift as in the view); double-click goes to (focuses) it, and a third click opens its Properties, as its menu's Properties does. While shown, the Outliner follows the view's selection and leaves the module tree where you left it: see [The Outliner](02-main-window.md#the-outliner) |
 
 Every move, turn and deletion is one undoable step. The view's corner
 shows the pointer's position in the area, to the centimeter, and the
@@ -638,13 +640,14 @@ stays where it was raised, whatever the ground below; a trigger's
 corners go onto the ground under their new places), and **Snap**
 snaps along the axis; up raises or lowers it, as Alt + drag does. A
 click or a drag on a handle (an arrow, a ring, the scale handle) is the
-handle's, even where another object lies behind it. They move the object itself, so they work for static placeables
-too; creatures stand on the ground and have no blue arrow. An arrow
-pointing at the camera (the blue one, from straight above) is led up and
-down the screen.
-
-A click on a ring or an arrow selects the object under it, if there is
-one; the selection stays otherwise.
+handle's, even where another object lies behind it or stands on it,
+with one exception: a selected trigger's or encounter's ring gives way
+to an object standing on it (not another outline), which is clicked and
+dragged as itself. A click on a handle leaves the selection as it is.
+They move the object itself, so they work for static placeables too;
+creatures stand on the ground and have no blue arrow. An arrow pointing
+at the camera (the blue one, from straight above) is led up and down
+the screen.
 
 **Lights**: right-click the ground and choose **Add Light Here**, then
 a color, or choose a color in the palette's **Lights** and click
@@ -724,11 +727,30 @@ and on Add Light Here. **Change Light…** on a selected one gives it
 other settings: another row (and model), written as Custom Light writes
 them; Undo gives it its row back (what was written stays in the hak).
 
-**An encounter's spawn points**: with the encounter selected, the tip of
-each spawn point's arrow is a handle. Lead it round the point and what
-spawns there faces that way (**Turn** snaps it). The square at the foot
-of its post is another: lead it over the ground and the point moves, the
-encounter staying where it is.
+**An encounter's spawn points**: each spawn point is drawn as a
+3D wireframe prism oriented the way what spawns there faces, with its
+facing arrow on the ground. With the encounter selected, the tip of each
+spawn point's arrow is a handle (lead it round the point to turn, snapped
+with **Turn**) and the square at the foot of its prism is another (lead
+it over the ground to move the point while the encounter stays where it
+is). A right-click where overlapping encounters or triggers alone are
+under the pointer keeps the one already selected, so **Add Spawn
+Point** adds to the selected encounter.
+
+**An encounter's outline color**: encounters are outlined in orange, and
+so are their spawn points. To tell overlapping encounters apart, give
+one a color of its own: **Outline color** on a placed encounter's
+Properties › Basic (a swatch, or any color from the picker). Each pick
+is stored at once as one Undo step, a drag on the picker when you let
+go, and closing the picker, Escape too, keeps it. Selected, an encounter of its
+own color keeps it, drawn wider over a dark edge; one without turns the
+selection's color, as before. **Default** takes the color off. Moonglow
+keeps the color in a field of its own on the placed encounter
+(`MG_OutlineColor`), which the game ignores. Aurora drops it when it
+saves, and the outline is orange again. Unlike a lock, a nasher
+project's files keep it, so a team shares the colors. Copy and paste,
+Update Instances and Replace Selected keep it; Add to Palette and
+Export as Blueprint… leave it out of the new blueprint.
 
 What you are dragging stays in hand while another button turns the
 camera (hold the middle button too and swing the view, or move it with
@@ -744,22 +766,33 @@ of the button that holds it. **Escape** drops the drag: nothing moves.
 With several selected, the first selected snaps and the others keep their
 places and turns around it.
 
-**Right-click** the selection for its menu (Properties last, as in
-Aurora):
+**Right-click** the selection for its menu (a right-click on an object
+not selected selects it first; where the outlines of triggers or
+encounters alone are under the pointer, one already selected stays so;
+Properties last, as in Aurora):
 
 - **Adjust Location…**: an exact position and bearing, and the visual
   transform that EE added (scale, rotation and offset of the model) for
-  creatures, doors, items and placeables that aren't Static. The area
-  view shows what you change as you change it, before anything is set:
-  the objects (or the start location) move, turn and take their new
-  shape. The fields are in a grid of four columns (X, Y; Z, Bearing (°)),
-  and the visual transform has its own under **Visual Transforms**:
+  creatures, doors, items and placeables that aren't Static. While open,
+  Adjust Location stays live: selecting another object (or nothing)
+  saves what you changed and not yet applied, each save one step to
+  undo, and the window goes on with the new selection (or says to select
+  an object), and a click anywhere outside the window saves it too,
+  the window staying open. In an area another builder holds, in a
+  project that keeps those read-only, nothing is saved: the window keeps
+  what you changed, on the same object, and says why, with OK and Apply
+  off. Dragging the object in the view while clean updates
+  its numbers live. The area view previews what you change before it is
+  applied. The fields are in a grid of four columns (X, Y; Z, Bearing
+  (°)), and the visual transform has its own under **Visual Transforms**:
   Scale, Animation speed; X rotation, X translation; Y rotation, Y
   translation; Z rotation, Z translation. The footer has **OK** (the main
   button, which Enter presses), which sets what you changed and closes
   the window, **Apply**, which sets it and keeps the window open (each is
-  one step to undo), and **Cancel**. Cancel,
-  or closing the window, puts them back as they were. The rotations are
+  one step to undo), and **Cancel** (**Cancel** and **Escape** take back
+  what was changed since the last save, not what was saved when the
+  selection changed or you clicked away: Undo takes that back). The
+  rotations are
   named as Aurora names them and the game reads them, which is not by
   the axis each turns about: **X rotation** turns the model about its
   upright axis (as Bearing does), **Y rotation** tips it forward or
@@ -800,6 +833,9 @@ Aurora):
   in progress (a value on its way from one to another over some
   seconds), drawn at its end. Setting that value here ends the lerp; a
   value left as it is keeps it.
+- **Focus Selection** (F or `.`): centers and zooms the camera onto the
+  selected objects or start location (framing the bounding box of a
+  trigger or encounter outline).
 - **Position**, the quick ways of setting where the selection stands
   and how it faces:
   - **Position › Drop to Ground** (G): puts raised objects back on the
@@ -902,7 +938,8 @@ Aurora):
   unlocking the object. A nasher project's files don't carry it: Moonglow
   keeps the project's locks in its own folder (see
   [nasher projects](03-modules.md#nasher-projects-version-control)), so
-  locking never shows in a diff.
+  locking never shows in a diff. A blueprint made of a locked object
+  (**Add to Palette**, **Export as Blueprint…**) is not locked.
 - Doors: **Reverse Door**, **Initial State** (open or closed, locked).
   Placeables: **Initial State** (open, active…). Sounds: **Mute** or
   **Turn On**. Triggers and encounters: **Redraw Polygon**; encounters:
@@ -1786,7 +1823,8 @@ drag selects or moves the camera and moves no object; there are no
 rings, arrows or scale handle; Delete, Q, E and G do nothing; Paint and
 Select Tiles are grayed, and the palette's blueprints, tiles and pastes
 aren't placed (one dropped on it says so in the log); its menu has
-Preview and Properties. Its Properties and its objects' are gray, with
+Preview and Properties, and its objects' menus in the module tree and the
+Outliner have no **Adjust Location…**. Its Properties and its objects' are gray, with
 **Close** for OK and Cancel: what you type in them is dropped, and their
 Variables… button is off. (The module's start location may still be
 moved there: it is the module's, not the area's.) An unclaimed one says
