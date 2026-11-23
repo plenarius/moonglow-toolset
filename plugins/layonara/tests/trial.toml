@@ -1,0 +1,161 @@
+# Try on Dev: the selected areas to the dev server, with the conflict dialog when a copy is behind live's.
+module = "module"
+root = false
+
+[[test]]
+name = "the selected area goes to dev from its recorded revision, and the way in is shown"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+log = ["crypt: on dev as revision 1000000007 (applied)", "type ;forge for your areas", "Your trial ends after 60 minutes"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/tried.json"
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":3', '"key":"crypt"', '"kind":"area"', '"mode":"add"', '"WP_ALTAR"', '"note":"Moonglow: crypt"']
+signin = true
+
+[[test]]
+name = "the open area, where nothing is selected"
+command = "try"
+open = "crypt.are"
+signed_in = "alice"
+log = ["crypt: on dev"]
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/tried.json"
+
+[[test]]
+name = "nothing selected or open"
+command = "try"
+signed_in = "alice"
+error = "Select an area (or open one) first"
+request = []
+
+[[test]]
+name = "behind live, update first: merged, written, recorded, and sent again from live's revision"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+log = ["crypt is from revision 3, live's is 4 (published by Bob", "crypt: merged with live's revision 4", "crypt: on dev"]
+resources = ["crypt.are", "crypt.git", "crypt.gic", "module.ifo"]
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 409
+file = "replies/behind.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+file = "replies/crypt-merged.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/tried.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":3']
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+has = ['"base_rev":3']
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":4', '"WP_BOB"']
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[2]/Tag"
+value = "WP_BOB"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Value"
+value = '{"crypt":4}'
+
+[[test]]
+name = "behind live, try anyway: the same copy, sent with live's revision, and nothing recorded"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { next = "Try anyway, on dev only" }
+log = ["crypt: tried over live's revision 4"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 409
+file = "replies/behind.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/tried.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":3']
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":4', '"WP_ALTAR"']
+
+[[test]]
+name = "behind live, cancel: nothing more is sent"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { next = "Cancel" }
+log = ["Try on Dev: canceled"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 409
+file = "replies/behind.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+
+[[test]]
+name = "a new area: its folder asked for, from those live's areas are in"
+command = "try"
+select = ["myplace.are"]
+signed_in = "alice"
+answers = { folder = "deep" }
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/tried.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":0', '"folder":"deep"', '"key":"myplace"', '"gic":null']
+
+[[test]]
+name = "a publish check's refusal: its problems in the log, and the job fails"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+log = ["area crypt: The tileset tzz01 is not in the live haks."]
+error = "Try on Dev: crisp refusal"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 400
+json = { detail = "crisp refusal", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The tileset tzz01 is not in the live haks."] }] }
+
+[[test]]
+name = "the rate limit says when to try again"
+command = "try"
+select = ["crypt.are"]
+signed_in = "alice"
+error = "Too many trials. (try again in 120 s)"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 429
+headers = { Retry-After = "120" }
+json = { detail = "Too many trials." }

@@ -167,6 +167,14 @@ impl SignIns {
         serde_json::from_str(&text).ok()
     }
 
+    /// Signs an account in as `name` with an access token good for an
+    /// hour and no refresh token: a plugin's tests (`signed_in`).
+    pub fn hold(&self, account: &str, name: &str, access_token: &str) {
+        let until = Instant::now() + Duration::from_secs(3600);
+        let access = Some(Access { token: access_token.to_string(), until });
+        self.held().insert(account.to_string(), Held { access, refresh: None, name: name.into() });
+    }
+
     /// Whether it is signed in, without the network.
     pub fn status(&self, account: &str) -> Status {
         if let Some(k) = self.kept(account) {

@@ -55,6 +55,10 @@ reason.
   `mg gff` writes its JSON, `ctx.edit:write_json(name, json)` writes
   one from it (text, or what `decode` made of it). The example
   `area-share` signs in, sends an area and fetches it back.
+- **Tests against a stub.** A plugin's tests (`mg plugin test`) answer
+  its requests from `[[test.reply]]`, hold what it sent to
+  `[[test.request]]`, and sign it in with `signed_in = "name"` (or run
+  the device flow against replies of the issuer's).
 
 ## 0.9
 

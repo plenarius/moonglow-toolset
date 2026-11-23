@@ -13,6 +13,7 @@ egui.workspace = true
 egui-wgpu.workspace = true
 mg-audio = { workspace = true, features = ["decode"] }
 mg-core.workspace = true
+mg-plugin.workspace = true
 mg-ui.workspace = true
 mg-update = { workspace = true, features = ["http"] }
 rfd.workspace = true

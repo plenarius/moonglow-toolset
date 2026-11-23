@@ -1,0 +1,29 @@
+{
+  "__data_type": "ARE ",
+  "Tag": {
+    "type": "cexostring",
+    "value": "MYPLACE"
+  },
+  "ResRef": {
+    "type": "resref",
+    "value": "myplace"
+  },
+  "Name": {
+    "type": "cexolocstring",
+    "value": {
+      "0": "My Place"
+    }
+  },
+  "Tileset": {
+    "type": "resref",
+    "value": "tdc01"
+  },
+  "Width": {
+    "type": "int",
+    "value": 2
+  },
+  "Height": {
+    "type": "int",
+    "value": 2
+  }
+}

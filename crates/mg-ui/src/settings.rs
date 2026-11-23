@@ -818,6 +818,10 @@ pub struct Settings {
     pub table_widths: Vec<(String, Vec<(String, u32)>)>,
     /// The plugins enabled, by id (one installed is off until it is here).
     pub plugins_enabled: Vec<String>,
+    /// The plugins this build bundles that it installed, as `id version`:
+    /// each is installed (and enabled) once, and updated while it is the
+    /// version installed; one the user removed stays removed.
+    pub plugins_bundled: Vec<String>,
     /// What each plugin's events were allowed, kept between runs: the
     /// plugin (its id, its code's digest and its folder; an installed
     /// plugin's id and version before 4.0.0, carried over to its code once),

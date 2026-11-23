@@ -1,0 +1,143 @@
+{
+  "kind": "area",
+  "key": "crypt",
+  "base_rev": 3,
+  "rev": 4,
+  "folder": "core",
+  "merge": {
+    "conflicts": [
+      {
+        "id": "x1",
+        "part": "object",
+        "what": "waypoint WP_ALTAR moved in both",
+        "base": null,
+        "theirs": null,
+        "ours": null,
+        "uuid": "u1",
+        "tag": "WP_ALTAR"
+      }
+    ],
+    "resolved": [],
+    "stats": {},
+    "notes": [
+      "1 object added by live"
+    ],
+    "clean": false,
+    "changed": true
+  },
+  "docs": {
+    "are": {
+      "__data_type": "ARE ",
+      "Tag": {
+        "type": "cexostring",
+        "value": "CRYPT"
+      },
+      "ResRef": {
+        "type": "resref",
+        "value": "crypt"
+      },
+      "Name": {
+        "type": "cexolocstring",
+        "value": {
+          "0": "The Crypt"
+        }
+      },
+      "Tileset": {
+        "type": "resref",
+        "value": "tdc01"
+      },
+      "Width": {
+        "type": "int",
+        "value": 2
+      },
+      "Height": {
+        "type": "int",
+        "value": 2
+      }
+    },
+    "git": {
+      "__data_type": "GIT ",
+      "WaypointList": {
+        "type": "list",
+        "value": [
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_CRYPT_IN"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 2.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 4.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          },
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_ALTAR_LIVE"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 2.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 4.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          },
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_BOB"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 2.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 4.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          }
+        ]
+      }
+    },
+    "gic": {
+      "__data_type": "GIC ",
+      "WaypointList": {
+        "type": "list",
+        "value": []
+      }
+    }
+  }
+}

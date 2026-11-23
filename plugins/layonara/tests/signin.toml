@@ -1,0 +1,71 @@
+# Signing in and out, against a stub of auth.layonara.com and of the builder routes.
+module = "module"
+root = false
+
+[[test]]
+name = "signed in already: who, from /me"
+command = "sign-in"
+signed_in = "alice"
+log = ["Signed in to Layonara as Alice (Builders)"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/me"
+json = { sub = "s1", username = "alice", name = "Alice", groups = ["Builders"], user = "mg-alice", trials = true }
+[[test.request]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/me"
+signin = true
+
+[[test]]
+name = "the device flow at auth.layonara.com, then /me with the new token"
+command = "sign-in"
+log = ["enter WXYZ-1234 at https://auth.layonara.com/device", "Signed in to Layonara as Alice", "Try on Dev is off"]
+[[test.reply]]
+url = "https://auth.layonara.com/application/o/moonglow-layonara/.well-known/openid-configuration"
+json = { issuer = "https://auth.layonara.com/application/o/moonglow-layonara/", device_authorization_endpoint = "https://auth.layonara.com/application/o/device/", token_endpoint = "https://auth.layonara.com/application/o/token/", revocation_endpoint = "https://auth.layonara.com/application/o/revoke/" }
+[[test.reply]]
+url = "https://auth.layonara.com/application/o/device/"
+json = { device_code = "DEV", user_code = "WXYZ-1234", verification_uri = "https://auth.layonara.com/device", expires_in = 60, interval = 1 }
+[[test.reply]]
+url = "https://auth.layonara.com/application/o/token/"
+# (The ID token's claims: {"preferred_username":"alice"}.)
+json = { access_token = "AT1", refresh_token = "RT1", expires_in = 600, id_token = "h.eyJwcmVmZXJyZWRfdXNlcm5hbWUiOiJhbGljZSJ9.s" }
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/me"
+json = { sub = "s1", username = "alice", name = "Alice", groups = ["Builders"], user = "mg-alice", trials = false }
+[[test.request]]
+url = "https://auth.layonara.com/application/o/moonglow-layonara/.well-known/openid-configuration"
+[[test.request]]
+method = "POST"
+url = "https://auth.layonara.com/application/o/device/"
+has = ["client_id=moonglow-layonara", "offline_access"]
+[[test.request]]
+method = "POST"
+url = "https://auth.layonara.com/application/o/token/"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/me"
+
+[[test]]
+name = "someone outside the builders' groups is told so"
+command = "sign-in"
+signed_in = "carol"
+error = "You are not a builder. (Layonara's builder routes are for the Builders group)"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/me"
+status = 403
+json = { detail = "You are not a builder." }
+
+[[test]]
+name = "a sign-in that has ended says to sign in again"
+command = "status"
+signed_in = "alice"
+error = "sign in again (Plugins › Layonara › Sign In)"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 401
+json = { detail = "The token has expired." }
+
+[[test]]
+name = "not signed in, and not signing in now: nothing is sent"
+command = "status"
+error = "Not signed in to Layonara"
+request = []

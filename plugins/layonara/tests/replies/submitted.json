@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "kind": "area",
+      "key": "crypt",
+      "id": "in261123_ab12cd34",
+      "state": "waiting",
+      "new": false,
+      "base_rev": 3,
+      "toolbox": "https://www.layonara.com/atlas/edit/crypt/area",
+      "replaced": [],
+      "check": {
+        "ok": true,
+        "problems": [],
+        "warnings": [
+          "New way to no area: WP_ALTAR"
+        ],
+        "summary": "### What changed"
+      }
+    }
+  ]
+}

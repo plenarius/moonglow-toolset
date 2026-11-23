@@ -1,0 +1,120 @@
+# Send for Review, Trial Status and Release.
+module = "module"
+root = false
+
+[[test]]
+name = "send for review: the note and the area, and where the reviewer sees it"
+command = "submit"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { note = "Moved the altar" }
+log = ["crypt: sent for review (waiting), https://www.layonara.com/atlas/edit/crypt/area", "crypt: New way to no area: WP_ALTAR"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+file = "replies/submitted.json"
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+has = ['"note":"Moved the altar"', '"base_rev":3', '"key":"crypt"']
+
+[[test]]
+name = "send for review needs a note"
+command = "submit"
+select = ["crypt.are"]
+signed_in = "alice"
+error = "Say what you changed"
+request = []
+
+[[test]]
+name = "send for review behind live: only update first or cancel"
+command = "submit"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { note = "Moved the altar", next = "Cancel" }
+log = ["Send for Review: canceled"]
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+status = 409
+file = "replies/behind.json"
+
+[[test]]
+name = "trial status: each area, and when the trial ends"
+command = "status"
+signed_in = "alice"
+log = ["crypt: your copy is on dev (revision 1000000007)", "well: Replaced by live revision 5.", "ends in 55 minutes"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+
+[[test]]
+name = "trial status with no trial"
+command = "status"
+signed_in = "alice"
+log = ["You have nothing on trial on dev"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+body = '{"trial": null}'
+
+[[test]]
+name = "release all of it: an empty body"
+command = "release"
+signed_in = "alice"
+log = ["crypt: live's again on dev", "Nothing of yours is on trial now"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+json = { user = "mg-alice", released = [{ kind = "area", key = "crypt" }, { kind = "area", key = "well" }], trial = [], expires_in = 0 }
+[[test.request]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+has = ["{}"]
+
+[[test]]
+name = "release one area"
+command = "release"
+signed_in = "alice"
+answers = { what = "well" }
+log = ["well: live's again on dev", "1 still on trial"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+json = { user = "mg-alice", released = [{ kind = "area", key = "well" }], trial = [{ kind = "area", key = "crypt" }], expires_in = 3300 }
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+has = ['{"items":[{"key":"well","kind":"area"}]}']
+
+[[test]]
+name = "release while dev hasn't put an area back yet"
+command = "release"
+signed_in = "alice"
+log = ["crypt: someone is in it"]
+error = "try again in a minute"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+status = 409
+json = { detail = "Dev has not put it back.", pending = [{ kind = "area", key = "crypt", message = "someone is in it" }] }
+
+[[test]]
+name = "sign out"
+command = "sign-out"
+signed_in = "alice"
+log = ["Signed out of Layonara"]
+request = []

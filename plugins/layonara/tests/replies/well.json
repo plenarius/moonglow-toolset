@@ -1,0 +1,75 @@
+{
+  "kind": "area",
+  "key": "well",
+  "rev": 5,
+  "sha": "8dce8632",
+  "folder": "core",
+  "source": "web",
+  "note": "",
+  "by_sub": "s1",
+  "by_name": "Bob",
+  "at": "2026-11-23T10:00:00Z",
+  "docs": {
+    "are": {
+      "__data_type": "ARE ",
+      "Tag": {
+        "type": "cexostring",
+        "value": "WELL"
+      },
+      "ResRef": {
+        "type": "resref",
+        "value": "well"
+      },
+      "Name": {
+        "type": "cexolocstring",
+        "value": {
+          "0": "The Old Well"
+        }
+      },
+      "Tileset": {
+        "type": "resref",
+        "value": "tdc01"
+      },
+      "Width": {
+        "type": "int",
+        "value": 2
+      },
+      "Height": {
+        "type": "int",
+        "value": 2
+      }
+    },
+    "git": {
+      "__data_type": "GIT ",
+      "WaypointList": {
+        "type": "list",
+        "value": [
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_WELL"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 2.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 4.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          }
+        ]
+      }
+    },
+    "gic": null
+  }
+}

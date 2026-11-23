@@ -2797,3 +2797,52 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     assert_eq!(got(&h), 2);
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
 }
+
+/// The plugins a build bundles: installed and enabled once, updated while
+/// they are the version it installed, and left alone once removed.
+#[test]
+fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
+    let dir = mg_testkit::scratch_dir("ui-plugin-bundled");
+    let plugins = dir.join("plugins");
+    let fixture = plugin_fixtures().join("tag-conventions");
+    let bundle = |version: &str| {
+        let files = ["plugin.cfg", "main.luau", "rules.luau"].map(|f| {
+            let data = std::fs::read(fixture.join(f)).unwrap();
+            let data = if f == "plugin.cfg" {
+                String::from_utf8(data).unwrap().replace("1.0.0", version).into_bytes()
+            } else {
+                data
+            };
+            (f.to_string(), data)
+        });
+        mg_plugin::Package::from_files(files.to_vec()).unwrap()
+    };
+    let id = "example.tag-conventions";
+    let mut app = app_with(Vec::new());
+    app.plugin_dir = Some(plugins.clone());
+    app.install_bundled_plugins(&[bundle("1.0.0")]);
+    app.load_plugins();
+    assert!(app.plugin_enabled(id));
+    assert_eq!(app.settings.plugins_bundled, vec![format!("{id} 1.0.0")]);
+    assert!(mg_plugin::from_archive(&plugins.join(id)));
+
+    // Disabled by the user, then a newer build: updated, and still off.
+    app.enable_plugin(id, false);
+    app.install_bundled_plugins(&[bundle("1.1.0")]);
+    app.load_plugins();
+    assert!(!app.plugin_enabled(id));
+    let version = mg_plugin::Plugin::load(&plugins.join(id)).unwrap().manifest.version;
+    assert_eq!(version, "1.1.0");
+    assert_eq!(app.settings.plugins_bundled, vec![format!("{id} 1.1.0")]);
+
+    // Removed by the user: not brought back.
+    mg_plugin::remove(&plugins.join(id)).unwrap();
+    app.install_bundled_plugins(&[bundle("1.2.0")]);
+    assert!(!plugins.join(id).exists());
+
+    // Another version installed from a file is left as it is.
+    bundle("0.9.0").install(&plugins, false).unwrap();
+    app.install_bundled_plugins(&[bundle("1.3.0")]);
+    let version = mg_plugin::Plugin::load(&plugins.join(id)).unwrap().manifest.version;
+    assert_eq!(version, "0.9.0");
+}

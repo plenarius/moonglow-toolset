@@ -1654,6 +1654,53 @@ impl Moonglow {
         self.run_plugin(name, title, false, Some(granted), Some(keeper), run);
     }
 
+    /// Installs the plugins this build bundles (at start, before
+    /// [`Moonglow::load_plugins`]): each one new here once, enabled, and a
+    /// newer bundle over the version it installed. One the user removed,
+    /// installed another version of, or keeps a folder of their own for
+    /// is left as it is. Its hosts are still asked for at its first request.
+    pub fn install_bundled_plugins(&mut self, bundled: &[Package]) {
+        let Some(dir) = self.plugin_dir.clone() else { return };
+        if self.no_plugins {
+            return;
+        }
+        for package in bundled {
+            let m = &package.manifest;
+            let ours = |v: &str| format!("{} {v}", m.id);
+            let installed_by_us = |s: &Vec<String>, v: &str| s.contains(&ours(v));
+            let seen =
+                self.settings.plugins_bundled.iter().any(|e| e.split(' ').next() == Some(&m.id));
+            let replace = match package.existing(&dir) {
+                Existing::Nothing if !seen => false,
+                Existing::Installed { version }
+                    if version != m.version
+                        && installed_by_us(&self.settings.plugins_bundled, &version) =>
+                {
+                    true
+                }
+                _ => continue,
+            };
+            match package.install(&dir, replace) {
+                Ok(_) => {
+                    self.forget_plugin_grants(&m.id);
+                    self.settings.plugins_bundled.retain(|e| e.split(' ').next() != Some(&m.id));
+                    self.settings.plugins_bundled.push(ours(&m.version));
+                    if !replace && !self.plugin_enabled(&m.id) {
+                        self.settings.plugins_enabled.push(m.id.clone());
+                    }
+                    let how = if replace { "updated to" } else { "installed and enabled," };
+                    self.log.said(
+                        Level::Info,
+                        format!("{} {how} {} (comes with Moonglow)", m.name, m.version),
+                    );
+                }
+                Err(e) => {
+                    self.log.said(Level::Warning, format!("{} (comes with Moonglow): {e}", m.name))
+                }
+            }
+        }
+    }
+
     /// Plugins › Install Plugin from File…: asks for a plugin's archive
     /// and installs it.
     pub fn install_plugin(&mut self) {

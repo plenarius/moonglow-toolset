@@ -1,0 +1,35 @@
+{
+  "kind": "area",
+  "items": [
+    {
+      "key": "crypt",
+      "tag": "CRYPT",
+      "name": "The Crypt",
+      "folder": "core",
+      "rev": 4,
+      "tileset": "tdc01",
+      "width": 2,
+      "height": 2
+    },
+    {
+      "key": "well",
+      "tag": "WELL",
+      "name": "The Old Well",
+      "folder": "core",
+      "rev": 5,
+      "tileset": "tdc01",
+      "width": 2,
+      "height": 2
+    },
+    {
+      "key": "wellhouse",
+      "tag": "WELLHOUSE",
+      "name": "The Well House",
+      "folder": "deep",
+      "rev": 1,
+      "tileset": "tdc01",
+      "width": 2,
+      "height": 2
+    }
+  ]
+}

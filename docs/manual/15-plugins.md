@@ -144,10 +144,20 @@ in it) into the plugins folder and press **Reload**.
 | --- | --- | --- |
 | `~/.local/share/moonglow/plugins` | `%APPDATA%\Moonglow\plugins` | `~/Library/Application Support/Moonglow/plugins` |
 
+**Those that come with Moonglow.** A build of Moonglow may bring
+plugins of its own (Moonglow's Layonara build brings the Layonara
+plugin). At its first start each is installed into the plugins folder
+and enabled, the only plugins enabled without your tick, and the log
+says so; a later Moonglow with a newer version of one updates it. It is
+then a plugin like another: disable or remove it and it stays so (a
+plugin you removed isn't installed again), and one you installed in
+another version from a file is left as it is. What it reaches on the
+network it still asks you for before its first request.
+
 ## Enabling
 
-Every plugin is **off until you enable it**: installing one runs none of
-its code. The Plugins tab lists each plugin with its version, what it says
+Every plugin is **off until you enable it** (but those that [come with
+Moonglow](#installing)): installing one runs none of its code. The Plugins tab lists each plugin with its version, what it says
 it does, who wrote it, its license, and the commands and checks it adds.
 Tick its box to enable it; Moonglow remembers. **Run Tests**, beside a
 plugin that comes with tests of its own, runs them, and the log says
