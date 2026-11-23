@@ -14,7 +14,7 @@
 //! | `panel_fill` | `panel` | `.panel`: dock and editor bodies |
 //! | `window_fill`, `window_stroke` | `panel`, 1 px `line-soft` | `.popover`: panel, a `line-soft` border (windows and popups share them) |
 //! | `window_corner_radius`, `menu_corner_radius` | 4 | popover radius 4 |
-//! | `window_shadow` | none | rule 7: no shadows but under popovers |
+//! | `window_shadow` | 6 down, 18 blur, `shadow` | the boards' `.dlg` and `.fwin`: `--shadow` (rule 7 said no shadows but under popovers: the dialog and floating window boards draw one) |
 //! | `popup_shadow` | 6 down, 18 blur, `shadow` | `--shadow`'s drop shadow (its rim: the border) |
 //! | `widgets.noninteractive` | text `text`, lines `line-soft` | body text; rules inside a panel (separators, the heading's rule) |
 //! | `widgets.inactive` | fill `raised`, border `raised`, text `text` | `.btn`, `.combo`, `.toggle` at rest, no border; the border is also a text field's (`.field`'s is `line-soft`, a shade lighter) |
@@ -217,7 +217,14 @@ pub fn style(theme: Theme, old: &Style) -> Style {
         handle_min_length: 16.0,
         ..egui::style::ScrollStyle::solid()
     };
-    style.text_styles = [
+    style.text_styles = text_styles();
+    style
+}
+
+/// The kit's text styles (the body's 13 points, small 11, headings 15,
+/// Hack 13).
+fn text_styles() -> std::collections::BTreeMap<TextStyle, egui::FontId> {
+    [
         (TextStyle::Small, egui::FontId::proportional(metrics::SMALL_SIZE)),
         (TextStyle::Body, egui::FontId::proportional(metrics::BODY_SIZE)),
         (TextStyle::Button, egui::FontId::proportional(metrics::BODY_SIZE)),
@@ -227,8 +234,17 @@ pub fn style(theme: Theme, old: &Style) -> Style {
         (TextStyle::Heading, egui::FontId::proportional(metrics::HEADING_SIZE)),
         (TextStyle::Monospace, egui::FontId::monospace(metrics::MONO_SIZE)),
     ]
-    .into();
-    style
+    .into()
+}
+
+/// Sets back in `style` the kit's own text sizes and the sizes that
+/// follow them (a control's height, a check box's), whatever a window
+/// made larger (the conversation editor's own text size): the kit's
+/// chrome (an editor's header, its popovers) keeps the body's 13 points.
+pub(crate) fn kit_sizes(style: &mut Style) {
+    style.text_styles = text_styles();
+    style.spacing.interact_size.y = metrics::CONTROL_HEIGHT;
+    style.spacing.icon_width = 14.0;
 }
 
 /// The visuals of `theme`: egui's own of the same lightness (their text
@@ -282,7 +298,9 @@ pub fn visuals(theme: Theme, old: &Visuals) -> Visuals {
     v.warn_fg_color = t.warn;
     v.error_fg_color = t.error;
     v.window_corner_radius = CornerRadius::same(metrics::POPOVER_RADIUS);
-    v.window_shadow = Shadow::NONE;
+    // (Windows, dialogs and floating editors, have the popovers' shadow:
+    // the Dialogs and Floating boards.)
+    v.window_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow };
     v.window_fill = t.panel;
     v.window_stroke = line(t.line_soft);
     v.window_highlight_topmost = false;

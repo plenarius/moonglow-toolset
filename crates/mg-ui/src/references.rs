@@ -11,7 +11,7 @@ use mg_resman::ResKey;
 use mg_uikit::Controls as _;
 
 use crate::dialog_view::Row;
-use crate::widgets::{autofocus, enter};
+use crate::widgets::autofocus;
 use crate::{Action, Moonglow, Tab};
 
 /// What the References tab looks for.
@@ -467,7 +467,7 @@ impl Moonglow {
         let moved = |k: &ResKey| scripts.iter().find(|(was, _)| was == k).map(|(_, now)| *now);
         for (_, tab) in self.dock.iter_all_tabs_mut() {
             match tab {
-                Tab::Nui(k) if *k == from => *k = new,
+                Tab::Nui(k) | Tab::NuiSource(k) if *k == from => *k = new,
                 Tab::Script(k) => *k = moved(k).unwrap_or(*k),
                 _ => {}
             }
@@ -536,6 +536,13 @@ impl Moonglow {
             |k: ResKey| (k.resref == from && with(k.restype)).then(|| ResKey::new(to, k.restype));
         for (_, tab) in self.dock.iter_all_tabs_mut() {
             tab.retarget(&moved);
+        }
+        // The module tree's keys at the row renamed: at its new row.
+        if let Some(crate::TreeAt::Resource(k)) = self.tree_cursor
+            && let Some(k) = moved(k)
+        {
+            self.tree_cursor = Some(crate::TreeAt::Resource(k));
+            self.tree_cursor_moved = true;
         }
         let old_keys: Vec<ResKey> =
             self.scripts.keys().filter(|k| k.resref == from && with(k.restype)).copied().collect();
@@ -1061,8 +1068,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui) {
                 if let (Some(path), false) = (u.path.gff(), commands.is_empty()) {
                     let on = [crate::plugins::selected_at(u.from, path)];
                     if commands.iter().any(|c| c.fits(&crate::plugins::kinds_of(&on))) {
-                        r.context_menu(|ui| {
-                            mg_uikit::menu_rows(ui);
+                        mg_uikit::context_menu(&r, |ui| {
                             crate::plugins::menu_on(ui, &commands, &on, &mut app.actions);
                         });
                     }
@@ -1199,14 +1205,15 @@ pub(crate) fn delete_window(app: &mut Moonglow, ctx: &egui::Context) {
     let mut open = true;
     let mut find = None;
     let always_id = egui::Id::new("delete-always");
-    let always = ctx.data(|d| d.get_temp::<bool>(always_id)).unwrap_or(false);
-    crate::widgets::modal(ctx, "Delete from Module").show(ctx, |ui| {
+    let (always_on, always_tip) = crate::widgets::always_now(
+        ctx,
+        always_id,
+        &format!("{} › Ask before deleting from the module", crate::widgets::QUESTIONS_AT),
+    );
+    let footed = crate::widgets::modal(ctx, "Delete from Module").show_foot(ctx, |ui| {
         if let Some(why) = &why_not {
             ui.label(why);
-            if ui.button("OK").clicked() {
-                open = false;
-            }
-            return;
+            return ((), crate::widgets::Foot::new().leave("OK"));
         }
         ui.label(match keys.as_slice() {
             [key] if key.restype == ResType::ARE => {
@@ -1268,10 +1275,19 @@ pub(crate) fn delete_window(app: &mut Moonglow, ctx: &egui::Context) {
             1 => "Edit › Undo brings it back.",
             _ => "Edit › Undo brings them back.",
         });
-        ui.horizontal(|ui| {
-            // (Once what names them is known, to be said first.)
-            let delete = ui.add_enabled(named.is_some(), egui::Button::new("Delete"));
-            if delete.clicked() {
+        // (Delete once what names them is known, to be said first.)
+        let foot = crate::widgets::Foot::new()
+            .check("Don't ask when nothing else names them", always_on, Some(always_tip))
+            .main("Delete", named.is_some())
+            .cancel();
+        ((), foot)
+    });
+    if let Some(f) = footed {
+        if why_not.is_some() {
+            open &= !f.pressed.cancelled();
+        } else {
+            let always = crate::widgets::always_kept(ctx, always_id, f.pressed.checked);
+            if f.pressed.main() {
                 // (Not asked again: Options' switch, from now on.)
                 if always {
                     app.settings.delete_without_asking = true;
@@ -1279,17 +1295,11 @@ pub(crate) fn delete_window(app: &mut Moonglow, ctx: &egui::Context) {
                 app.actions.push(Action::DeleteResources(keys.clone()));
                 open = false;
             }
-            if crate::widgets::cancel(ui) {
+            if f.pressed.cancelled() {
                 open = false;
             }
-        });
-        crate::widgets::always_box(
-            ui,
-            always_id,
-            "Don't ask when nothing else names them",
-            &format!("{} › Ask before deleting from the module", crate::widgets::QUESTIONS_AT),
-        );
-    });
+        }
+    }
     if named.is_some() {
         app.references.named = named;
     }
@@ -1350,6 +1360,9 @@ fn named_ui(ui: &mut Ui, named: Option<&Named>, find: &mut Option<ResKey>) {
     }
 }
 
+/// The Rename dialog's width (the Dialogs board's Rename).
+const RENAME_WIDTH: f32 = 440.0;
+
 /// The Rename window.
 pub(crate) fn rename_window(app: &mut Moonglow, ctx: &egui::Context) {
     let Some(mut draft) = app.rename.take() else { return };
@@ -1375,10 +1388,16 @@ pub(crate) fn rename_window(app: &mut Moonglow, ctx: &egui::Context) {
         let ws = app.ws.as_ref().filter(|_| draft.from.restype == ResType::JUI)?;
         mg_nui::can_rename(&ws.module, &draft.from.resref.to_string(), &to.to_string()).err()
     };
-    crate::widgets::dialog(ctx, &format!("Rename {}", draft.from), &mut open)
+    let footed = crate::widgets::dialog(ctx, &format!("Rename {}", draft.from), &mut open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_foot(ctx, |ui| {
+            // (The Dialogs board's 440 points wide, less the body's margins
+            // and the window's edges, where the screen has the room: U30's
+            // #9. Its notes wrap there.)
+            let body = RENAME_WIDTH - 2.0 * mg_uikit::dialog::BODY_PADDING - 2.0;
+            crate::widgets::fit_min_width(ui, body);
+            crate::widgets::fit_width(ui, body);
             ui.horizontal(|ui| {
                 crate::widgets::field_label(ui, "New name");
                 let mut text = crate::widgets::ResRefText(&mut draft.to);
@@ -1457,16 +1476,12 @@ pub(crate) fn rename_window(app: &mut Moonglow, ctx: &egui::Context) {
             // to change with it.)
             let ready = problem.is_none()
                 && (draft.counted.is_some() || draft.from.restype == ResType::JUI);
-            ui.horizontal(|ui| {
-                let ok = ui.add_enabled(ready, egui::Button::new("Rename"));
-                if ok.clicked() || (ready && enter(ui)) {
-                    done = true;
-                }
-                if crate::widgets::cancel(ui) {
-                    cancel = true;
-                }
-            });
+            ((), crate::widgets::Foot::new().main("Rename", ready).cancel())
         });
+    if let Some(f) = footed {
+        done = f.pressed.main();
+        cancel = f.pressed.cancelled();
+    }
     if done {
         if let Ok(to) = ResRef::from_str(draft.to.trim()) {
             let (from, literals) = (draft.from, draft.literals);

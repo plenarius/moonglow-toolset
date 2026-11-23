@@ -48,11 +48,11 @@ impl Content {
         Content {
             resources: vec![
                 (key("appearance", ResType::TWODA), text("2DA V2.0 appearance ")),
-                (key("l64_head001", ResType::MDL), text("model head ")),
-                (key("l64_head002", ResType::MDL), text("model head ")),
-                (key("l64_tex", ResType::TGA), text("texture ")),
-                (key("layonara", ResType::TLK), text("TLK V3.0 ")),
-                (key("l64_sound", ResType::WAV), text("RIFF sound ")),
+                (key("pw_head001", ResType::MDL), text("model head ")),
+                (key("pw_head002", ResType::MDL), text("model head ")),
+                (key("pw_tex", ResType::TGA), text("texture ")),
+                (key("world", ResType::TLK), text("TLK V3.0 ")),
+                (key("pw_sound", ResType::WAV), text("RIFF sound ")),
             ],
         }
     }
@@ -186,7 +186,7 @@ fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
 fn the_game_storage_is_read_and_left_as_it_was() {
     let dir = mg_testkit::scratch_dir("nwsync-game-read");
     let content = Content::new();
-    let all = ["appearance", "l64_head001", "l64_head002", "l64_tex", "layonara", "l64_sound"];
+    let all = ["appearance", "pw_head001", "pw_head002", "pw_tex", "world", "pw_sound"];
     let g = game_storage(&dir, &content, URL, 100, &all, false);
     let before = snapshot(&dir);
     assert_eq!(g.shards(), 2);
@@ -249,7 +249,7 @@ fn a_pull_downloads_what_is_missing_alone() {
     let dir = mg_testkit::scratch_dir("nwsync-pull");
     let content = Content::new();
     let server = Server::of(&content);
-    let g = game_storage(&dir.join("game"), &content, URL, 100, &["appearance", "l64_tex"], false);
+    let g = game_storage(&dir.join("game"), &content, URL, 100, &["appearance", "pw_tex"], false);
     let cache = Cache::new(dir.join("cache"));
     let (sha, _) = content.manifest();
     let steps = Mutex::new(Vec::new());
@@ -330,8 +330,8 @@ fn bad_and_missing_data_is_given_up_and_said() {
     let dir = mg_testkit::scratch_dir("nwsync-bad-data");
     let content = Content::new();
     let mut server = Server::of(&content);
-    let tex = sha1_hex(&sha1(content.bytes("l64_tex", ResType::TGA)));
-    let sound = sha1_hex(&sha1(content.bytes("l64_sound", ResType::WAV)));
+    let tex = sha1_hex(&sha1(content.bytes("pw_tex", ResType::TGA)));
+    let sound = sha1_hex(&sha1(content.bytes("pw_sound", ResType::WAV)));
     let path = |h: &str| format!("data/sha1/{}/{}/{h}", &h[0..2], &h[2..4]);
     server.files.insert(path(&tex), compress(b"something else", MAGIC_NSYC).unwrap());
     server.files.remove(&path(&sound));
@@ -351,7 +351,7 @@ fn bad_and_missing_data_is_given_up_and_said() {
         pulled.downloaded.failed.iter().map(|(s, e)| (sha1_hex(s), e.clone())).collect();
     assert!(failed[&tex].contains("manifest says"), "{failed:?}");
     assert_eq!(failed[&sound], "the server doesn't have it");
-    assert!(!cache.contains(&sha1(content.bytes("l64_tex", ResType::TGA))));
+    assert!(!cache.contains(&sha1(content.bytes("pw_tex", ResType::TGA))));
     // (A file that isn't what it says is asked for again before it is
     // given up; one the server doesn't have, once.)
     let asked = server.asked.lock().unwrap().clone();
@@ -411,7 +411,7 @@ fn offline_the_newest_manifest_here_is_used() {
 
     // Moonglow downloaded a newer one since: that one.
     let mut newer = Content::new();
-    newer.resources.push((key("l64_new", ResType::MDL), b"new model".to_vec()));
+    newer.resources.push((key("pw_new", ResType::MDL), b"new model".to_vec()));
     let (newer_sha, _) = newer.manifest();
     let server = Server::of(&newer);
     fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, Some(&g)).unwrap();
@@ -438,13 +438,13 @@ fn origins_come_with_the_manifest() {
     let content = Content::new();
     let (sha, _) = content.manifest();
     let mut server = Server::of(&content);
-    let text = "Erf:/srv/hak/l64_parts.hak\n\tl64_head001.mdl\nResFile:/srv/tlk/layonara.tlk\n\
-                \tlayonara.tlk\n";
+    let text = "Erf:/srv/hak/pw_parts.hak\n\tpw_head001.mdl\nResFile:/srv/tlk/world.tlk\n\
+                \tworld.tlk\n";
     server.files.insert(format!("manifests/{}.origin", sha1_hex(&sha)), text.as_bytes().to_vec());
     let cache = Cache::new(dir.join("cache"));
     let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
     let origins = r.found.origins.unwrap();
-    assert!(origins.hak("l64_parts").is_some());
+    assert!(origins.hak("pw_parts").is_some());
     let f = find(URL, Wanted::Latest, Some(&cache), None).unwrap();
     assert_eq!(f.origins, Some(origins));
 
@@ -452,7 +452,7 @@ fn origins_come_with_the_manifest() {
     let g = game_storage(&dir.join("game"), &content, URL, 100, &[], false);
     let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, Some(&g)).unwrap();
     assert_eq!(r.found.from, ManifestFrom::GameStorage);
-    assert!(r.found.origins.is_some_and(|o| o.hak("l64_parts").is_some()));
+    assert!(r.found.origins.is_some_and(|o| o.hak("pw_parts").is_some()));
 }
 
 /// The layer in a resource manager, at NWSync's priority: above a hak,
@@ -466,7 +466,7 @@ fn the_layer_reads_from_the_game_then_the_cache() {
     let (sha, _) = content.manifest();
     let g = Arc::new(game_storage(&dir.join("game"), &content, URL, 100, &["appearance"], true));
     let cache = Arc::new(Cache::new(dir.join("cache")));
-    let tex = content.bytes("l64_tex", ResType::TGA);
+    let tex = content.bytes("pw_tex", ResType::TGA);
     cache.put(&sha1(tex), &zlib(tex)).unwrap();
     let found = find(URL, Wanted::Latest, Some(&cache), Some(&g)).unwrap();
     let layer = NwSyncContainer::new(sha, &found.entries, Some(g.clone()), Some(cache.clone()));
@@ -475,27 +475,27 @@ fn the_layer_reads_from_the_game_then_the_cache() {
     let mut hak = mg_resman::MemContainer::new();
     hak.insert(key("appearance", ResType::TWODA), b"the hak's".to_vec());
     hak.insert(key("only_in_hak", ResType::TWODA), b"the hak's".to_vec());
-    rm.add(priority::HAK_USER, "hak:l64_2da", LayerClass::Erf, hak);
+    rm.add(priority::HAK_USER, "hak:pw_2da", LayerClass::Erf, hak);
     rm.add(priority::NWSYNC, mg_nwsync::label(&sha), LayerClass::NwSync, layer);
     assert_eq!(rm.layers()[0].label, format!("nwsync:{}", sha1_hex(&sha)));
     let appearance = key("appearance", ResType::TWODA);
     assert_eq!(&*rm.get(&appearance).unwrap(), content.bytes("appearance", ResType::TWODA));
     assert_eq!(&*rm.get(&key("only_in_hak", ResType::TWODA)).unwrap(), b"the hak's");
-    assert_eq!(&*rm.get(&key("l64_tex", ResType::TGA)).unwrap(), tex);
+    assert_eq!(&*rm.get(&key("pw_tex", ResType::TGA)).unwrap(), tex);
     // Not downloaded: the manifest's, which can't be read yet.
-    let head = key("l64_head001", ResType::MDL);
+    let head = key("pw_head001", ResType::MDL);
     assert_eq!(rm.origin(&head), Some(mg_nwsync::label(&sha).as_str()));
     let e = rm.get(&head).unwrap_err().to_string();
     assert!(e.contains("not downloaded yet"), "{e}");
-    let data = content.bytes("l64_head001", ResType::MDL);
+    let data = content.bytes("pw_head001", ResType::MDL);
     cache.put(&sha1(data), &compress(data, MAGIC_NSYC).unwrap()).unwrap();
     assert_eq!(&*rm.get(&head).unwrap(), data);
     // The talk table is one of its resources.
-    assert!(rm.contains(&key("layonara", ResType::TLK)));
+    assert!(rm.contains(&key("world", ResType::TLK)));
     // A data file of the wrong size is an error, not the wrong bytes.
-    let sound = content.bytes("l64_sound", ResType::WAV);
+    let sound = content.bytes("pw_sound", ResType::WAV);
     cache.put(&sha1(sound), &store(b"short", MAGIC_NSYC)).unwrap();
-    let e = rm.get(&key("l64_sound", ResType::WAV)).unwrap_err().to_string();
+    let e = rm.get(&key("pw_sound", ResType::WAV)).unwrap_err().to_string();
     assert!(e.contains("the manifest says"), "{e}");
 }
 
@@ -545,9 +545,9 @@ fn the_client_downloads_over_http() {
 /// models, `two` with the rest but the talk table.
 fn origins_of() -> mg_nwsync::Origins {
     mg_nwsync::Origins::parse(
-        "Erf:/srv/hak/one.hak\n\tl64_head001.mdl\n\tl64_head002.mdl\nErf:/srv/hak/two.hak\n\t\
-         appearance.2da\n\tl64_tex.tga\n\tl64_sound.wav\nResFile:/srv/tlk/layonara.tlk\n\t\
-         layonara.tlk\n",
+        "Erf:/srv/hak/one.hak\n\tpw_head001.mdl\n\tpw_head002.mdl\nErf:/srv/hak/two.hak\n\t\
+         appearance.2da\n\tpw_tex.tga\n\tpw_sound.wav\nResFile:/srv/tlk/world.tlk\n\t\
+         world.tlk\n",
     )
 }
 
@@ -566,7 +566,7 @@ fn haks_are_written_from_the_game_and_the_cache() {
         &content,
         URL,
         1,
-        &["l64_head001", "l64_head002", "l64_tex"],
+        &["pw_head001", "pw_head002", "pw_tex"],
         true,
     );
     let before = snapshot(&dir.join("game"));

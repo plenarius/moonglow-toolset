@@ -189,7 +189,7 @@ pub struct HakFiles {
     /// cache.
     pub haks: Vec<WrittenHak>,
     /// The module's talk table, where the manifest has it: its file name
-    /// (`layonara.tlk`) and its file in the cache.
+    /// (`world.tlk`) and its file in the cache.
     pub tlk: Option<(String, PathBuf)>,
     /// Haks the origins file names that the module doesn't list, not
     /// written (the game loads the module's haks alone).

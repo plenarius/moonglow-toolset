@@ -31,7 +31,9 @@ pub mod dialog_export;
 pub mod dialog_view;
 pub mod dialogs;
 mod dock_look;
+pub mod dock_reports;
 pub mod faction_view;
+mod form_pages;
 mod gff_view;
 pub mod hak_view;
 mod icons;
@@ -52,6 +54,21 @@ pub mod model_view;
 pub mod module_folder;
 pub mod module_props;
 mod nui_view;
+/// The NUI designer's header and panels' names (M4's U18), for the tests
+/// and plugins that find its controls.
+pub mod nui_names {
+    pub use crate::nui_view::checks::CHECKS_ROWS;
+    pub use crate::nui_view::design::BINDS_TABLE;
+    pub use crate::nui_view::panels::{ELEMENT_ACTIONS, OUTLINER_ACTIONS};
+    // (The source group's, M4's U19.)
+    pub use crate::nui_view::source::{
+        BINDING_JSON, EVENT_SCRIPT, JUI_SOURCE, OPENER_SCRIPT, SETTINGS_TEXT, SOURCE,
+        SOURCE_HEADER, SOURCE_TEXT,
+    };
+    pub use crate::nui_view::{
+        BUILD, BUILD_STATE, EXPORT, HOW_TO_OPEN, IMPORT, INTERACT, NUI_HEADER, PAGE, RESET, VIEW,
+    };
+}
 pub mod open_tabs;
 pub mod pipelines_kept;
 /// NUI windows drawn off the screen: `mg nui render` and `mg nui layout`.
@@ -63,6 +80,7 @@ pub mod nui_render {
 pub mod nwsync_content_view;
 pub mod nwsync_view;
 mod options;
+mod outliner;
 mod outside;
 pub mod paint_mode;
 pub mod palette_categories;
@@ -72,18 +90,28 @@ pub mod plugin_events;
 pub mod plugin_kinds;
 pub mod plugins;
 pub mod prefabs;
+pub mod problems;
 mod project_commands;
+pub mod properties_panel;
+pub mod quick_open;
 pub mod recovery;
 pub mod references;
 pub mod renderer_check;
+mod report_table;
+mod ro_gff;
 pub mod saved;
 mod script_layout;
 pub mod script_nav;
+mod script_panels;
+mod script_reference;
 pub mod script_tools;
 mod script_view;
 pub mod script_wizard;
 pub mod search;
+pub mod search_results;
 pub mod settings;
+mod shell;
+mod shown_path;
 mod side_doc;
 pub mod store_wizard;
 pub mod table_view;
@@ -97,12 +125,22 @@ mod text;
 pub mod tile_select;
 mod tile_view;
 pub mod tileset_view;
+mod tool_sections;
 pub mod trace;
 mod transfer;
 mod tree;
 pub mod updates;
+pub mod viewers;
+pub use browser::RESOURCE_HEADER;
+pub use outliner::OUTLINER;
+pub use script_panels::{BOOKMARKED_LINES, COMPILER_MESSAGES};
+pub use script_reference::{SCRIPT_HELP, SCRIPT_REFERENCE};
+pub use script_view::SCRIPT_HEADER;
+pub use search_results::SEARCH_HITS;
+pub use shell::{LEAST_WINDOW_SIZE, Panel, RIGHT_COLUMN_TWO, RIGHT_DOCK, RIGHT_DOCK_LEAST};
 pub use tree::TreeAt;
 pub mod var_sets;
+mod welcome;
 pub mod widgets;
 pub mod wizards;
 
@@ -128,8 +166,8 @@ pub use mg_render::backend as graphics;
 pub use mg_render::dx12;
 /// Carrying on when one model fails (for the application's panic hook).
 pub use mg_render::guard as model_guard;
-pub use options::{OptionsDraft, OptionsPage};
-pub use settings::{GraphicsBackend, Settings};
+pub use options::{OptionsDraft, OptionsPage, UI_SCALES};
+pub use settings::{GraphicsBackend, OpenEditors, Settings};
 pub use tabs::Tab;
 pub use text::set_edit_language;
 pub use transfer::{ExportDraft, ImportDraft};
@@ -138,7 +176,12 @@ pub use wizards::{AreaWizard, Wizard};
 /// `setup` (egui-wgpu's: the window's, or a test's) with the backend
 /// options every wgpu instance Moonglow makes takes: Direct3D 12 compiles
 /// with the compiler `mg_render::dx12` chose (the DXC beside the program,
-/// else FXC).
+/// else FXC). On OpenGL the device asks for at least wgpu's default
+/// limits, as far as the adapter has them: egui-wgpu's own device asks
+/// for WebGL 2's there, which allow no storage buffer in a vertex shader,
+/// and the renderer's first pipeline was a validation panic (the tests'
+/// device; the window's asks for the adapter's already). What else was
+/// asked for stays (the tests' 8192 pixels a texture at most).
 pub fn graphics_setup(mut setup: egui_wgpu::WgpuSetup) -> egui_wgpu::WgpuSetup {
     if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
         new.instance_descriptor.backend_options = mg_render::dx12::backend_options();
@@ -147,18 +190,29 @@ pub fn graphics_setup(mut setup: egui_wgpu::WgpuSetup) -> egui_wgpu::WgpuSetup {
         new.instance_descriptor.backends = mg_render::backend::backends_from_env()
             .0
             .unwrap_or(wgpu::Backends::PRIMARY | wgpu::Backends::GL);
+        let asked = new.device_descriptor.clone();
+        new.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = asked(adapter);
+            if adapter.get_info().backend == wgpu::Backend::Gl {
+                descriptor.required_limits = (descriptor.required_limits)
+                    .or_better_values_from(&wgpu::Limits::default())
+                    .or_worse_values_from(&adapter.limits());
+            }
+            descriptor
+        });
     }
     setup
 }
 
 /// Where a tool window is, or opens: a window of its own over the area
 /// (as each does at first), a tab of the main pane beside the areas, or a
-/// tab of the palettes' pane.
+/// pane split off the middle. (`palettes`, the palettes' pane before they
+/// were the Right Dock's Palette panel, is no place now: read, it is
+/// "where its kind opens", and `Settings::shell_migrate` drops it.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Place {
     Window,
     Middle,
-    Palettes,
     /// A pane of its own split off a side of the middle (GitHub issue 22),
     /// this many thousandths of it.
     Split(Side, u16),
@@ -175,12 +229,11 @@ enum Side {
 
 impl Place {
     /// The place as the settings and a module's open tabs keep it:
-    /// `window`, `middle`, `palettes`, `split left 300`.
+    /// `window`, `middle`, `split left 300`.
     fn text(self) -> String {
         match self {
             Place::Window => "window".into(),
             Place::Middle => "middle".into(),
-            Place::Palettes => "palettes".into(),
             Place::Split(side, share) => format!("split {} {share}", side.name()),
         }
     }
@@ -192,7 +245,6 @@ impl Place {
         Some(match (words.next()?, words.next()) {
             ("window", None) => Place::Window,
             ("middle", None) => Place::Middle,
-            ("palettes", None) => Place::Palettes,
             ("split", Some(side)) => {
                 let side = match side {
                     "left" => Side::Left,
@@ -222,8 +274,23 @@ impl Side {
 /// Something the user asked for, run after the frame is drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Folds the palettes' pane away (as their fold button and View do).
+    /// Folds the Right Dock away (as its fold button and View › Right
+    /// Dock do).
     FoldPalettes,
+    /// Shows a panel of the docks: its dock unfolded on it (Tools ›
+    /// Resource Browser shows the Resources panel, Tools › Palettes the
+    /// Palette panel).
+    ShowPanel(Panel),
+    /// Shows a Properties form's own Preview (M4's U11; the Preview
+    /// button of the tab given): its panel in front where the tab is the
+    /// active docked editor, its window's right pane where it floats; a
+    /// tab or window of the model's own where neither is drawn (a window
+    /// too narrow for its pane).
+    ShowPreview(Tab),
+    /// Shows the Properties panel in front, its dock unfolded, where the
+    /// area is the active docked editor (a double click on one of its
+    /// objects, ruling Q1; dragged out, its window's own pane shows it).
+    ShowProperties(mg_core::ResRef),
     NewModuleDialog,
     /// Creates a module with this name (then opens the Area Wizard).
     NewModule(String),
@@ -341,6 +408,19 @@ pub enum Action {
     TalkCsv(bool),
     /// Find References for a talk-table line, by its StrRef.
     FindStrRef(u32),
+    /// The game's `dialog.tlk` written out (M4's U17): as JSON, else CSV.
+    GameTalkExport(bool),
+    /// The game's `dialog.tlk` shown in the Talk Table tab, read-only (the
+    /// Resources panel's row, Quick Open: M4's U17, the owner's ruling).
+    ShowGameTalk,
+    /// The module's talk table in the Talk Table tab (Tools › Talk Table,
+    /// Module Properties' Edit… and New…, a 2DA cell's Talk Table): the
+    /// game's `dialog.tlk` let go of where the tab showed it.
+    ShowModuleTalk,
+    /// A NUI designer's source group (M4's U19): opened beside the
+    /// designer's group (`true`), or closed (`false`).
+    NuiSource(ResKey, bool),
+
     /// The resource browser's Save As: a resource of the load order to a
     /// file (the copy the game reads, or the one a layer has, by its
     /// label).
@@ -389,6 +469,10 @@ pub enum Action {
     /// A tab's own window made to fill the main pane, or put back as it
     /// was.
     ToggleMaximize(Tab),
+    /// Split Editor: the tab in front of the focused editor group to a
+    /// group of its own at its right (or, with two groups or more, to the
+    /// group beside it), the focus with it.
+    SplitEditor,
     /// Build › Test Module, Choose Character: the game's character
     /// selection for the module.
     TestModuleChoose,
@@ -411,7 +495,7 @@ pub enum Action {
     /// with the compiled script made: noted as compiled where the module
     /// has it now, for Compile All to pass over.
     NoteCompiled(Vec<(ResKey, Vec<u8>)>),
-    /// A script editor's Save (its toolbar's, or the Save key while its
+    /// A script editor's Save (its header's, or the Save key while its
     /// text has the keyboard): the text into the module, not the module
     /// to its file.
     SaveScript(ResKey),
@@ -549,6 +633,9 @@ pub struct Log {
     pub times: Vec<String>,
     /// The fixes the last Verify's findings offer, each beside its line.
     pub fixes: Vec<OfferedFix>,
+    /// Counted up as the fixes change (offered, made, undone, let go of):
+    /// Problems' Fix All follows it.
+    pub(crate) fixes_revision: u64,
     /// What those fixes were worked out on.
     pub(crate) fix_guard: mg_edit::fix::Guard,
     /// Each line's height as the panel last drew it (0: not yet): the
@@ -582,6 +669,7 @@ impl Log {
         self.entries.clear();
         self.times.clear();
         self.fixes.clear();
+        self.fixes_revision += 1;
         self.rows.clear();
     }
 
@@ -721,11 +809,43 @@ pub struct Moonglow {
     /// opened from, whose Delete would delete the whole conversation).
     pub(crate) dialog_keys: Option<ResKey>,
     pub dialog_clip: Option<dialog_view::DialogClip>,
+    /// Find or Find Next pressed in this conversation this frame: its
+    /// Search brought to the front as the next frame begins
+    /// (`dialog_view::search_forward`, M4's U14).
+    pub(crate) dialog_search_forward: Option<ResKey>,
+    /// F6 came to a conversation's panel: its first field takes the
+    /// keyboard's focus as it is drawn (M4's U14).
+    pub(crate) dialog_panel_focus: Option<palette_view::Keys>,
+    /// The height a conversation's Conversation panel's rows took as it
+    /// was drawn last in a section of its own: its section's least height
+    /// (`dialog_view::conversation_least`, M4's U14 review).
+    pub(crate) dialog_conversation_height: f32,
     /// The New Conversation window's name.
     pub new_dialog: Option<String>,
     pub script_tools: script_tools::ScriptTools,
+    /// Search Results' hits (M4's U13): the last search's, whatever the
+    /// editor in front (`search_results`).
+    pub search_results: search_results::SearchResults,
+    /// Problems' findings, by the source that found them (M4's U20: the
+    /// tileset editor's Check; `problems`).
+    pub problems: problems::Problems,
+    /// The textures of each tile model a tileset's Textures listed, and
+    /// how many of them are missing, by the model's name: its header's
+    /// count (`tileset_view::panel_detail`, made before the panel is).
+    pub(crate) textures_seen: HashMap<String, (usize, usize)>,
     /// The NUI window whose last Build failed, and why: shown by its Build button.
     pub(crate) nui_build_error: Option<(String, String)>,
+    /// The NUI designers whose checks found more errors this frame: their
+    /// Checks brought to the front at the next frame's start, the Bottom
+    /// Dock (or the window's bottom pane) opened (`shell::bottom_forward`,
+    /// M4's U19).
+    pub(crate) nui_checks_forward: Vec<ResKey>,
+    /// A floating designer's window's place before its source group widened
+    /// it, and the place it was given then (M4's U19): the first given back
+    /// as the group closes, where the window still stands at the second;
+    /// moved or sized by the builder meanwhile, theirs narrowed by the room
+    /// it was given.
+    pub(crate) nui_widened: HashMap<ResKey, (egui::Rect, egui::Rect, Option<egui::Pos2>)>,
     /// The Save Script As window: the script and the new name.
     pub(crate) script_save_as: Option<(ResKey, String)>,
     /// The New Script window's name.
@@ -738,6 +858,9 @@ pub struct Moonglow {
     /// The module's talk table, open for editing (Tools › Talk Table).
     pub talk: Option<mg_module::talk::Table>,
     pub talk_view: talk_view::TalkView,
+    /// The game's `dialog.tlk` while the Talk Table tab shows it,
+    /// read-only (M4's U17; the owner's ruling: in the one tab).
+    pub game_talk: Option<talk_view::GameTalk>,
     /// The talk-table lines typed for the module's fields, kept with the
     /// steps that set them, and the question asked of a text the table
     /// has already (`talk_typed`).
@@ -753,6 +876,16 @@ pub struct Moonglow {
     project_keys_from: Vec<(String, Option<String>)>,
     /// Haks open in the hak editor.
     pub haks: Vec<hak_view::HakDoc>,
+    /// The hak whose resource's sound the Preview plays, with the module
+    /// open then (`hak_view::follow_all` stops it with the hak closed or
+    /// another module).
+    pub(crate) hak_sound: Option<(u32, Option<PathBuf>)>,
+    /// The sound a resource's viewer plays on the Preview channel (a hak's
+    /// Preview, a read-only tab: `viewers`), whose it is: another Play
+    /// anywhere takes the channel and lets it go.
+    pub(crate) viewer_sound: Option<viewers::Playing>,
+    /// The window's picture decodes, a few at a time (`viewers`).
+    pub(crate) decodes: viewers::Decodes,
     /// The 2DAs open in the table editor.
     pub tables: Vec<table_view::TableDoc>,
     pub(crate) next_table: u32,
@@ -793,14 +926,138 @@ pub struct Moonglow {
     /// The 2DA grid that has the keys, as drawn this frame: Undo and Redo
     /// are its, the pointer over no side editor.
     pub(crate) undo_keys: Option<Tab>,
-    /// The side editor the pointer was over before it went onto the menu
-    /// bar or the toolbar (or a menu opened): Edit › Undo and the
-    /// toolbar's are its while the pointer is there (`pointer_on_bars`).
+    /// The side editor the pointer was over before it went onto the Top
+    /// Bar (or a menu opened): Edit › Undo and the Top Bar's are its
+    /// while the pointer is there (`pointer_on_bars`).
     pub(crate) undo_before_bars: Option<Tab>,
     pub(crate) pointer_on_bars: bool,
+    /// The side editor (or the talk table's) the user last worked in, by
+    /// a pointer press or a key (`Moonglow::note_worked`); None, the
+    /// module (the tree, an area, the log): with the pointer on the Top
+    /// Bar come from no side editor, Undo and Redo are its.
+    pub(crate) undo_worked: Option<Tab>,
+    /// The side editor whose tab the pointer was pressed on this frame.
+    pub(crate) pressed_side_tab: Option<Tab>,
+    /// What the shell yields at this frame's width (`shell::frame_yields`,
+    /// decided once as the frame begins).
+    pub(crate) yields: mg_uikit::shell::Yields,
+    /// The Left Dock unfolded by hand in a window whose width folds it
+    /// (under 1500): shown until the window is wide enough not to fold it
+    /// (`shell::set_dock_open`), the builder's `hide_tree` untouched.
+    pub(crate) left_unfolded_here: bool,
+    /// The Right Dock unfolded by hand in a window whose width folds it.
+    pub(crate) right_unfolded_here: bool,
+    /// The side dock the builder unfolded last, which stays where both do
+    /// not fit (`shell::left_folded`).
+    pub(crate) unfolded_last: Option<mg_uikit::shell::Side>,
+    /// The Right Dock stood in more than one tab bar at the last frame
+    /// (the wide layout's two columns, or stacked sections): F6 stops at
+    /// each bar's panel in front ([`Moonglow::right_bars`]).
+    pub(crate) right_columns: bool,
+    /// The panel in front of each of the Right Dock's tab bars at the
+    /// last frame, in the order they were drawn (`shell::right_dock`).
+    pub(crate) right_bars: Vec<Panel>,
+    /// Where each of the Right Dock's stacked sections was drawn at the
+    /// last frame, by the panel in front of it (`shell::right_dock`; none
+    /// where it holds one tab bar). For the window's tests.
+    pub(crate) right_places: Vec<(Panel, egui::Rect)>,
+    /// The panel in front of each pane of the floating editors' windows
+    /// drawn at the last frame (`shell::window_panes`): F6 stops at each,
+    /// after the editor area; and those being drawn this frame.
+    pub(crate) window_bars: Vec<Panel>,
+    pub(crate) window_bars_drawn: Vec<Panel>,
+    /// The Right Dock's panels chosen in front in the run, the last one
+    /// chosen last: each section's front is the last of its panels here
+    /// (`shell::section_front`).
+    pub(crate) right_fronts: Vec<Panel>,
+    /// The Bottom Dock's panel chosen last (its tab or its switch), for
+    /// the run: shown where the dock holds it (`shell::bottom_shown`).
+    pub(crate) bottom_panel: Option<Panel>,
+    /// Each floating editor's window's bottom pane's panel brought to the
+    /// front in the run (a tab clicked there, a script's compile or
+    /// search), by the editor's tab: shown where the pane holds it
+    /// (`shell::window_panes`), before the kind's kept one.
+    pub(crate) window_bottoms: HashMap<Tab, Panel>,
+    /// The panel brought to the front of a section of a floating editor's
+    /// window's right pane in the run, by the window's tabs (M4's U14: a
+    /// floating conversation's Search, asked by Find), before the run's
+    /// and the kind's fronts; a tab chosen there takes its place.
+    pub(crate) window_rights: HashMap<Tab, Panel>,
+    /// The Left Dock's panel chosen last (its tab selected), for the run:
+    /// shown where the dock holds it (`shell::left_shown`).
+    pub(crate) left_panel: Panel,
+    /// The Left Dock's panel drawn last (the arrow keys go from one
+    /// panel to the other with its tab: `shell::left_dock`).
+    pub(crate) left_drawn: Option<Panel>,
+    /// The Outliner's own state (`outliner.rs`): the selection it
+    /// follows, its keys' row.
+    pub(crate) outliner: outliner::Outliner,
+    /// The Resources panel was asked for with no module open: from then
+    /// on the Left Dock holds it with no module open too, for the run.
+    pub(crate) resources_alone: bool,
+    /// Where the Left Dock was drawn at this frame, unfolded
+    /// (`shell::left_dock`; `None` from the start of each frame until it
+    /// is drawn).
+    pub(crate) left_rect: Option<egui::Rect>,
+    /// Where the Left and the Right Dock's strips were drawn at the last
+    /// frame, where folded: a floating editor first opens clear of them
+    /// (`open_window`).
+    pub(crate) strips: [Option<egui::Rect>; 2],
+    /// Where the Right Dock was drawn at this frame, unfolded
+    /// (`shell::right_dock`; `None` from the start of each frame until it
+    /// is drawn, its panels' room while they are).
+    pub(crate) right_rect: Option<egui::Rect>,
+    /// Where the Bottom Dock was drawn at the last frame
+    /// ([`Moonglow::bottom_dock_rect`]).
+    pub(crate) bottom_rect: Option<egui::Rect>,
+    /// How many times the Status Bar has made the last line's tip (only
+    /// while it is hovered or has the focus): [`Moonglow::last_line_tips`].
+    pub(crate) last_line_tips: usize,
+    /// Where the Right Dock's Preview panel's body was drawn at this
+    /// frame, under the dock's tab bar (`shell::right_dock`; `None` from
+    /// the start of each frame until it is drawn, and while the Palette's
+    /// tab is in front).
+    pub(crate) preview_rect: Option<egui::Rect>,
+    /// The Right Dock's panel chosen or moved to last in the run (its tab
+    /// in front), shown where the dock holds it (`shell::right_shown`);
+    /// `None` until then and again as a module opens, the front the
+    /// settings keep for the editor's kind shown (`shell::section_front`).
+    pub(crate) right_panel: Option<Panel>,
+    /// Where panels' bodies are to be drawn in this frame, after the
+    /// editor area (`shell::draw_late`: the Preview's, so that an editor's
+    /// tab showing the same model keeps its view, as it did beside the
+    /// Preview window). Set by `shell::panel_body`, taken when drawn.
+    pub(crate) late_slots: Vec<shell::LateSlot>,
+    /// What a kind of editor brings to the docks in the library's own
+    /// tests (`shell::brings_of`): its kind (`Tab::kind`) and the panels.
+    #[cfg(test)]
+    pub(crate) sample_brings: Option<(&'static str, shell::Brings)>,
+    /// The test panels' bodies drawn, each with its host, and their late
+    /// bodies drawn (`shell::panel_body`, `shell::draw_late`).
+    #[cfg(test)]
+    pub(crate) sample_hosts: Vec<(Panel, shell::Host, Option<Tab>)>,
+    #[cfg(test)]
+    pub(crate) sample_late_drawn: Vec<(Panel, Option<Tab>)>,
+    /// The floating editors' windows' panes drawn, by name, with their
+    /// places (`shell::window_panes`).
+    #[cfg(test)]
+    pub(crate) sample_panes: Vec<(&'static str, egui::Rect)>,
+    /// The Palette panel was asked for (Tools › Palettes, Tools ›
+    /// Preview, a strip button) where the active editor brings none: no
+    /// module open, no game data read, or a tab other than an area's in
+    /// front. The Right Dock holds it (the game's standard palettes in it
+    /// without a module, or without the game's data the words saying so)
+    /// until the active editor brings the Palette itself
+    /// (`shell::follow_editor`).
+    pub(crate) palettes_asked: bool,
+    /// Whether the Right Dock may hold the Palette panel, and a blueprint's
+    /// own Preview (true; in its window's pane where it floats). Tests of
+    /// other windows turn it off, so that the dock is not drawn beside
+    /// what they look at.
+    pub palette_dock: bool,
     /// The script whose editor has the keys, or had them when the menu
     /// still open was opened (the click on it takes them): Edit › Undo
-    /// and Redo and the toolbar's are that editor's, as its keys are
+    /// and Redo and the Top Bar's are that editor's, as its keys are
     /// (`script_view::undo_target`).
     pub(crate) undo_script: Option<ResKey>,
     /// The module Test Module looked for running games on before its save
@@ -823,19 +1080,49 @@ pub struct Moonglow {
     pub adjust: Option<area_tools::AdjustLocation>,
     /// Custom Light… (`light_maker`), while it is open.
     pub light_draft: Option<light_maker::LightDraft>,
-    /// Bake Walkmesh to Transform (`bake_view`): its window, its steps'
-    /// rows files, the save's question.
+    /// The area editor's tool sections' own state (M4's U29: a tool opened
+    /// since the last frame, a main action to make).
+    pub(crate) tools: tool_sections::Tools,
+    /// Bake Walkmesh to Transform (`bake_view`): its Right Dock panel, its
+    /// steps' rows files, the save's question.
     pub bake: bake_view::BakeState,
     /// The settings Custom Light was last written with, offered next.
     pub last_light: mg_module::lights::LightSpec,
-    /// The Find Instance window.
+    /// Find Instance's form and hits (Edit › Find Instance…, the Bottom
+    /// Dock's Search Results tab; a window before M4's U28).
     pub find_instance: Option<area_tools::FindInstance>,
-    /// The Preview window is shown.
-    pub preview_window: bool,
-    /// The Tile Properties window, while it is open.
+    /// The Tile Properties panel's tiles and values, while it shows tiles
+    /// (`tile_select::panel`: read again as the selection or the area
+    /// changes).
     pub tile_props: Option<tile_select::TileProps>,
+    /// The areas whose views were last drawn in Select Tiles (read where
+    /// the view is out of `area_views`, being drawn: `shell::brings_of`).
+    pub(crate) tile_mode_areas: std::collections::HashSet<mg_core::ResRef>,
+    /// F6 came to Tile Properties: its first control takes the keyboard's
+    /// focus as it is next drawn (`tile_select::panel`).
+    pub(crate) tile_props_focus: bool,
+    /// F6 has just given the Properties panel the keys: its page shown
+    /// takes the keyboard's focus as it is drawn (`properties_panel`).
+    pub(crate) props_focus: bool,
+    /// A Properties form is being drawn in the Properties panel: its ids
+    /// are the panel's own (`blueprint::window_state_id`).
+    pub(crate) panel_form: bool,
+    /// The editors dragged out into windows too narrow for their right pane
+    /// (`shell::window_panes`, the last frame's): a double click in such an
+    /// area opens the Properties window, there being no panel to show; a
+    /// blueprint's Preview button opens the model's own tab.
+    pub(crate) panes_dropped: std::collections::HashSet<Tab>,
+    /// The Properties panel's page shown for each type of object (kept
+    /// as another object of that type is selected; the windows keep
+    /// theirs by object, `blueprint_pages`).
+    pub(crate) panel_pages: HashMap<ResType, &'static str>,
+    /// Another area's Tile Properties panel's, while this frame's is
+    /// `tile_props` (two areas in Select Tiles, one dragged out).
+    pub(crate) tile_props_aside: std::collections::HashMap<mg_core::ResRef, tile_select::TileProps>,
     /// The Build Module window, while it is open.
     pub build: Option<build_view::BuildWindow>,
+    /// Build's Counted as Used field in Problems: what is typed in it.
+    pub(crate) build_used: build_view::UsedDraft,
     /// Setup Store (a creature's context menu).
     pub store_wizard: Option<store_wizard::StoreWizard>,
     /// Add Popup Text (a placeable's context menu).
@@ -844,7 +1131,8 @@ pub struct Moonglow {
     pub levelup: Option<levelup_view::LevelupWizard>,
     /// Wizards › Creature Wizard.
     pub creature_wizard: Option<creature_wizard::CreatureWizard>,
-    /// The area whose Area Statistics window is open.
+    /// The area Resources Used reports on, while its Bottom Dock tab is
+    /// open (the Area Statistics window before M4's U28).
     pub area_stats: Option<mg_core::ResRef>,
     /// The Resize Area window, while it is open.
     pub resize_area: Option<area_reshape::ResizeDraft>,
@@ -857,7 +1145,7 @@ pub struct Moonglow {
     pub after_new_area: (bool, bool),
     /// Tiles copied in an area viewer.
     pub tile_clip: Option<tile_select::TileClip>,
-    /// The area views' placeable brush is on (their toolbar's Paint): the
+    /// The area views' placeable brush is on (their tool shelf's Paint): the
     /// placeables chosen in the palette are painted, not placed one a click.
     pub paint: bool,
     /// Objects copied in an area viewer.
@@ -928,6 +1216,9 @@ pub struct Moonglow {
     pub(crate) lights_kept: std::cell::RefCell<Option<area_view::LightsKept>>,
     /// The interface size was set from the settings (to set it back).
     scaled: bool,
+    /// The scale (points to pixels) the window's least size was last
+    /// given for (`shell::keep_least_size`).
+    least_size_for: Option<f32>,
     /// The models' windows open as the frame began.
     pub(crate) open_models: Vec<Tab>,
     /// The folder Export as Files last wrote to (offered again).
@@ -938,8 +1229,12 @@ pub struct Moonglow {
     pub update_draft: Option<bulk::UpdateDraft>,
     /// The Edit Areas Together window: the areas being chosen.
     pub(crate) area_chooser: Option<area_props::AreaChooser>,
-    /// The Find and Replace Text window.
+    /// Find and Replace Text's form and the strings it found (Search
+    /// Results' header and rows, M4's U28).
     pub text_replace: Option<bulk::TextReplace>,
+    /// Find and Replace Text's Find to be run again (a Replace in N made):
+    /// at the next frame's start, as a job.
+    pub(crate) text_refind: bool,
     /// The Advanced Search tab's state.
     pub advanced_search: search::AdvancedSearch,
     /// What its last question found in each resource, for the next time
@@ -969,11 +1264,22 @@ pub struct Moonglow {
     tlk_stamp: Option<(PathBuf, std::time::SystemTime)>,
     /// The blueprint palettes pane.
     pub palette: palette_view::PaletteView,
-    /// The hak conflict report being shown.
-    pub hak_report: Option<String>,
-    /// What the module uses of its haks, shown with the conflict report
-    /// once asked for (`mg_preview::usage`, as `mg haks --usage`).
-    pub hak_usage: Option<String>,
+    /// Hak Pak Conflict Analysis' report and how it is shown: its Bottom
+    /// Dock tab's state (M4's U28; a window before), with What the Module
+    /// Uses' lines once asked for (`mg_preview::usage`, as `mg haks
+    /// --usage`).
+    pub hak_report: Option<dock_reports::HakConflicts>,
+    /// Resources Used's table (its row chosen).
+    pub(crate) used_table: report_table::Table,
+    /// Resources Used's rows, and what they were counted for (the area,
+    /// the revision its view read, whether it was reading).
+    #[allow(clippy::type_complexity)]
+    pub(crate) used_rows:
+        Option<((mg_core::ResRef, Option<u64>, bool), std::sync::Arc<Vec<(&'static str, String)>>)>,
+    /// The Bottom Dock's least height for the panel in front, as its first
+    /// row's end was last drawn (`shell::first_row_ends`): its form and a
+    /// whole row (M4's U28).
+    pub(crate) dock_need: f32,
     /// The custom talk table loaded into the game data, by name.
     custom_tlk: Option<String>,
     pub var_edit: Option<widgets::VarTableEdit>,
@@ -992,6 +1298,11 @@ pub struct Moonglow {
     pub(crate) picked: HashMap<egui::Id, mg_core::ResRef>,
     /// Resources open in read-only viewers, parsed once.
     pub(crate) viewed: HashMap<(ResKey, Option<String>), std::sync::Arc<browser::Viewed>>,
+    /// How many times Options' changes were set in the settings (M4's
+    /// U23; counted where they are set since its fix, `apply_options` or
+    /// the OK of looks alone): once an OK, never while it is open, never
+    /// at Cancel, Escape or its ×. For the tests.
+    pub(crate) options_applied: usize,
     /// The pass in which an area view last had something in hand (a
     /// brush, a paste, a drag, a terrain tool): Escape is its then.
     pub(crate) area_tool_at: u64,
@@ -1004,6 +1315,77 @@ pub struct Moonglow {
     /// The Properties window Escape is Cancel for this frame, as Aurora's
     /// Escape is (`blueprint::window_drawn_but` presses it).
     pub(crate) escape_cancel: Option<Tab>,
+    /// Escape for a docked tab with OK and Cancel (ruling R1): the tab in
+    /// front of its group with the pointer or the keyboard in it, as the
+    /// editor area was drawn (`escape_docked_seen`), where the key is
+    /// still there once the editor area is drawn (a field of the tab, or
+    /// something drawn before it, did not take it), and no window in front
+    /// took it this frame (`escape_taken`). Taken as that tab's Escape in
+    /// the next frame (`escape_docked`), so that one tab, never two, takes
+    /// an Escape: the editor groups are drawn before the windows over them.
+    pub(crate) escape_docked_seen: Option<Tab>,
+    pub(crate) escape_taken: bool,
+    pub(crate) escape_docked: Option<Tab>,
+    escape_docked_next: Option<Tab>,
+    /// The docked tab with OK and Cancel an Escape would be the Cancel of
+    /// now (the Status Bar's Esc hint, M3's T12), as `tabs::Viewer::body`
+    /// foresees it while the editor area is drawn (cleared as each frame
+    /// begins): by T10's rule where nothing has the keyboard (where
+    /// something has, where the key goes is known only at the Escape, and
+    /// no hint is shown). (A window in front with OK and Cancel takes an
+    /// Escape only where no docked tab does.)
+    pub(crate) escape_hint_next: Option<Tab>,
+    /// The pointer over a floating model's window as the editor area was
+    /// drawn: an Escape closes that window, whatever docked tab would
+    /// take it otherwise (`tabs::Viewer::body`'s `model`).
+    pub(crate) model_under_pointer_next: bool,
+    /// The pointer over the Options tab as the editor area was drawn (its
+    /// Enter is OK then, with nothing typed in): the Status Bar's Enter
+    /// hint.
+    pub(crate) options_hovered_next: bool,
+    /// The tabs in front of floating windows as the editor area was drawn
+    /// (cleared as each frame begins), each with its window's layer and
+    /// whether the pointer is over it, where it is or the last press was
+    /// in it: the Status Bar's editor in place of the docked one
+    /// ([`Moonglow::active_editor`], `shell::update_shown`). M4's U23
+    /// fix: a floating read-only tab's counts, a floating Faction Editor's
+    /// hints.
+    pub(crate) window_tabs_next: Vec<(Tab, egui::LayerId, bool)>,
+    /// What the Status Bar shows ([`shell::shown`]), made once a frame
+    /// after the editor area is drawn and shown by the next frame's bar
+    /// (drawn before the editor area, whose state it reads); a frame is
+    /// asked for where it changed.
+    pub(crate) bar_shown: shell::Shown,
+    /// The Resources panel in use as the Left Dock was drawn last (the
+    /// pointer over it, or its list with the keys): `Some(over)`, where
+    /// `over` says the pointer is over it. The Status Bar's hints are the
+    /// panel's then (the Resources board's).
+    pub(crate) resources_here: Option<bool>,
+    /// What the Status Bar shows in place of the active editor's hints and
+    /// counts, for tests of the bar's room ([`Moonglow::status_for_tests`]).
+    pub(crate) status_for_tests: Option<shell::Shown>,
+    /// Where the last press of a pointer button was, and the layer it was
+    /// on: where the keyboard is for a docked tab's Escape (egui takes the
+    /// keyboard from a field at an Escape before anything is drawn, and
+    /// does not say where that field was).
+    pub(crate) last_press: Option<(egui::Pos2, Option<egui::LayerId>)>,
+    /// The widget that had the keyboard as the last frame ended (egui
+    /// takes it from the widget at an Escape before anything is drawn).
+    focus_was: Option<egui::Id>,
+    /// Where the keyboard was at this frame's Escape: the widget that had
+    /// it (its layer and middle), else the last press; and whether a
+    /// widget had it. `None` without an Escape.
+    pub(crate) keyboard_at: Option<(Option<egui::LayerId>, egui::Pos2)>,
+    pub(crate) keyboard_focused: bool,
+    /// Where the docked tabs with OK and Cancel in front of their groups
+    /// were drawn at the last frame (their layers and rectangles), and this
+    /// frame's: the keyboard in one of them is that tab's.
+    pub(crate) cancel_rects: Vec<(egui::LayerId, egui::Rect)>,
+    pub(crate) cancel_rects_next: Vec<(egui::LayerId, egui::Rect)>,
+    /// Tabs the user moved by hand of late (dragged, or by Split Editor):
+    /// in As Tabs mode, the only docked moves a kind's place is kept for
+    /// (`remember_window_places`).
+    moved_by_hand: Vec<Tab>,
     /// A resource for the module tree to bring into view, its group
     /// opened (and, an area, if asked, opened out to what is placed in
     /// it): that of the tab just chosen, or of its menu's Show in Module
@@ -1042,7 +1424,7 @@ pub struct Moonglow {
     /// one area: as the area view's selection, or by Ctrl and Shift with a
     /// click there; and the row a Shift+click goes from.
     pub tree_objects: Option<(mg_core::ResRef, std::collections::BTreeSet<tree::Placed>)>,
-    pub(crate) tree_objects_anchor: Option<tree::Placed>,
+    pub(crate) tree_objects_anchor: Option<tree::Anchor>,
     /// The area view's selection as the module tree last saw it.
     pub(crate) tree_seen_selection: Option<(mg_core::ResRef, Vec<tree::Placed>)>,
     /// Objects to select in an area's view once it is open (the module
@@ -1115,6 +1497,40 @@ pub struct Moonglow {
     /// Each pane's tabs in their order, as this frame began (the dock is
     /// out of reach while its tabs are drawn).
     pub(crate) panes_tabs: Vec<Vec<Tab>>,
+    /// Each tab's look this frame (its icon, name, modified dot and title
+    /// laid out: `tabs::prepare`, before the dock is drawn).
+    pub(crate) doc_tabs: HashMap<Tab, tabs::Look>,
+    /// What the tabs' looks are kept by from frame to frame.
+    pub(crate) look_cache: tabs::LookCache,
+    /// The tabs in front of their panes, as this frame began.
+    pub(crate) fronts: std::collections::HashSet<Tab>,
+    /// The tab in front of each pane at the last frame: a pane whose tab in
+    /// front is another now scrolls its tab bar to it (`reveal_fronts`).
+    fronts_before: std::collections::HashSet<Tab>,
+    /// Where each tab was drawn at the last frame, and the part of it in
+    /// sight.
+    pub(crate) tab_rects: HashMap<Tab, (egui::Rect, egui::Rect)>,
+    /// The tab being dragged this frame (its parts drawn where it is
+    /// dragged, not in its place: `TabViewer::on_tab_dragged`).
+    pub(crate) dragged_tab: Option<Tab>,
+    /// A test's hold on the 2DA editor's looks for a table's description:
+    /// while set, a look stays under way (as one walking a large folder).
+    #[doc(hidden)]
+    pub hold_description_looks: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Holds every Find References to Row of the 2DA editor's References
+    /// panel at its start while set (M4's U16), as
+    /// [`Moonglow::hold_description_looks`] holds the description's look:
+    /// for a test to see it under way, and stopped as another row is
+    /// chosen. Never set by the application.
+    #[doc(hidden)]
+    pub hold_reference_looks: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A 2DA grid's tab whose pane is to take the focus once the editor
+    /// area is drawn (`table_view::focus_asked`: its grid was given the
+    /// keys).
+    pub(crate) focus_asked_tab: Option<Tab>,
+    /// The active editor's tab as the frame began (`table_view::active_tab`:
+    /// the dock is the editor area's while its tabs are drawn).
+    pub(crate) active_tab_now: Option<Tab>,
     /// The tabs closed, the last one last: Reopen Closed Tab's.
     pub(crate) closed_tabs: Vec<Tab>,
     /// Where each window (by its first tab) is.
@@ -1122,14 +1538,14 @@ pub struct Moonglow {
     /// The width of a window's frame round its panes (its stroke: the dock
     /// gives its windows no margin), for following a window egui_dock made.
     window_frame: f32,
-    /// Where the panes are drawn (under the toolbar, beside the tree).
+    /// Where the panes are drawn (under the Top Bar, beside the tree).
     dock_rect: Option<egui::Rect>,
     /// The resources waiting for the answer to "delete it?" (one, or those
     /// chosen in the module tree).
     pub confirm_delete: Option<Vec<ResKey>>,
     pub quit_requested: bool,
     /// What the startup check and the area view's watch found of the
-    /// renderer here, for the notice under the toolbar.
+    /// renderer here, for the notice under the Top Bar.
     pub renderer_check: renderer_check::RendererCheck,
     /// The lit check, once the game's data is read
     /// ([`renderer_check::lit_check`]).
@@ -1164,27 +1580,15 @@ pub struct Moonglow {
     pub about: bool,
     /// Help › Check for Updates… and the daily check (`updates`).
     pub updates: updates::Updates,
+    /// What the Welcome page and No area open keep between frames (the
+    /// update line's sight, whether the module has areas, a drag's paths).
+    welcome: welcome::Kept,
     /// The window's content area at the last frame (where new windows go).
     screen: Option<egui::Rect>,
-    /// The widths of the module tree and of the panes beside it at the last
-    /// frame (the Palettes pane opens as wide as the tree).
+    /// The widths of the Left Dock and of the editor area at the last
+    /// frame (the Top Bar yields by the editor's).
     tree_width: Option<f32>,
     dock_width: Option<f32>,
-    /// The palettes' pane's share of the middle's width, as last drawn.
-    palette_share: Option<f32>,
-    /// The side of the middle the palettes' pane was on at the last frame,
-    /// with the tabs in it: they leave room along its inner edge for the
-    /// button that folds it away (`palettes_edge`).
-    palette_edge: Option<(Side, Vec<Tab>)>,
-    /// Where the palettes' pane's covered arrow (egui_dock's) was drawn:
-    /// the keyboard is moved on past it ([`Moonglow::pass_covered_arrow`]).
-    palette_arrow: Option<egui::Rect>,
-    /// The last Tab pressed was Shift+Tab: the way the keyboard goes.
-    tab_back: bool,
-    /// A module was opened: the Palettes pane opens once the module tree
-    /// shows (and has a width to match). Tests of other windows turn it
-    /// off.
-    pub open_palette: bool,
     /// The plugins installed, and what they are doing (`plugins`).
     pub plugins: plugins::Plugins,
     /// Where plugins are installed (the application gives Moonglow's data
@@ -1202,13 +1606,17 @@ pub struct Moonglow {
     pub no_plugins: bool,
     /// The keys are to be worked out again (the plugins changed).
     keymap_stale: bool,
-    /// The Command Palette, while it is open.
-    pub command_palette: Option<commands::Finder>,
+    /// Quick Open: the Top Bar's field, what is typed in it and its index
+    /// (`quick_open`). The Command Palette is Quick Open among the commands.
+    pub quick_open: quick_open::QuickOpen,
     /// The job under way, if one is (`jobs`).
     pub(crate) job: Option<jobs::Job>,
     /// Jobs run while the window keeps drawing (the application turns
     /// this on); off, starting a job waits for it, as tests want.
     pub background_jobs: bool,
+    /// How many times a module was opened or closed: a job on the module
+    /// knows the one it began on (`jobs`; M4's U28 review).
+    pub(crate) modules_opened: u64,
 }
 
 impl std::fmt::Debug for Moonglow {
@@ -1273,9 +1681,17 @@ impl Moonglow {
             dialog_views: HashMap::new(),
             dialog_keys: None,
             dialog_clip: None,
+            dialog_search_forward: None,
+            dialog_panel_focus: None,
+            dialog_conversation_height: 0.0,
             new_dialog: None,
             script_tools: script_tools::ScriptTools::default(),
+            search_results: search_results::SearchResults::default(),
+            problems: problems::Problems::default(),
+            textures_seen: HashMap::new(),
             nui_build_error: None,
+            nui_checks_forward: Vec::new(),
+            nui_widened: HashMap::new(),
             script_save_as: None,
             new_script: None,
             script_wizard: None,
@@ -1284,11 +1700,15 @@ impl Moonglow {
             talk: None,
             typed: Default::default(),
             talk_view: Default::default(),
+            game_talk: None,
             haks_layered: Vec::new(),
             keymap: Default::default(),
             keymap_from: Default::default(),
             project_keys_from: Vec::new(),
             haks: Vec::new(),
+            hak_sound: None,
+            viewer_sound: None,
+            decodes: Default::default(),
             next_hak: 0,
             tables: Vec::new(),
             next_table: 0,
@@ -1308,6 +1728,43 @@ impl Moonglow {
             undo_keys: None,
             undo_before_bars: None,
             pointer_on_bars: false,
+            undo_worked: None,
+            pressed_side_tab: None,
+            yields: mg_uikit::shell::Yields::of(1600.0, 1600.0),
+            left_unfolded_here: false,
+            right_unfolded_here: false,
+            unfolded_last: None,
+            right_columns: false,
+            right_bars: Vec::new(),
+            right_places: Vec::new(),
+            window_bars: Vec::new(),
+            window_bars_drawn: Vec::new(),
+            right_fronts: Vec::new(),
+            bottom_panel: None,
+            window_bottoms: HashMap::new(),
+            window_rights: HashMap::new(),
+            left_rect: None,
+            strips: [None; 2],
+            left_panel: Panel::Module,
+            left_drawn: None,
+            outliner: Default::default(),
+            resources_alone: false,
+            right_rect: None,
+            bottom_rect: None,
+            last_line_tips: 0,
+            preview_rect: None,
+            right_panel: None,
+            late_slots: Vec::new(),
+            #[cfg(test)]
+            sample_brings: None,
+            #[cfg(test)]
+            sample_hosts: Vec::new(),
+            #[cfg(test)]
+            sample_late_drawn: Vec::new(),
+            #[cfg(test)]
+            sample_panes: Vec::new(),
+            palettes_asked: false,
+            palette_dock: true,
             undo_script: None,
             test_checked: None,
             model_views: HashMap::new(),
@@ -1317,6 +1774,7 @@ impl Moonglow {
             area_views: HashMap::new(),
             adjust: None,
             light_draft: None,
+            tools: Default::default(),
             bake: Default::default(),
             last_light: Default::default(),
             find_instance: None,
@@ -1348,8 +1806,10 @@ impl Moonglow {
             model_export: None,
             open_models: Vec::new(),
             scaled: false,
+            least_size_for: None,
             area_chooser: None,
             text_replace: None,
+            text_refind: false,
             advanced_search: Default::default(),
             search_kept: Default::default(),
             prefab_dir: None,
@@ -1366,10 +1826,17 @@ impl Moonglow {
             item_clip: Vec::new(),
             tile_clip: None,
             after_new_area: (false, false),
-            preview_window: false,
             tile_props: None,
+            tile_mode_areas: Default::default(),
+            tile_props_aside: Default::default(),
+            tile_props_focus: false,
+            props_focus: false,
+            panel_form: false,
+            panes_dropped: Default::default(),
+            panel_pages: HashMap::new(),
             area_stats: None,
             build: None,
+            build_used: Default::default(),
             store_wizard: None,
             popup_text: None,
             levelup: None,
@@ -1379,7 +1846,9 @@ impl Moonglow {
             change_tileset: None,
             palette: Default::default(),
             hak_report: None,
-            hak_usage: None,
+            used_table: Default::default(),
+            used_rows: None,
+            dock_need: 0.0,
             custom_tlk: None,
             var_edit: None,
             var_pages: HashMap::new(),
@@ -1388,9 +1857,28 @@ impl Moonglow {
             picker: None,
             picked: HashMap::new(),
             viewed: HashMap::new(),
+            options_applied: 0,
             area_tool_at: 0,
             load_order: 0,
             escape_cancel: None,
+            escape_docked_seen: None,
+            escape_taken: false,
+            escape_docked: None,
+            escape_docked_next: None,
+            escape_hint_next: None,
+            model_under_pointer_next: false,
+            options_hovered_next: false,
+            window_tabs_next: Vec::new(),
+            bar_shown: shell::Shown::default(),
+            resources_here: None,
+            status_for_tests: None,
+            last_press: None,
+            focus_was: None,
+            keyboard_at: None,
+            keyboard_focused: false,
+            cancel_rects: Vec::new(),
+            cancel_rects_next: Vec::new(),
+            moved_by_hand: Vec::new(),
             tree_reveal: None,
             tree_area: None,
             tree_marked: None,
@@ -1432,6 +1920,16 @@ impl Moonglow {
             area_hovered: false,
             tab_places: HashMap::new(),
             panes_tabs: Vec::new(),
+            doc_tabs: HashMap::new(),
+            look_cache: tabs::LookCache::default(),
+            fronts: Default::default(),
+            fronts_before: Default::default(),
+            tab_rects: HashMap::new(),
+            dragged_tab: None,
+            hold_description_looks: Default::default(),
+            hold_reference_looks: Default::default(),
+            focus_asked_tab: None,
+            active_tab_now: None,
             closed_tabs: Vec::new(),
             windows: HashMap::new(),
             window_frame: 1.0,
@@ -1452,23 +1950,20 @@ impl Moonglow {
             manual: Default::default(),
             about: false,
             updates: Default::default(),
+            welcome: Default::default(),
             screen: None,
             tree_width: None,
             dock_width: None,
-            palette_share: None,
-            palette_edge: None,
-            palette_arrow: None,
-            tab_back: false,
-            open_palette: false,
             plugins: Default::default(),
             plugin_dir: None,
             plugin_answers: None,
             plugin_values: None,
             no_plugins: false,
             keymap_stale: false,
-            command_palette: None,
+            quick_open: Default::default(),
             job: None,
             background_jobs: false,
+            modules_opened: 0,
         }
     }
 
@@ -1546,7 +2041,12 @@ impl Moonglow {
 
     /// The application with saved settings: their game install (or the
     /// detected one) and recent modules.
-    pub fn with_settings(settings: Settings, dialogs: Box<dyn Dialogs>) -> Moonglow {
+    pub fn with_settings(mut settings: Settings, dialogs: Box<dyn Dialogs>) -> Moonglow {
+        // (An older Moonglow's, made the shell's: `Settings::shell_migrate`.)
+        settings.shell_migrate();
+        // (Sizes kept before the theme's rows, made as tall as their
+        // windows are now: `Settings::scale_window_sizes`.)
+        settings.scale_window_sizes();
         let mut app = Moonglow::new(settings.install(), dialogs);
         set_edit_language(mg_core::Language(settings.edit_language.unwrap_or(0)));
         // (From the start, so that it has a module opened at once.)
@@ -1557,6 +2057,12 @@ impl Moonglow {
 
     /// Draws the whole application.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // (Tab is a 2DA grid's with its keys, before any control can take
+        // it: M4's U16.)
+        self.active_tab_now = table_view::front_of_focused(self);
+        report_table::tab_from_the_rows(ui.ctx());
+        table_view::keep_tab_for_the_grid(self, ui.ctx());
+        faction_view::keep_tab_for_the_matrix(self, &ui.ctx().clone());
         // (The game's text is read by the open module's table, if its haks
         // have one: `encoding.2da`.)
         let codepage = self.game.as_deref().map(GameData::codepage);
@@ -1575,6 +2081,37 @@ impl Moonglow {
         self.trace_frame(ui);
         // (Pressed by the window it was for, in the frame it was asked.)
         self.escape_cancel = None;
+        // (A docked tab's Escape, seen as the last frame drew the editor
+        // area, and no window's: that tab's now.)
+        self.escape_docked = self.escape_docked_next.take();
+        self.escape_docked_seen = None;
+        self.escape_taken = false;
+        // (The Status Bar's Esc and Enter hints, as the editor area was
+        // drawn last.)
+        self.escape_hint_next = None;
+        self.model_under_pointer_next = false;
+        self.options_hovered_next = false;
+        self.window_tabs_next.clear();
+        let pressed = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()));
+        if let Some(at) = pressed.flatten() {
+            self.last_press = Some((at, ui.ctx().layer_id_at(at)));
+        }
+        // Where the keyboard is, for an Escape (ruling R1): the widget that
+        // had it, else where the last press was. (Its place is read only
+        // at an Escape, when egui has taken the keyboard from it already:
+        // reading a widget's response at a frame's end changed what the
+        // next frame's widgets did.)
+        self.cancel_rects = std::mem::take(&mut self.cancel_rects_next);
+        self.keyboard_at = None;
+        self.keyboard_focused = false;
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let widget = self.focus_was.and_then(|id| ui.ctx().read_response(id));
+            self.keyboard_focused = widget.is_some();
+            self.keyboard_at = match widget {
+                Some(r) => Some((Some(r.layer_id), r.rect.center())),
+                None => self.last_press.map(|(p, l)| (l, p)),
+            };
+        }
         // (A color being picked, as the windows asked in the frame before.)
         self.var_preview = std::mem::take(&mut self.var_preview_next);
         let female = self.settings.armor_on_woman;
@@ -1676,6 +2213,12 @@ impl Moonglow {
         // (egui's float over the content and show only under the pointer,
         // so a list gave no sign that there was more of it).
         mg_uikit::apply(ui.ctx(), self.theme());
+        // (egui's own resize corner off: the windows and the resizable
+        // dialogs paint the boards' grip, `mg_uikit::paint_resize_grip`,
+        // where egui's three strokes in the frame's color were.)
+        if ui.ctx().global_style().visuals.resize_corner_size > 0.0 {
+            ui.ctx().all_styles_mut(|s| s.visuals.resize_corner_size = 0.0);
+        }
         // Options › General › Interface size (when chosen; else the size is
         // egui's own, which Ctrl with + and - change).
         match self.settings.ui_scale {
@@ -1690,7 +2233,19 @@ impl Moonglow {
             None if std::mem::take(&mut self.scaled) => ui.ctx().set_zoom_factor(1.0),
             None => {}
         }
+        // The window's least size, in points: in pixels it follows the
+        // interface size (and Ctrl with + and -).
+        shell::keep_least_size(self, ui.ctx());
         self.screen = Some(ui.ctx().content_rect());
+        // (What the shell yields at this width: read by the bars and the
+        // docks drawn below.)
+        shell::frame_yields(self, ui.ctx());
+        shell::take_dock_sizes(self, ui.ctx());
+        shell::keys_leave_panels_not_drawn(self, ui.ctx());
+        palette_view::let_go_of_held_keys(ui.ctx());
+        // (The area editor's tools, M4's U29: opened, brought to the front;
+        // a main action pressed, made.)
+        tool_sections::follow(self);
         if std::mem::take(&mut self.minimize_requested) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
@@ -1698,8 +2253,8 @@ impl Moonglow {
         updates::frame(self, ui.ctx());
         self.next_plugin_event();
         self.panels_frame(ui.ctx());
-        // (Before the menus and the toolbar, which are drawn before the
-        // editor: they see the keys it had.)
+        // (Before the Top Bar's menus and buttons, which are drawn before
+        // the editor: they see the keys it had.)
         script_view::undo_target(self, ui.ctx());
         // (A running job has the window to itself.)
         if !self.busy() {
@@ -1708,94 +2263,89 @@ impl Moonglow {
         // (A menu open as the frame began: one of its entries may be
         // chosen in it, and close it.)
         let menu_was_open = egui::Popup::is_any_open(ui.ctx());
-        let bars = egui::Panel::top("menu").show(ui, |ui| {
-            commands::menu_bar(self, ui);
-            // Buttons for the common commands, below the menu as in Aurora.
-            commands::toolbar(self, ui);
-        });
-        // (On the way from a side editor to Edit › Undo or the toolbar's,
+        // The Top Bar: the menus, the quick actions and the build actions
+        // in one row (the shell, `shell.rs`).
+        let bars = shell::top_bar(self, ui);
+        // Quick Open's popover under its field (and the field over the bar
+        // where the bar's middle had room for its icon alone).
+        quick_open::after_bar(self, ui, bars);
+        // (On the way from a side editor to Edit › Undo or the Top Bar's,
         // or with a menu open, Undo stays the editor's the pointer left.)
-        self.pointer_on_bars = ui.rect_contains_pointer(bars.response.rect)
-            || menu_was_open
-            || egui::Popup::is_any_open(ui.ctx());
+        self.pointer_on_bars =
+            ui.rect_contains_pointer(bars) || menu_was_open || egui::Popup::is_any_open(ui.ctx());
         if !self.pointer_on_bars {
             self.undo_before_bars = self.undo_under_pointer.clone();
         }
-        // A newer release, told under the toolbar until dismissed.
+        // A newer release, told under the Top Bar until dismissed.
         updates::notice_bar(self, ui);
         // A renderer that draws nothing (the startup check, the area
         // view's watch).
         renderer_check::notice_bar(self, ui);
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        // The log shrinks to a single line if the user wants it that small.
-        let line = ui.text_style_height(&egui::TextStyle::Monospace);
-        // The side panes leave the middle its room, however they were left
-        // (their sizes are remembered between runs) and whatever is in
-        // them: the log at most half the window's height, the module tree
-        // at most two fifths of its width.
-        let window = ui.ctx().content_rect().size();
-        // Each pane beside the middle has a strip along the edge it faces
-        // the middle by, with its button to fold it away (GitHub issue
-        // 10); folded away (the button, View), the strip is all it leaves,
-        // with the same button, in the same place, to bring it back.
-        if !self.settings.hide_log {
-            egui::Panel::bottom("log")
-                .resizable(true)
-                .default_size(120.0)
-                .size_range((line + 6.0)..=(window.y * 0.5).max(line + 6.0))
-                .show(ui, |ui| self.log_ui(ui));
-        }
-        self.pane_edge(ui, commands::Id::ViewLog, Side::Below);
-        if self.ws.is_some() {
-            if !self.settings.hide_tree {
-                let tree = egui::Panel::left("tree")
-                    .resizable(true)
-                    .default_size(240.0)
-                    .size_range(150.0..=(window.x * 0.4).max(150.0))
-                    .show(ui, |ui| tree::module_tree(self, ui));
-                self.tree_width = Some(tree.response.rect.width());
-            }
-            self.pane_edge(ui, commands::Id::ViewTree, Side::Left);
-            // The palette beside a newly opened module, as in Aurora (not
-            // when it was folded away).
-            if std::mem::take(&mut self.open_palette)
-                && self.game.is_some()
-                && !self.settings.hide_palettes
-            {
-                self.actions.push(Action::OpenTab(Tab::Palette));
-            }
-            // The palettes' strip, folded away (shown, their pane is the
-            // dock's, and the button is drawn on its edge after it:
-            // `palettes_edge`): on the side they come back on.
-            if self.settings.hide_palettes
-                && self.game.is_some()
-                && self.dock.find_tab(&Tab::Palette).is_none()
-            {
-                let side = match self.place_for(&Tab::Palette) {
-                    Place::Split(Side::Left, _) => Side::Left,
-                    _ => Side::Right,
-                };
-                self.pane_edge(ui, commands::Id::ViewPalettes, side);
-            }
-        }
+        // The Status Bar, the Left and Right Docks the whole height
+        // between the bars, and the Bottom Dock under the editor area
+        // (WideArea.png). Each dock leaves the middle its room, however it
+        // was left (their sizes are kept between runs): the log at most
+        // half the window's height, each side dock at most two fifths of
+        // its width. Each has one control that folds or closes it (GitHub
+        // issue 10): a side dock's button at its tab bar's end (folded,
+        // the chevron at its strip's top), the Bottom Dock's switch in the
+        // Status Bar.
+        // (What Check found of a tileset followed, its tab drawn or not.)
+        tileset_view::follow_all(self);
+        // (Each hak followed: what was made of one that changed let go, a
+        // description typed set where its field was left, M4's U21.)
+        hak_view::follow_all(self, ui.ctx());
+        // (A resource viewer's sound stopped where it is drawn no more,
+        // read-only pictures unseen a while let go: M5's W6.)
+        viewers::follow(self, ui.ctx());
+        // (A Bottom Dock panel a script asked to the front last frame.)
+        search_results::follow(self);
+        problems::follow(self);
+        dock_reports::follow(self);
+        shell::bottom_forward(self);
+        // (The game's dialog.tlk shown made again from changed game data
+        // before anything reads it: the panels and the Status Bar, drawn
+        // before the list, never a frame behind it.)
+        talk_view::refresh(self);
+        shell::status_bar(self, ui);
+        // (Set again where the Left Dock draws the Resources panel.)
+        self.resources_here = None;
+        // (Set again by the side editors and the talk table's, if they are
+        // drawn, and by the panels a table brings to the Right Dock, M4's
+        // U16, drawn before the editor area: so cleared before the docks.)
+        self.undo_under_pointer = None;
+        self.undo_keys = None;
+        self.pressed_side_tab = None;
+        shell::left_dock(self, ui);
+        shell::right_dock(self, ui);
+        // (The Bottom Dock and the editor area drawn within the room the
+        // side docks leave them: in a window too narrow for what they
+        // hold, cut there, never drawn over a dock. The shell's yields,
+        // M3 T14, leave them the editor area's least where the window has
+        // it, 370 points in the least window.)
+        let whole_clip = ui.clip_rect();
+        ui.set_clip_rect(whole_clip.intersect(ui.available_rect_before_wrap()));
+        shell::bottom_dock(self, ui);
         self.heard = None;
         // The options' draft shows in its tab.
         if self.options.is_some() && self.dock.find_tab(&Tab::Options).is_none() {
             self.run_now(Action::OpenTab(Tab::Options));
         }
-        // And Tile Properties in its own; without tiles, the tab goes.
-        match (self.tile_props.is_some(), self.dock.find_tab(&Tab::TileProperties).is_some()) {
-            (true, false) => self.run_now(Action::OpenTab(Tab::TileProperties)),
-            (false, true) => self.run_now(Action::CloseTab(Tab::TileProperties)),
-            _ => {}
-        }
         self.keep_middle();
+        table_view::follow_looks(self, ui.ctx());
+        // (And a talk table's Find and Find References, M4's U17, whether
+        // its tab or panels are drawn or not.)
+        talk_view::follow(self, ui.ctx());
         self.tab_number_keys(ui.ctx());
-        egui::CentralPanel::default().show(ui, |ui| {
+        // (Flush with the bars and the docks, as the boards draw it: no
+        // margin of egui's round the editor area, whose width the boards'
+        // yields are measured by: 974 at 1280.)
+        let flush = egui::Frame::central_panel(ui.style()).inner_margin(0);
+        egui::CentralPanel::default().frame(flush).show(ui, |ui| {
             self.dock_width = Some(ui.available_width());
             self.dock_rect = Some(ui.max_rect());
-            // No pane (the palettes', one docked beside another) is
-            // dragged to nothing, or over all of its neighbour.
+            // No pane (one docked beside another) is dragged to nothing, or
+            // over all of its neighbor.
             for (_, node) in self.dock.iter_all_nodes_mut() {
                 if let egui_dock::Node::Vertical(split) | egui_dock::Node::Horizontal(split) = node
                 {
@@ -1807,10 +2357,6 @@ impl Moonglow {
             }
             // (The dock is out of reach while its tabs are drawn: the model
             // windows open, for a page that shows a model unless one is.)
-            // (Set again by the side editors and the talk table's, if they
-            // are drawn.)
-            self.undo_under_pointer = None;
-            self.undo_keys = None;
             self.open_models = self
                 .dock
                 .iter_all_tabs()
@@ -1821,6 +2367,12 @@ impl Moonglow {
                 .cloned()
                 .collect();
             self.panes_tabs = self.dock.iter_leaves().map(|(_, l)| l.tabs.clone()).collect();
+            self.fronts = (self.dock.iter_leaves())
+                .filter_map(|(_, l)| l.tabs.get(l.active.0).cloned())
+                .collect();
+            self.reveal_fronts();
+            self.dragged_tab = None;
+            tabs::prepare(self, ui.ctx());
             let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
             // A window's frame without a margin: egui_dock makes a collapsed
             // window as tall as its tab bar, margin included, which left
@@ -1828,22 +2380,69 @@ impl Moonglow {
             ui.spacing_mut().window_margin = egui::Margin::ZERO;
             // (What is left of the frame round a window's panes: its stroke.)
             self.window_frame = ui.visuals().window_stroke.width;
-            self.pass_covered_arrow(ui.ctx());
             {
                 let mut viewer = tabs::Viewer { app: self };
+                // (Its own close buttons, shown on the tab in front and the
+                // one under the pointer: `doc_tab_parts`. The groups' bars
+                // have no arrow and no close all, and room at their right
+                // end for Split Editor; the windows' keep both.)
                 DockArea::new(&mut dock)
-                    .style(dock_look::style(ui))
-                    .show_close_buttons(true)
+                    .style(mg_uikit::dock::doc_tabs_style(ui))
+                    .show_close_buttons(false)
+                    .main_surface_end_room(tabs::SPLIT_ROOM)
+                    // (A window's tabs end before Maximize, and a window
+                    // is never too narrow for its bar's buttons.)
+                    .window_end_room(tabs::WINDOW_END_ROOM)
+                    .window_min_width(tabs::window_least_width())
+                    // (Shift changes nothing on a window's buttons: in
+                    // egui_dock's mode for it, Shift turned the close all
+                    // into a window's close that a click did not close.)
+                    .secondary_button_on_modifier(false)
                     .show_inside(ui, &mut viewer);
             }
             self.dock = dock;
-            dock_look::marks(ui.ctx(), &self.dock, &self.tab_buttons);
+            // (A 2DA grid given the keys this frame: its tab's pane takes the
+            // focus, its editor the active one, M4's U16.)
+            if let Some(tab) = self.focus_asked_tab.take()
+                && let Some(at) = self.dock.find_tab(&tab)
+            {
+                let path = egui_dock::NodePath { surface: at.surface, node: at.node };
+                self.dock.set_focused_node_and_surface(path);
+            }
+            // (A docked tab's Escape, where no window in front took it.)
+            // (Looked at again once the tabs are drawn: a field of the tab
+            // that kept the Escape for itself, `widgets::keep_escape`, or
+            // took the key, has it.)
+            let still = widgets::escape_past_dialogs(ui.ctx())
+                && ui.input(|i| i.key_pressed(egui::Key::Escape));
+            self.escape_docked_next =
+                self.escape_docked_seen.take().filter(|_| !self.escape_taken && still);
+            if self.escape_docked_next.is_some() {
+                ui.ctx().request_repaint();
+            }
+            self.doc_tab_parts(ui);
             self.window_bars(ui);
-            self.palettes_edge(ui);
         });
+        ui.set_clip_rect(whole_clip);
+        // (Over the editor area's widgets beside it, M5's W8.)
+        shell::right_edge_seam(self, ui);
+        // (What a NUI designer's panels changed where its editor was not
+        // drawn after them, M4's U18.)
+        nui_view::follow(self, ui.ctx());
+        // (What the Status Bar shows, made once a frame from the editor
+        // area as this frame left it; the bar was drawn before it, so where
+        // it changed, the next frame shows it.)
+        shell::update_shown(self, ui.ctx());
+        // (Where the user worked, as the dock was drawn: the active editor
+        // the Top Bar's Undo falls back to.)
+        self.note_worked(ui.ctx());
         trace::changed("panes", || self.panes());
-        self.remember_window_sizes();
-        self.remember_window_places();
+        // (A window put again, where it had landed beside its place: the
+        // frame that moves it asked for.)
+        if self.remember_window_sizes() {
+            ui.ctx().request_repaint();
+        }
+        self.remember_window_places(ui.ctx());
         self.note_recent_tabs(ui.ctx());
         tree::follow_front_tab(self);
         self.prune_tree_selection();
@@ -1858,6 +2457,9 @@ impl Moonglow {
         if area_audio::update(self, heard, ui.input(|i| i.time)) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
+        // (The files an Export as Files would write over, asked about:
+        // the resource browser's panel may be folded meanwhile.)
+        browser::exporting_window(self, ui.ctx());
         wizards::ui(self, ui);
         blueprint_wizard::ui(self, ui);
         transfer::ui(self, ui);
@@ -1869,12 +2471,11 @@ impl Moonglow {
         dialog_view::test_window(self, ui);
         script_wizard::window(self, ui);
         area_tools::windows(self, ui);
-        light_maker::window(self, ui);
-        bake_view::window(self, ui);
         bake_view::save_window(self, ui.ctx());
-        area_tools::preview_window(self, ui);
+        shell::draw_late(self, ui);
+        // (A Bottom Dock panel drawn before what it shows changed.)
+        shell::follow_bottom(self, ui.ctx());
         area_reshape::windows(self, ui.ctx());
-        area_view::stats_window(self, ui.ctx());
         build_view::window(self, ui.ctx());
         store_wizard::window(self, ui.ctx());
         store_wizard::popup_window(self, ui.ctx());
@@ -1891,9 +2492,7 @@ impl Moonglow {
         prefabs::save_window(self, ui.ctx());
         palette_categories::window(self, ui.ctx());
         bulk::update_window(self, ui.ctx());
-        area_props::chooser_window(self, ui.ctx());
         side_doc::closing_window(self, ui.ctx());
-        tile_select::closing_window(self, ui.ctx());
         table_view::open_table_ui(self, ui.ctx());
         hak_view::adding_window(self, ui.ctx());
         model_view::export_window(self, ui.ctx());
@@ -1901,50 +2500,12 @@ impl Moonglow {
         talk_typed::window(self, ui.ctx());
         nwsync_view::window(self, ui.ctx());
         nwsync_content_view::window(self, ui.ctx());
-        bulk::text_window(self, ui.ctx());
         levelup_view::window(self, ui.ctx());
         creature_wizard::window(self, ui.ctx());
-        let (busy, mut usage) = (self.busy(), false);
-        if let Some(report) = &self.hak_report {
-            let mut open = true;
-            crate::widgets::dialog(ui.ctx(), "Hak Pak Conflict Analysis", &mut open)
-                .default_size([600.0, 400.0])
-                .show(ui.ctx(), |ui| {
-                    let tip =
-                        "Which haks' resources the module uses, hak by hak, to trim a release";
-                    let asked = ui
-                        .add_enabled(!busy, egui::Button::new("What the Module Uses"))
-                        .on_hover_text(tip)
-                        .clicked();
-                    if asked {
-                        usage = true;
-                    }
-                    // (A line as long as it is, scrolled to sideways.)
-                    let text = |ui: &mut egui::Ui, t: &str| {
-                        ui.add(egui::Label::new(egui::RichText::new(t).monospace()).extend())
-                    };
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        if let Some(used) = &self.hak_usage {
-                            text(ui, used);
-                            ui.separator();
-                        }
-                        text(ui, report)
-                    });
-                });
-            if !open {
-                self.hak_report = None;
-                self.hak_usage = None;
-            }
-        }
-        if usage {
-            self.hak_usage_job();
-        }
-        plugins::window(self, ui.ctx());
         plugins::replace_window(self, ui.ctx());
         plugins::project_window(self, ui.ctx());
         plugins::settings_window(self, ui.ctx());
         plugins::remove_window(self, ui.ctx());
-        commands::palette_window(self, ui.ctx());
         jobs::window(self, ui.ctx());
         // The pictures the frame's views asked for and lack: a few now.
         model_view::make_thumbnails(self, ui.ctx());
@@ -1957,6 +2518,10 @@ impl Moonglow {
         // A Properties text field that was typed in and is not drawn any
         // more: set now, as it would have been when left, and among what
         // its window's Cancel sets back.
+        // (A journal's number field not seen with the keyboard this frame
+        // has nothing typed waiting: `journal_view::typing_pending`.)
+        let pass = ui.ctx().cumulative_pass_nr();
+        self.journal_view.number_typed = self.journal_view.number_typed.filter(|p| *p == pass);
         if let Some(held) = self.held_text.take_if(|h| h.drawn != ui.ctx().cumulative_pass_nr()) {
             if let Some(command) = held.command {
                 if let Some(w) = &held.window {
@@ -1981,6 +2546,9 @@ impl Moonglow {
         self.properties_changed.retain(|_, changes| {
             dock.find_tab(&changes.tab).is_some() || (changes.opening && opening(&changes.tab))
         });
+        // (A conversation's panels' edits whose editor was not drawn after
+        // them this frame: set now, on the lines they were made on.)
+        dialog_view::flush_panels(self);
         if !self.actions.is_empty() || !self.closing_cancels.is_empty() {
             self.run_actions();
             // Show the result now, not at the next input event.
@@ -1988,6 +2556,7 @@ impl Moonglow {
         }
         self.open_tabs_frame(ui.ctx());
         widgets::dialogs_end(ui.ctx());
+        self.focus_was = ui.ctx().memory(|m| m.focused());
     }
 
     /// The debug log's start of a frame: once, the settings and the
@@ -2058,27 +2627,20 @@ impl Moonglow {
     }
 
     /// Where a tool window is: a window of its own, a tab of the main
-    /// pane, or a tab of the palettes' pane.
+    /// pane, or a pane split off the middle.
     fn place_of(&self, tab: &Tab) -> Option<Place> {
         let path = self.dock.find_tab(tab)?;
         if !path.surface.is_main() {
             return Some(Place::Window);
         }
-        let leaf = self.dock.leaf(egui_dock::NodePath { surface: path.surface, node: path.node });
-        Some(match leaf {
-            Ok(leaf) if leaf.tabs.contains(&Tab::Palette) => Place::Palettes,
-            _ => self.split_of(path.node).unwrap_or(Place::Middle),
-        })
+        Some(self.split_of(path.node).unwrap_or(Place::Middle))
     }
 
-    /// Splits the middle (the pane of the areas) at `side` for `tab`, the
-    /// new pane `share` thousandths of the two, and gives its place; `None`
-    /// with no middle to split.
+    /// Splits the middle ([`Moonglow::middle_pane`]) at `side` for `tab`,
+    /// the new pane `share` thousandths of the two, and gives its place;
+    /// `None` with no middle to split.
     fn split_middle(&mut self, side: Side, share: u16, tab: &Tab) -> Option<egui_dock::NodePath> {
-        let middle = |t: &Tab| matches!(t, Tab::Area(_) | Tab::NoArea);
-        let at = (self.dock.iter_leaves())
-            .find(|(p, leaf)| p.surface.is_main() && leaf.tabs.iter().any(middle))
-            .map(|(p, _)| p.node)?;
+        let at = self.middle_pane()?.node;
         // (The fraction is the left or upper pane's, whichever is new.)
         let share = f32::from(share) / 1000.0;
         let main = self.dock.main_surface_mut();
@@ -2091,16 +2653,15 @@ impl Moonglow {
         Some(egui_dock::NodePath::new(egui_dock::SurfaceIndex::main(), new))
     }
 
-    /// A pane of the main surface split off a side of the middle (the
-    /// panes with the areas): which side, and how much of the two it is.
+    /// An editor group of the main surface off a side of the middle
+    /// ([`Moonglow::middle_pane`]): which side, and how much of the two it
+    /// is. A group beside another that is itself beside the middle (three
+    /// groups in a row) is by the part of the main surface that holds it:
+    /// the side of the middle that part is on, and its share.
     fn split_of(&self, node: egui_dock::NodeIndex) -> Option<Place> {
-        let parent = node.parent()?;
-        let sibling = if node.is_left() { parent.right() } else { parent.left() };
-        // (The other side holds the middle: a pane of the areas, or the
-        // one that says none is open.)
-        let middle = |t: &Tab| matches!(t, Tab::Area(_) | Tab::NoArea);
-        let within = |mut n: egui_dock::NodeIndex| loop {
-            if n == sibling {
+        let middle = self.middle_pane()?.node;
+        let within = |mut n: egui_dock::NodeIndex, of: egui_dock::NodeIndex| loop {
+            if n == of {
                 return true;
             }
             match n.parent() {
@@ -2108,28 +2669,228 @@ impl Moonglow {
                 None => return false,
             }
         };
-        let holds = (self.dock.iter_leaves())
-            .filter(|(p, _)| p.surface.is_main())
-            .any(|(p, leaf)| leaf.tabs.iter().any(middle) && within(p.node));
-        if !holds {
+        if within(middle, node) {
             return None;
         }
-        let (side, share) = match &self.dock.main_surface()[parent] {
-            egui_dock::Node::Horizontal(split) if node.is_left() => (Side::Left, split.fraction),
-            egui_dock::Node::Horizontal(split) => (Side::Right, 1.0 - split.fraction),
-            egui_dock::Node::Vertical(split) if node.is_left() => (Side::Above, split.fraction),
-            egui_dock::Node::Vertical(split) => (Side::Below, 1.0 - split.fraction),
-            _ => return None,
-        };
-        Some(Place::Split(side, (share.clamp(0.05, 0.95) * 1000.0).round() as u16))
+        // (Up from the group to the part whose other half holds the middle.)
+        let mut at = node;
+        loop {
+            let parent = at.parent()?;
+            let sibling = if at.is_left() { parent.right() } else { parent.left() };
+            if within(middle, sibling) {
+                let (side, share) = match &self.dock.main_surface()[parent] {
+                    egui_dock::Node::Horizontal(split) if at.is_left() => {
+                        (Side::Left, split.fraction)
+                    }
+                    egui_dock::Node::Horizontal(split) => (Side::Right, 1.0 - split.fraction),
+                    egui_dock::Node::Vertical(split) if at.is_left() => {
+                        (Side::Above, split.fraction)
+                    }
+                    egui_dock::Node::Vertical(split) => (Side::Below, 1.0 - split.fraction),
+                    _ => return None,
+                };
+                let share = (share.clamp(0.05, 0.95) * 1000.0).round() as u16;
+                return Some(Place::Split(side, share));
+            }
+            at = parent;
+        }
     }
 
-    /// Where the next window of a kind opens: where one of its kind was
-    /// last dragged to (GitHub issue 14), a window of its own otherwise.
-    fn place_for(&self, tab: &Tab) -> Place {
+    /// The editor groups of the main surface, in order: depth first, the
+    /// left or upper part of each split before the other (left to right
+    /// for groups side by side).
+    pub(crate) fn editor_groups(&self) -> Vec<egui_dock::NodePath> {
+        fn walk(
+            tree: &egui_dock::Tree<Tab>,
+            at: egui_dock::NodeIndex,
+            out: &mut Vec<egui_dock::NodePath>,
+        ) {
+            if at.0 >= tree.len() {
+                return;
+            }
+            match &tree[at] {
+                egui_dock::Node::Leaf(leaf) if !leaf.tabs.is_empty() => {
+                    out.push(egui_dock::NodePath::new(egui_dock::SurfaceIndex::main(), at));
+                }
+                egui_dock::Node::Horizontal(_) | egui_dock::Node::Vertical(_) => {
+                    walk(tree, at.left(), out);
+                    walk(tree, at.right(), out);
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.dock.main_surface(), egui_dock::NodeIndex::root(), &mut out);
+        out
+    }
+
+    /// The editor group with the focus: the main surface's pane that has
+    /// it, or had it last while a window has it, else the middle's
+    /// ([`Moonglow::active_editor`]'s group).
+    pub(crate) fn focused_group(&self) -> Option<egui_dock::NodePath> {
+        let main = egui_dock::SurfaceIndex::main();
+        (self.dock.main_surface().focused_leaf())
+            .map(|node| egui_dock::NodePath { surface: main, node })
+            .filter(|p| self.dock.leaf(*p).is_ok_and(|l| !l.tabs.is_empty()))
+            .or_else(|| self.middle_pane())
+    }
+
+    /// Whether Split Editor has a tab to move: the focused group has more
+    /// than one (a group's only tab moved would leave it empty).
+    pub(crate) fn can_split(&self) -> bool {
+        let leaf = self.focused_group().and_then(|p| self.dock.leaf(p).ok());
+        leaf.is_some_and(|l| l.tabs.len() > 1)
+    }
+
+    /// Split Editor: the tab in front of the focused group moves to a
+    /// group of its own at the group's right, half of the room, with one
+    /// group; with two or more, into the group after it (the one before
+    /// it, for the last), at its end. The group it went to has the focus,
+    /// so the docks follow it ([`Moonglow::active_editor`]).
+    pub(crate) fn split_editor(&mut self) {
+        if !self.can_split() {
+            return;
+        }
+        let Some(from) = self.focused_group() else { return };
+        let Ok(leaf) = self.dock.leaf(from) else { return };
+        let index = leaf.active;
+
+        let groups = self.editor_groups();
+        let at = groups.iter().position(|g| *g == from).unwrap_or(0);
+        let to = match groups.len() {
+            0 | 1 => None,
+            n => Some(groups[if at + 1 < n { at + 1 } else { at - 1 }]),
+        };
+        let main = self.dock.main_surface_mut();
+        let Some(tab) = main.remove_tab((from.node, index)) else { return };
+        // (Moved by the user: its kind's place is kept.)
+        self.moved_by_hand(&tab);
+        match to {
+            Some(to) => {
+                self.dock.set_focused_node_and_surface(to);
+                self.dock.push_to_focused_leaf(tab.clone());
+            }
+            None => {
+                self.dock.main_surface_mut().split_right(from.node, 0.5, vec![tab.clone()]);
+            }
+        }
+        // (In front of it, its group given the focus, and the module tree
+        // going to it, as a click.)
+        self.show_tab(tab.clone());
+        tree::reveal_tab(self, &tab);
+    }
+
+    /// The editor group a NUI designer opens in where its kind has no place
+    /// kept: the focused group, unless that is a source group (a group
+    /// whose tab in front is a designer's source), then its design's group.
+    fn design_group(&self) -> Option<egui_dock::NodePath> {
+        let focused = self.focused_group()?;
+        let front = self.dock.leaf(focused).ok().and_then(|l| l.tabs.get(l.active.0).cloned());
+        match front {
+            Some(Tab::NuiSource(key)) => self
+                .dock
+                .find_tab(&Tab::Nui(key))
+                .map(|p| egui_dock::NodePath { surface: p.surface, node: p.node })
+                .or(Some(focused)),
+            _ => Some(focused),
+        }
+    }
+
+    /// The window of its own `tab` is in, as Moonglow follows it: the tab
+    /// it is tracked by (any of the window's: a second designer gathered
+    /// into the first's window is not it) and where it stands now; `None`
+    /// for a tab of the main window.
+    fn tracked_window(&self, tab: &Tab) -> Option<(Tab, egui::Rect)> {
+        let at = self.dock.find_tab(tab).filter(|p| !p.surface.is_main())?;
+        (self.windows.iter())
+            .find(|(t, _)| self.dock.find_tab(t).is_some_and(|p| p.surface == at.surface))
+            .map(|(t, w)| (t.clone(), w.now))
+    }
+
+    /// A NUI designer's source group (M4's U19, the NUI board's `crier.jui`
+    /// beside the design): brought forward where it is open; else a group
+    /// of its own at the right of the designer's group, the designer
+    /// keeping the board's share (640 of the two's 1018), in the main
+    /// window or in the designer's own (widened by the source's room as
+    /// far as the screen has it, so that the designer keeps its width and
+    /// its panes). Its group has the focus.
+    fn open_nui_source(&mut self, key: mg_resman::ResKey) {
+        let source = Tab::NuiSource(key);
+        if self.dock.find_tab(&source).is_some() {
+            self.show_tab(source);
+            return;
+        }
+        // (Never without its design: the design first.)
+        if self.dock.find_tab(&Tab::Nui(key)).is_none() {
+            self.run_now(Action::OpenTab(Tab::Nui(key)));
+        }
+        let Some(at) = self.dock.find_tab(&Tab::Nui(key)) else { return };
+        let path = egui_dock::NodePath { surface: at.surface, node: at.node };
+        let mut share = nui_view::SOURCE_SHARE;
+        // (Where the window stands now, as Moonglow follows it; else as
+        // egui_dock last drew it.)
+        let window = self.tracked_window(&Tab::Nui(key)).filter(|(_, r)| r.is_positive());
+        if let Some((tracked, rect)) = window {
+            // (Wider by the source's room, moved left where the screen's
+            // right edge is in the way; on a screen too narrow for both, the
+            // design gives up some of its own, down to the board's share.)
+            let screen = self.screen.unwrap_or(egui::Rect::EVERYTHING);
+            let wider = (rect.width() + nui_view::SOURCE_WIDTH).min(screen.width());
+            if wider > rect.width() {
+                let left = rect.left().min(screen.right() - wider).max(screen.left());
+                let to = egui::Rect::from_min_size(
+                    egui::pos2(left, rect.top()),
+                    egui::vec2(wider, rect.height()),
+                );
+                // (Its panes' corner, where they come to be put back.)
+                let corner = self.windows.get(&tracked).and_then(|w| w.seen).map(|r| r.min);
+                self.put_window(&tracked, to);
+                self.nui_widened.insert(key, (rect, to, corner));
+                share = ((wider - nui_view::SOURCE_WIDTH) / wider).max(nui_view::SOURCE_SHARE);
+            }
+        }
+        let leaf = egui_dock::Node::leaf(source.clone());
+        self.dock.split(path, egui_dock::Split::Right, share, leaf);
+        self.show_tab(source);
+    }
+
+    /// The editor group off `side` of the middle, where there is one: a
+    /// kind kept there opens in it rather than in another split off.
+    fn group_off(&self, side: Side) -> Option<egui_dock::NodePath> {
+        let groups = self.editor_groups();
+        groups
+            .into_iter()
+            .find(|g| matches!(self.split_of(g.node), Some(Place::Split(s, _)) if s == side))
+    }
+
+    /// Where the next editor of a kind opens: where one of its kind was
+    /// last put (GitHub issue 14), else its kind's default
+    /// ([`Moonglow::default_place`]). `None`: the focused editor group.
+    fn place_for(&self, tab: &Tab) -> Option<Place> {
         let kept = kept_by_kind(&self.settings.window_places, tab);
         // ("split left 300": the side, and thousandths of the two.)
-        kept.and_then(|(_, p)| Place::parse(p)).unwrap_or(Place::Window)
+        kept.and_then(|(_, p)| Place::parse(p)).or_else(|| self.default_place(tab))
+    }
+
+    /// Where an editor opens with no place kept for its kind: as Options ›
+    /// General › Open editors says, a tab of the focused editor group
+    /// (`None`, As Tabs) or a window of its own (As Floating Windows).
+    /// The tabs that open in a window in both ([`Tab::floats`]) do so.
+    fn default_place(&self, tab: &Tab) -> Option<Place> {
+        match self.settings.open_editors {
+            settings::OpenEditors::Tabs if !tab.floats() => None,
+            _ => Some(Place::Window),
+        }
+    }
+
+    /// Notes that the user moved `tab` by hand (dragged it, or Split
+    /// Editor moved it): in As Tabs mode, the docked moves its kind's place
+    /// is kept for. For tests, which move tabs on the dock itself.
+    #[doc(hidden)]
+    pub fn moved_by_hand(&mut self, tab: &Tab) {
+        if !self.moved_by_hand.contains(tab) {
+            self.moved_by_hand.push(tab.clone());
+        }
     }
 
     /// Holds the resources chosen in the module tree to those the module
@@ -2145,245 +2906,471 @@ impl Moonglow {
         }
     }
 
-    /// The middle's pane: the main window's first that is not the
-    /// palettes' (the areas', or the one that says none is open).
+    /// The middle: the editor group of the areas (the first that holds an
+    /// area, or the one that says none is open), else the first editor
+    /// group ([`Moonglow::editor_groups`]); the main surface's pane where it
+    /// has no tab. What the other groups are kept by, as splits off its
+    /// sides ([`Moonglow::split_of`]).
     pub(crate) fn middle_pane(&self) -> Option<egui_dock::NodePath> {
-        let palette = self.dock.find_tab(&Tab::Palette).map(|p| (p.surface, p.node));
-        (self.dock.iter_leaves().map(|(p, _)| p))
-            .find(|p| p.surface.is_main() && Some((p.surface, p.node)) != palette)
+        let groups = self.editor_groups();
+        let areas = groups.iter().find(|g| {
+            self.dock
+                .leaf(**g)
+                .is_ok_and(|l| l.tabs.iter().any(|t| matches!(t, Tab::Area(_) | Tab::NoArea)))
+        });
+        (areas.or(groups.first()).copied())
+            .or_else(|| (self.dock.iter_leaves().map(|(p, _)| p)).find(|p| p.surface.is_main()))
     }
 
-    /// Notes where the user dragged a tool window to (a window seen in
-    /// another place than the frame before), for the next of its kind.
-    fn remember_window_places(&mut self) {
-        let open: Vec<Tab> = (self.dock.iter_all_tabs().map(|(_, t)| t))
-            .filter(|t| !t.docks() && **t != Tab::Palette)
-            .cloned()
-            .collect();
-        self.tab_places.retain(|t, _| open.contains(t));
-        // The palettes' pane split off another side of the middle than its
-        // right: kept, for when it opens again (on the right, as at first,
-        // its width is kept as it was).
-        if let Some(path) = self.dock.find_tab(&Tab::Palette).filter(|p| p.surface.is_main())
-            && self.maximized.is_empty()
-        {
-            let side = match self.split_of(path.node) {
-                Some(place @ Place::Split(side, _)) if side != Side::Right => Some(place.text()),
-                _ => None,
-            };
-            let kind = Tab::Palette.kind();
-            let kept = self.settings.window_places.iter().position(|(k, _)| k == kind);
-            match (side, kept) {
-                (Some(side), Some(i)) if self.settings.window_places[i].1 != side => {
-                    self.settings.window_places[i].1 = side;
-                }
-                (Some(side), None) => self.settings.window_places.push((kind.to_string(), side)),
-                (None, Some(i)) => _ = self.settings.window_places.remove(i),
-                _ => {}
-            }
+    /// Notes where the user put an editor (a tab seen in another place
+    /// than the frame before), for the next of its kind: a window of its
+    /// own where that is not where its kind opens anyway (As Tabs: Eject,
+    /// or a tab dragged out), a group of the editor area otherwise. In As
+    /// Tabs mode, where editors live among the groups, a docked place is
+    /// kept only for a tab the user moved by hand (dragged, or by Split
+    /// Editor): a place is measured from the middle (the areas' group),
+    /// which moves as groups are split or emptied, and a tab that did not
+    /// move would otherwise keep a place for its kind.
+    fn remember_window_places(&mut self, ctx: &egui::Context) {
+        if let Some(tab) = self.dragged_tab.clone() {
+            self.moved_by_hand(&tab);
         }
+        let tabs = self.settings.open_editors == settings::OpenEditors::Tabs;
+        let open: Vec<Tab> =
+            (self.dock.iter_all_tabs().map(|(_, t)| t)).filter(|t| !t.docks()).cloned().collect();
+        self.tab_places.retain(|t, _| open.contains(t));
         // (Not while one is dragged, or made to fill the pane.)
         for tab in open {
             let Some(now) = self.place_of(&tab) else { continue };
             let before = self.tab_places.insert(tab.clone(), now);
             if before.is_some_and(|b| b != now) && !self.maximized.contains_key(&tab) {
+                if tabs && now != Place::Window && !self.moved_by_hand.contains(&tab) {
+                    continue;
+                }
                 let kind = tab.kind();
                 self.settings.window_places.retain(|(k, _)| k != kind);
-                // (A window of its own is where one opens anyway.)
-                if now == Place::Window {
+                // (Where one opens anyway: not kept.)
+                if Some(now) == self.default_place(&tab) {
                     continue;
                 }
                 self.settings.window_places.push((kind.to_string(), now.text()));
             }
         }
-    }
-
-    /// Whether a pane beside the middle is shown (View): the module tree,
-    /// the palettes, the log.
-    pub(crate) fn panel_shown(&self, panel: commands::Id) -> bool {
-        match panel {
-            commands::Id::ViewTree => !self.settings.hide_tree,
-            commands::Id::ViewLog => !self.settings.hide_log,
-            _ => self.dock.find_tab(&Tab::Palette).is_some(),
+        // (A drag's drop is seen in the frame its button is let go.)
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.moved_by_hand.clear();
         }
     }
 
-    /// Whether every one of them is folded away.
-    pub(crate) fn panels_hidden(&self) -> bool {
-        use commands::Id::{ViewLog, ViewPalettes, ViewTree};
-        ![ViewTree, ViewPalettes, ViewLog].into_iter().any(|p| self.panel_shown(p))
+    /// Whether a dock is shown (View): the Left Dock (`ViewTree`), the
+    /// Right Dock (`ViewPalettes`), the Log in front of the open Bottom
+    /// Dock (`ViewLog`).
+    pub(crate) fn panel_shown(&self, panel: commands::Id) -> bool {
+        match panel {
+            commands::Id::ViewTree => !shell::left_folded(self),
+            // (View › Log: the Log shown, in front of the Bottom Dock.)
+            commands::Id::ViewLog => shell::bottom_shows(self, Panel::Log),
+            _ => !shell::right_folded(self),
+        }
     }
 
-    /// Shows a pane beside the middle, or folds it away (it leaves a
-    /// strip at its edge, and is as wide when it comes back).
-    pub(crate) fn show_panel(&mut self, panel: commands::Id, show: bool) {
-        match panel {
-            commands::Id::ViewTree => self.settings.hide_tree = !show,
-            commands::Id::ViewLog => self.settings.hide_log = !show,
-            _ => {
-                self.settings.hide_palettes = !show;
-                let open = self.dock.find_tab(&Tab::Palette);
-                match (show, open) {
-                    (true, None) if self.game.is_some() && self.ws.is_some() => {
-                        self.actions.push(Action::OpenTab(Tab::Palette));
-                    }
-                    (false, Some(path)) => {
-                        self.dock.remove_tab(path);
-                    }
-                    _ => {}
+    /// Shows a dock's panel `panel` (Tools › Resource Browser or Tools ›
+    /// Palettes, its tab or its strip button clicked): its dock unfolded
+    /// on its tab. The Resources or Palette panel asked for with no module
+    /// open is held by its dock from then on
+    /// ([`shell::Panel::available`]).
+    pub(crate) fn show_dock_panel(&mut self, panel: Panel) {
+        match panel.dock() {
+            // (The Outliner is no tab: the dock unfolded, the keys its.)
+            shell::Dock::Left if panel == Panel::OUTLINER => {
+                shell::set_dock_open(self, mg_uikit::shell::Side::Left, true);
+                self.outliner.to_first |= self.outliner.cursor.is_none();
+            }
+            shell::Dock::Left => {
+                if panel == Panel::Resources && self.ws.is_none() {
+                    self.resources_alone = true;
                 }
+                self.left_panel = panel;
+                shell::set_dock_open(self, mg_uikit::shell::Side::Left, true);
+            }
+            shell::Dock::Right => {
+                // (The palettes asked for by name are shown whatever the
+                // active editor is: without a module, without the game's
+                // data, which the panel then says it lacks, beside a tab
+                // that brings no panels. Where the active editor brings
+                // them, the request goes at the next frame:
+                // `shell::follow_editor`.)
+                // (Not the Preview where the active editor brings its own,
+                // a blueprint's, M4's U11: no palettes come with it.)
+                // (Nor where it brings a Preview of its own drawing, a
+                // tileset's or a hak's, M4's U20 and U21.)
+                let own = panel == Panel::Preview
+                    && (shell::own_preview(self, self.active_editor()).is_some()
+                        || self.active_editor().is_some_and(|t| shell::brings_of(self, t).diagram));
+                if matches!(panel, Panel::Palette | Panel::Preview) && !own {
+                    self.palettes_asked = true;
+                    // (Asked for, it is shown: a test that kept the dock
+                    // from coming with the module too.)
+                    self.palette_dock = true;
+                }
+                shell::choose_right(self, panel);
+                shell::set_dock_open(self, mg_uikit::shell::Side::Right, true);
+            }
+            // (The Bottom Dock opened on it.)
+            shell::Dock::Bottom => {
+                shell::choose_bottom(self, panel);
+                self.settings.hide_log = false;
             }
         }
     }
 
-    /// The strip along the inner edge of the pane `panel` (View's command
-    /// for it), a panel at the window's `side`: with the pane shown,
-    /// between it and the middle; folded away, all that is left of it.
-    /// Its button folds the pane away and brings it back.
-    fn pane_edge(&mut self, ui: &mut egui::Ui, panel: commands::Id, side: Side) {
-        let id = egui::Id::new(("pane-edge", panel.id()));
-        let strip = match side {
-            Side::Left => egui::Panel::left(id),
-            Side::Right => egui::Panel::right(id),
-            Side::Above => egui::Panel::top(id),
-            Side::Below => egui::Panel::bottom(id),
-        };
-        let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::ZERO);
-        // (With room for the line along its edge, which egui counts in.)
-        let line = ui.visuals().widgets.noninteractive.bg_stroke.width.round();
-        let size = widgets::PANE_EDGE + line;
-        strip.exact_size(size).resizable(false).frame(frame).show(ui, |ui| {
-            let rect = ui.max_rect();
-            self.pane_fold(ui, panel, rect, side);
+    /// The active docked editor (the plan's decision 2): the tab in front
+    /// of the main surface's pane with the focus, or that had it last (the
+    /// main surface's own record, which egui_dock keeps while a floating
+    /// window has the focus, moves as panes close and starts anew with the
+    /// dock), else of the middle's (the areas'). A floating window never
+    /// counts (it keeps its own panes), so one with the focus leaves the
+    /// docks as the editor under it has them. Read before the editor area
+    /// is drawn: a tab brought to the front is the active editor from the
+    /// next frame.
+    pub fn active_editor(&self) -> Option<&Tab> {
+        let main = egui_dock::SurfaceIndex::main();
+        let focused = (self.dock.main_surface().focused_leaf())
+            .map(|node| egui_dock::NodePath { surface: main, node })
+            .filter(|p| self.dock.leaf(*p).is_ok());
+        let path = focused.or_else(|| self.middle_pane())?;
+        let leaf = self.dock.leaf(path).ok()?;
+        leaf.tabs.get(leaf.active.0)
+    }
+
+    /// Shows `hints` and `counts` in the Status Bar in place of the active
+    /// editor's (`None`: its own again), for the tests of how the bar
+    /// yields, whatever is open.
+    #[doc(hidden)]
+    pub fn status_for_tests(&mut self, shown: Option<(Vec<mg_uikit::status::Hint>, Vec<String>)>) {
+        self.status_for_tests = shown.map(|(hints, counts)| shell::Shown {
+            hints,
+            counts: counts.into_iter().map(shell::Count::new).collect(),
+            note: None,
         });
     }
 
-    /// The button that folds the pane `panel` away, or brings it back, in
-    /// the strip `strip` along its inner edge, for a pane on the `side` of
-    /// the middle: centered along the strip, and pointing the way the pane
-    /// goes when it is clicked.
-    fn pane_fold(&mut self, ui: &mut egui::Ui, panel: commands::Id, strip: egui::Rect, side: Side) {
-        use widgets::Toward;
-        let shown = self.panel_shown(panel);
-        let toward = match (side, shown) {
-            (Side::Left, true) | (Side::Right, false) => Toward::Left,
-            (Side::Left, false) | (Side::Right, true) => Toward::Right,
-            (Side::Above, true) | (Side::Below, false) => Toward::Up,
-            (Side::Above, false) | (Side::Below, true) => Toward::Down,
-        };
-        let (name, what) = match panel {
-            commands::Id::ViewTree => ("Module Tree", "the module tree"),
-            commands::Id::ViewLog => ("Log", "the log"),
-            _ => ("Palettes", "the palettes"),
-        };
-        let key = self.keymap.label_of(&panel.id(), ui.ctx());
-        let key = if key.is_empty() { String::new() } else { format!(" ({key})") };
-        let (label, tip) = if shown {
-            (format!("Fold {name}"), format!("Fold {what} away{key}"))
-        } else {
-            (format!("Show {name}"), format!("Show {what}{key}"))
-        };
-        let rect = widgets::pane_fold_rect(strip, matches!(side, Side::Left | Side::Right));
-        let id = egui::Id::new(("pane-fold", name));
-        if widgets::pane_fold_button(ui, rect, id, toward, &label, &tip) {
-            self.show_panel(panel, !shown);
-        }
+    /// Opens (`true`) or closes every kind of the Outliner at the next
+    /// frame, as its Expand All and Collapse All do: for the hand-run
+    /// timing tests.
+    #[doc(hidden)]
+    pub fn outliner_fold_all(&mut self, open: bool) {
+        self.outliner.fold_all = Some(open);
     }
 
-    /// The keyboard on the palettes' covered arrow (reached by Tab or
-    /// Shift+Tab, where Enter pressed it): moved on past it, the way it was
-    /// going, before the dock draws its widgets again (egui gives the
-    /// focus to the next widget as they ask for it).
-    fn pass_covered_arrow(&mut self, ctx: &egui::Context) {
-        let tab = ctx.input(|i| {
-            i.events.iter().rev().find_map(|e| match e {
-                egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } => {
-                    Some(modifiers.shift)
+    /// How long making what the Status Bar shows takes, once
+    /// (`shell::update_shown`, run once a frame after the editor area):
+    /// for the hand-run cost test.
+    #[doc(hidden)]
+    pub fn time_status_for_tests(&mut self, ctx: &egui::Context) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        shell::update_shown(self, ctx);
+        started.elapsed()
+    }
+
+    /// What the Status Bar shows (from the last frame on): each hint as a
+    /// screen reader says it, then each count.
+    pub fn status_said(&self) -> Vec<String> {
+        self.bar_shown.said()
+    }
+
+    /// The lines of designer `key`'s source group that its control chosen
+    /// takes, as marked under its text (first, last; from 0): for the tests.
+    #[doc(hidden)]
+    pub fn nui_source_lines(&self, key: &mg_resman::ResKey) -> Option<(usize, usize)> {
+        nui_view::source::lines(self.nui_views.get(key)?)
+    }
+
+    /// The badge on `panel`'s Status Bar switch for the active docked
+    /// editor, as it would be drawn now: its words and its kind (for the
+    /// tests: a screen reader is told the switch's name alone).
+    #[doc(hidden)]
+    pub fn switch_badge(&self, panel: Panel) -> Option<(String, mg_uikit::BadgeKind)> {
+        let badge = panel.badge_for_tests(self)?;
+        Some((badge.text().to_string(), badge.badge_kind()))
+    }
+
+    /// Where the Right Dock's Preview panel's body was drawn at the last
+    /// frame, under the dock's tab bar: `None` where it was not drawn (the
+    /// Palette's tab in front, the dock folded or not drawn).
+    pub fn preview_panel_rect(&self) -> Option<egui::Rect> {
+        self.preview_rect
+    }
+
+    /// How many times a tab's document was compared with its saved copy for
+    /// its modified dot (for tests: none while it changes, one once it
+    /// rests).
+    #[doc(hidden)]
+    pub fn dot_comparisons(&self) -> u64 {
+        self.look_cache.comparisons
+    }
+
+    /// Where a tab of the editor area (a group's, or a floating window's)
+    /// was drawn at the last frame, its whole button (part of it may be
+    /// scrolled out of its bar's sight): `None` where it was not drawn.
+    pub fn tab_rect(&self, tab: &Tab) -> Option<egui::Rect> {
+        self.tab_rects.get(tab).map(|r| r.0)
+    }
+
+    /// Where the editor area (the `DockArea` between the docks) was drawn
+    /// at the last frame.
+    pub fn editor_area_rect(&self) -> Option<egui::Rect> {
+        self.dock_rect
+    }
+
+    /// Where the Right Dock was drawn at the last frame, from its inner
+    /// edge to its outer one and the Top Bar to the Status Bar: `None`
+    /// where it was folded, or not drawn.
+    pub fn right_dock_rect(&self) -> Option<egui::Rect> {
+        self.right_rect
+    }
+
+    /// Where the Left Dock was drawn at the last frame, from its outer
+    /// edge to its inner one (the line along it included) and the Top Bar
+    /// to the Status Bar: `None` where it was folded, or not drawn.
+    pub fn left_dock_rect(&self) -> Option<egui::Rect> {
+        self.left_rect
+    }
+
+    /// Where the Bottom Dock was drawn at the last frame, its tab bar and
+    /// the log under it: `None` where it was closed.
+    pub fn bottom_dock_rect(&self) -> Option<egui::Rect> {
+        self.bottom_rect
+    }
+
+    /// The panel a floating editor's window's bottom pane was brought to
+    /// in the run, by the editor's tab (for tests).
+    #[doc(hidden)]
+    pub fn window_bottom_for_test(&self, tab: &Tab) -> Option<Panel> {
+        self.window_bottoms.get(tab).copied()
+    }
+
+    /// The panel the Bottom Dock shows (its tab in front): `None` where it
+    /// is closed, or holds no panel.
+    pub fn bottom_dock_shows(&self) -> Option<Panel> {
+        (!self.settings.hide_log).then(|| shell::bottom_shown(self)).flatten()
+    }
+
+    /// How many times the Status Bar has made the tip of the log's last
+    /// line: only in a frame where the line is hovered or has the focus,
+    /// for the window's tests (the tip is not made, nor a long entry read,
+    /// in the others).
+    #[doc(hidden)]
+    pub fn last_line_tips(&self) -> usize {
+        self.last_line_tips
+    }
+
+    /// Where the Right Dock's stacked section showing `panel` was drawn at
+    /// the last frame (its header included). For the window's tests.
+    #[doc(hidden)]
+    pub fn right_section_rect(&self, panel: Panel) -> Option<egui::Rect> {
+        self.right_places.iter().find(|(p, _)| *p == panel).map(|(_, r)| *r)
+    }
+
+    /// The panel the Right Dock shows (its tab selected): `None` where the
+    /// dock is folded, or holds no panel and is not drawn.
+    pub fn right_dock_shows(&self) -> Option<Panel> {
+        if shell::right_folded(self) {
+            return None;
+        }
+        shell::right_shown(self)
+    }
+
+    /// The control chosen in NUI window `key`'s designer, as a JSON pointer
+    /// into the window ("" the window itself): `None` where no designer of
+    /// it was drawn. For the tests (M4's U18).
+    #[doc(hidden)]
+    pub fn nui_chosen(&self, key: &ResKey) -> Option<String> {
+        self.nui_views.get(key).map(nui_view::chosen)
+    }
+
+    /// The controls chosen together in NUI window `key`'s designer, by
+    /// path (for the tests: M4's U19 review).
+    #[doc(hidden)]
+    pub fn nui_chosen_many(&self, key: &ResKey) -> Vec<String> {
+        self.nui_views.get(key).map(nui_view::chosen_many).unwrap_or_default()
+    }
+
+    /// Chooses bind `name` in NUI window `key`'s Bindings table, as a click
+    /// on its row does (for the timing: M4's U19 review).
+    #[doc(hidden)]
+    pub fn nui_choose_bind(&mut self, key: &ResKey, name: &str) {
+        nui_view::choose_bind(self.nui_views.entry(*key).or_default(), name);
+    }
+
+    /// How many times Options' changes have been set in the settings
+    /// (M4's U23): once for each OK. For the tests.
+    #[doc(hidden)]
+    pub fn options_applied(&self) -> usize {
+        self.options_applied
+    }
+
+    /// How often Edit Areas Together's rows shown and its ticked areas'
+    /// set were worked out, and how often the ticked areas were walked
+    /// (`tool_sections::Tools::walks`): never every frame. For the tests.
+    #[doc(hidden)]
+    pub fn areas_together_counts(&self) -> (u64, u64, u64) {
+        let made = self.area_chooser.as_ref().map_or((0, 0), |c| c.made);
+        (made.0, made.1, self.tools.walks)
+    }
+
+    /// How often Edit Areas Together worked out what its Cancel All would
+    /// take back (M5's W2): when the history or its steps change, never
+    /// every frame. For the tests.
+    #[doc(hidden)]
+    pub fn areas_together_runs(&self) -> u64 {
+        self.area_chooser.as_ref().map_or(0, |c| c.runs)
+    }
+
+    /// The areas Edit Areas Together has ticked (none where it is closed),
+    /// and its row chosen by the keys. For the tests.
+    #[doc(hidden)]
+    pub fn areas_together_ticked(&self) -> Option<(Vec<mg_core::ResRef>, Option<mg_core::ResRef>)> {
+        let c = self.area_chooser.as_ref()?;
+        Some((c.chosen.iter().copied().collect(), c.cursor))
+    }
+
+    /// The read-only GFF views' counts (M4's U23), wherever they are drawn
+    /// (the tab, the hak editor's Preview): how many times their
+    /// shown rows were listed, all told (once for each fold or unfold:
+    /// none in a frame that changes nothing), and the most rows one drew
+    /// in its last frame (those in sight alone). For the tests.
+    #[doc(hidden)]
+    pub fn read_only_counts(&self) -> (usize, usize) {
+        browser::read_only_counts()
+    }
+
+    /// How many pictures the read-only tabs keep decoded (let go of a
+    /// while after their tabs are drawn no more). For the tests.
+    #[doc(hidden)]
+    pub fn read_only_pictures(&self) -> usize {
+        self.browser.pictures.len()
+    }
+
+    /// Whether a resource's viewer has the Preview channel's sound (its
+    /// button says Stop). For the tests.
+    #[doc(hidden)]
+    pub fn viewer_plays(&self) -> bool {
+        self.viewer_sound.is_some()
+    }
+
+    /// The window's picture decodes: threads decoding, and pictures waiting
+    /// or being decoded. For the tests.
+    #[doc(hidden)]
+    pub fn picture_decodes(&self) -> (usize, usize) {
+        (self.decodes.workers(), self.decodes.pending())
+    }
+
+    /// How many of the window's picture decodes no thread has taken yet.
+    /// For the tests.
+    #[doc(hidden)]
+    pub fn picture_decodes_untaken(&self) -> usize {
+        self.decodes.untaken()
+    }
+
+    /// How many times NUI window `key`'s Bindings table walked the window
+    /// for its binds' uses (once for each change of the module's bytes:
+    /// none in a frame that changes nothing). For the tests.
+    #[doc(hidden)]
+    pub fn nui_binds_walks(&self, key: &ResKey) -> usize {
+        self.nui_views.get(key).map_or(0, nui_view::binds_walks)
+    }
+
+    /// How many copies of NUI window `key` its designer made to edit (one
+    /// for each change of the module's bytes: none in a frame that changes
+    /// nothing). For the tests (M4's U18).
+    #[doc(hidden)]
+    pub fn nui_copies(&self, key: &ResKey) -> usize {
+        self.nui_views.get(key).map_or(0, nui_view::copies)
+    }
+
+    /// Where NUI window `key`'s designer keeps its working copy's words (the
+    /// window's, its root's, each variant's): the same from frame to frame
+    /// while nothing copies them. For the tests (M4's U18 review).
+    #[doc(hidden)]
+    pub fn nui_identity(&self, key: &ResKey) -> Option<Vec<usize>> {
+        self.nui_views.get(key).and_then(nui_view::identity)
+    }
+
+    /// NUI window `key`'s designer edits its variant `name` in its slot, as
+    /// Layers' row does. For the timing (`nui_perf`, M4's U18 review).
+    #[doc(hidden)]
+    pub fn nui_edit_variant(&mut self, key: &ResKey, name: &str) {
+        nui_view::edit_variant(self, *key, name);
+    }
+
+    /// The panel the Left Dock shows (its tab selected; the Outliner where
+    /// it holds the Outliner alone, `shell::outliner_alone`): `None` where
+    /// the dock is folded, or holds no panel and is not drawn.
+    pub fn left_dock_shows(&self) -> Option<Panel> {
+        if shell::left_folded(self) {
+            return None;
+        }
+        shell::left_shown(self).or(shell::outliner_alone(self).then_some(Panel::OUTLINER))
+    }
+
+    /// Whether every one of them is folded away.
+    /// (A Right Dock not drawn, the tab in front bringing no panels,
+    /// counts as hidden, whatever its fold.)
+    pub(crate) fn panels_hidden(&self) -> bool {
+        use commands::Id::{ViewPalettes, ViewTree};
+        let right = shell::right_shown(self).is_some() && self.panel_shown(ViewPalettes);
+        !right && !self.panel_shown(ViewTree) && self.settings.hide_log
+    }
+
+    /// Shows a dock, or folds it away (a side dock leaves a strip at its
+    /// edge, and is as wide when it comes back).
+    pub(crate) fn show_panel(&mut self, panel: commands::Id, show: bool) {
+        match panel {
+            commands::Id::ViewTree => shell::set_dock_open(self, mg_uikit::shell::Side::Left, show),
+            // (View › Log: the Bottom Dock opened on the Log, or closed.)
+            commands::Id::ViewLog => {
+                if show {
+                    shell::choose_bottom(self, Panel::Log);
                 }
-                _ => None,
-            })
-        });
-        if let Some(back) = tab {
-            self.tab_back = back;
-        }
-        let Some(arrow) = self.palette_arrow else { return };
-        let on_arrow = ctx.memory(|m| m.focused()).is_some_and(|id| {
-            ctx.read_response(id).is_some_and(|r| arrow.contains(r.rect.center()))
-        });
-        if on_arrow {
-            let way = if self.tab_back {
-                egui::FocusDirection::Previous
-            } else {
-                egui::FocusDirection::Next
-            };
-            ctx.memory_mut(|m| m.move_focus(way));
-            ctx.request_repaint();
+                self.settings.hide_log = !show;
+            }
+            _ => shell::set_dock_open(self, mg_uikit::shell::Side::Right, show),
         }
     }
 
-    /// The palettes' pane's fold button, on the edge it faces the middle
-    /// by, once the dock has drawn it (a pane of the dock's, not a panel:
-    /// its tabs leave the room for it, `palette_edge`). Only where it is a
-    /// pane at a side of the main window's middle: joined to the middle's
-    /// tabs, in a window of its own, above or below it, View folds it away.
-    fn palettes_edge(&mut self, ui: &mut egui::Ui) {
-        self.palette_edge = None;
-        self.palette_arrow = None;
-        let Some(dock) = self.dock_rect else { return };
-        let leaf = self.dock.iter_leaves().find(|(p, leaf)| {
-            p.surface.is_main()
-                && leaf.tabs.contains(&Tab::Palette)
-                && !leaf.collapsed
-                && !leaf.tabs.iter().any(|t| matches!(t, Tab::Area(_)))
-        });
-        let Some((_, leaf)) = leaf else { return };
-        let (rect, bar) = (leaf.rect, leaf.viewport.top());
-        let side = if rect.left() > dock.left() + 1.0 && rect.right() >= dock.right() - 1.0 {
-            Side::Right
-        } else if rect.left() <= dock.left() + 1.0 && rect.right() < dock.right() - 1.0 {
-            Side::Left
-        } else {
-            return;
-        };
-        self.palette_edge = Some((side, leaf.tabs.clone()));
-        // egui_dock's arrow at the left of the pane's tab bar, which folds
-        // the pane to its bar, was a second fold button beside the pane's
-        // own (the reporter of issue 10): covered, and its clicks taken.
-        // (egui_dock has it on every pane or none; windows keep theirs, to
-        // fold to their bar.)
-        let arrow = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + 24.0, bar));
-        if arrow.is_positive() {
-            let px = ui.ctx().pixels_per_point().recip();
-            // (In the tab bar's own fill, `dock_look::style`'s.)
-            let fill = mg_uikit::tokens(ui.ctx()).bar;
-            let cover = arrow.with_max_y(arrow.bottom() - px).expand2(egui::vec2(px, 0.0));
-            ui.painter().rect_filled(cover, 0.0, fill);
-            ui.interact(arrow, egui::Id::new("palettes-bar-arrow"), egui::Sense::CLICK);
-            self.palette_arrow = Some(arrow);
-        }
-        let x = match side {
-            Side::Right => rect.left(),
-            _ => rect.right() - widgets::PANE_EDGE,
-        };
-        let strip = egui::Rect::from_x_y_ranges(x..=x + widgets::PANE_EDGE, rect.y_range());
-        self.pane_fold(ui, commands::Id::ViewPalettes, strip, side);
-    }
-
-    /// View › Reset Layout: the tree, the palettes and the log shown, at
-    /// the sizes they have at first; the palettes in their pane on the
-    /// right.
+    /// View › Reset Layout: the shell as it is designed (a new
+    /// installation's): the Left and Right Docks unfolded at their first
+    /// widths, the Bottom Dock closed, its first height kept for when it
+    /// is opened.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
-        for id in ["tree", "log"] {
+        for id in ["tree", "log", shell::RIGHT_DOCK_ID, shell::MODULE_PANEL_ID] {
             ctx.data_mut(|d| d.remove::<egui::containers::panel::PanelState>(egui::Id::new(id)));
         }
         self.settings.hide_tree = false;
-        self.settings.hide_log = false;
+        self.settings.hide_log = Settings::new_installation().hide_log;
+        self.settings.hide_palettes = false;
+        // (In a narrow window, folded by its width again: as designed.)
+        self.left_unfolded_here = false;
+        self.right_unfolded_here = false;
+        // (Not chosen: the sizes the window's layout gives, 320 for the
+        // Left Dock in a wide window; and never taken from what egui
+        // kept, which a small window drew smaller.)
+        self.settings.dock_sizes_taken = true;
+        self.settings.left_dock_width = None;
+        self.settings.right_dock_width = None;
+        self.settings.right_dock_width_wide = None;
+        self.settings.bottom_dock_height = None;
+        self.settings.module_panel_height = None;
+        self.settings.bookmarks_panel_height = None;
+        self.settings.columns_panel_height = None;
+        self.settings.layers_panel_height = None;
+        self.settings.parts_panel_height = None;
+        self.settings.types_panel_height = None;
+        self.settings.factions_panel_height = None;
+        // (The sections' shares and the tabs in front, per kind.)
+        self.settings.dock_layouts.clear();
         self.settings.window_places.clear();
-        self.palette_share = None;
-        if let Some(path) = self.dock.find_tab(&Tab::Palette) {
-            self.dock.remove_tab(path);
-        }
-        self.show_panel(commands::Id::ViewPalettes, true);
     }
 
     /// Whether a tab may close now, letting go of what it held: a side
@@ -2393,17 +3380,6 @@ impl Moonglow {
         // (Closed, its draft goes: Cancel.)
         if *tab == Tab::Options {
             self.options = None;
-        }
-        // (Tile Properties with changes not applied asks first, and stays
-        // for the answer: `tile_select::closing_window`.)
-        if *tab == Tab::TileProperties {
-            match self.tile_props.as_mut() {
-                Some(p) if p.changed() => {
-                    p.closing = true;
-                    return false;
-                }
-                _ => self.tile_props = None,
-            }
         }
         // (Closed with what it changed: set back as its Cancel does, when
         // asked for, as Aurora's close button does.)
@@ -2417,13 +3393,12 @@ impl Moonglow {
     /// resource or a tool of the module, not a side editor's (a hak's, a
     /// 2DA's, a tileset's: closed, it has let its file go).
     pub(crate) fn closed(&mut self, tab: &Tab) {
-        if side_doc::is_side(tab) || matches!(tab, Tab::Options | Tab::TileProperties) {
-            return;
+        // (The Plugins tab's install note goes with it, as its window's
+        // did: M4's U29.)
+        if *tab == Tab::Plugins {
+            self.plugins.install_note = None;
         }
-        // (The palettes' pane closed is the palettes folded away: View
-        // and the strip at the edge bring them back.)
-        if *tab == Tab::Palette {
-            self.settings.hide_palettes = true;
+        if side_doc::is_side(tab) || matches!(tab, Tab::Options) {
             return;
         }
         self.closed_tabs.retain(|t| t != tab);
@@ -2447,12 +3422,14 @@ impl Moonglow {
         }
     }
 
-    /// The pane the tab keys work in: the one with the focus, if it has
-    /// tabs to go between, else the middle's (the areas').
+    /// The pane the tab keys work in: the editor group with the focus
+    /// (whatever its tabs), or a window's pane with the focus that has tabs
+    /// to go between; else the focused group ([`Moonglow::focused_group`]).
     fn tab_pane(&self) -> Option<egui_dock::NodePath> {
         let tabs = |p: &egui_dock::NodePath| self.dock.leaf(*p).map_or(0, |l| l.tabs.len());
-        let focused = self.dock.focused_leaf().filter(|p| tabs(p) > 1);
-        focused.or_else(|| self.middle_pane())
+        let focused =
+            (self.dock.focused_leaf()).filter(|p| tabs(p) > usize::from(!p.surface.is_main()));
+        focused.or_else(|| self.focused_group())
     }
 
     /// The tab Close Tab closes: the one in front of the pane with the
@@ -2501,58 +3478,137 @@ impl Moonglow {
         self.show_tab(tab);
     }
 
+    /// The editor area's keys: what its tab used last (a window's too)
+    /// has: a talk table's lines, a table's cells (and which table), else
+    /// an area's.
+    pub(crate) fn editor_keys(&self) -> (palette_view::Keys, Option<u32>) {
+        use palette_view::Keys;
+        match self.tabs_recent.first() {
+            Some(Tab::TalkTable) => (Keys::Talk, None),
+            Some(Tab::Table(id)) => (Keys::Table, Some(*id)),
+            // (A tileset's tile list, M4's U20.)
+            Some(Tab::Tileset(_)) => (Keys::Tiles, None),
+            // (A hak's table of resources, M4's U21.)
+            Some(Tab::Hak(_)) => (Keys::Hak, None),
+            // (The faction editor's matrix, M4's U22.)
+            Some(Tab::Factions) => (Keys::Factions, None),
+            _ => (Keys::Area, None),
+        }
+    }
+
     /// Next Pane and Previous Pane (F6): the arrow keys given to the next
-    /// of the panes shown, round from the last: the module tree (at the
-    /// row they were at, else its first), the middle (an area's view has
-    /// them, as after a click in it), the palettes, the log.
+    /// of the panes shown, round from the last, left to right and then
+    /// down: the Left Dock's panel shown (the module tree, at the row they
+    /// were at, else its first; or the resource browser's list), the
+    /// Outliner under it where the area is in front (its row, else its
+    /// first), the editor area (an area's view has them, as after a click
+    /// in it), the Right Dock's Palette panel, the Bottom Dock's log.
     pub(crate) fn step_pane(&mut self, ctx: &egui::Context, by: isize) {
         use palette_view::Keys;
-        // Each pane's keys are what its tab in front has: the middle's (the
-        // tab used last outside the palettes' pane, a window's too) a talk
-        // table's lines, a table's cells or the resource browser's list,
-        // else an area's; the palettes' pane's the palette, or the
-        // resource browser docked there.
-        let palettes = self.dock.find_tab(&Tab::Palette).map(|p| (p.surface, p.node));
-        let in_palettes = |tab: &Tab| {
-            let at = self.dock.find_tab(tab).map(|p| (p.surface, p.node));
-            at.is_some() && at == palettes
-        };
-        let front = |in_pane: bool| {
-            if in_pane {
-                let (s, n) = palettes?;
-                let leaf = self.dock.iter_leaves().find(|(p, _)| p.surface == s && p.node == n)?.1;
-                leaf.tabs.get(leaf.active.0).cloned()
-            } else {
-                self.tabs_recent.iter().find(|t| !in_palettes(t)).cloned()
-            }
-        };
-        let keys_of = |tab: Option<Tab>| match tab {
-            Some(Tab::TalkTable) => (Keys::Talk, None),
-            Some(Tab::Table(id)) => (Keys::Table, Some(id)),
-            Some(Tab::Resources) => (Keys::Browser, None),
-            _ => (Keys::Area, None),
-        };
+        // Each pane's keys are what its tab in front has: the Left Dock's
+        // its panel's (the tree's rows, the resource browser's list); the
+        // editor area's (the tab used last, a window's too) a talk table's
+        // lines or a table's cells, else an area's; the Right Dock's the
+        // palette.
         let mut panes = Vec::new();
-        if self.ws.is_some() && !self.settings.hide_tree {
-            panes.push((Keys::Tree, None));
+        // (A conversation's bookmarks, each list a stop of its own: the
+        // conversation whose they are. Docked, the one the Outliner lists;
+        // in windows, those drawn at the last frame, in their order.)
+        let mut marks: Vec<Option<outliner::Owner>> = Vec::new();
+        // (Only what is drawn: a folded dock, by the window's width or by
+        // the builder, is passed by; its strip's buttons, View's rows and
+        // their keys unfold it.)
+        if let Some(panel) = self.left_dock_shows() {
+            // (Holding the Outliner alone, no module open: its one stop.)
+            if panel != Panel::OUTLINER {
+                panes.push((panel.keys(), None));
+                marks.push(None);
+            }
+            // (The Outliner under its tabs' panel, before the editor
+            // area: left to right, then down.)
+            if Panel::OUTLINER.available(self) {
+                panes.push((outliner::keys_of(self), None));
+                marks.push(outliner::contents(self).and_then(outliner::Contents::owner));
+            }
         }
-        panes.push(keys_of(front(false)));
-        if palettes.is_some() {
-            panes.push(match front(true) {
-                Some(Tab::Resources) => (Keys::Browser, None),
-                _ => (Keys::Palette, None),
-            });
+        // (A floating conversation's window's Outliner, its bookmarks: at
+        // the window's left, so before its editor and its right pane, left
+        // to right, then down, as T14 orders the docks.)
+        let in_windows =
+            self.outliner.marks_last.iter().filter(|(_, window)| *window).map(|(k, _)| *k);
+        for key in in_windows {
+            panes.push((Keys::Marks, None));
+            marks.push(Some(key));
         }
-        // The log last, below them all, where it is shown.
-        if !self.settings.hide_log {
-            panes.push((Keys::Log, None));
+        // (The editor area's place among them.)
+        let middle = panes.len();
+        panes.push(self.editor_keys());
+        marks.push(None);
+        // (Each floating editor's window's other panes after it.)
+        for p in self.window_bars.iter().filter(|p| **p != Panel::OUTLINER) {
+            panes.push((p.keys(), None));
+            marks.push(None);
         }
-        let now = panes.iter().position(|p| palette_view::keys_are(ctx, p.0));
+        // (The Right Dock's one stop: its panel in front's, the palette's
+        // rows or the Preview's model.)
+        if let Some(panel) = self.right_dock_shows() {
+            // (In two columns, a stop for each: the Palette's, then the
+            // Preview's.)
+            match self.right_columns {
+                true => panes.extend(self.right_bars.iter().map(|p| (p.keys(), None))),
+                false => panes.push((panel.keys(), None)),
+            }
+        }
+        // The Bottom Dock last, below them all, where it is shown: its
+        // panel in front's (the log's).
+        if !self.settings.hide_log
+            && let Some(panel) = shell::bottom_shown(self)
+        {
+            panes.push((panel.keys(), None));
+        }
+        // (The Right Dock's and the Bottom Dock's stops have no bookmarks.)
+        marks.resize(panes.len(), None);
+        let now = panes.iter().zip(&marks).position(|(p, m)| {
+            palette_view::keys_are(ctx, p.0)
+                && (p.0 != Keys::Marks || *m == self.outliner.marks_keys)
+        });
         // (The keys anywhere else, a conversation's lines: as the middle's.)
-        let middle = usize::from(panes[0].0 == Keys::Tree);
         let now = now.unwrap_or(middle.min(panes.len() - 1));
-        let (next, table) = panes[(now as isize + by).rem_euclid(panes.len() as isize) as usize];
+        let at = (now as isize + by).rem_euclid(panes.len() as isize) as usize;
+        let (next, table) = panes[at];
         palette_view::give_keys(ctx, next);
+        // (A tileset's tile list: the tileset's in front, M4's U20.)
+        if next == Keys::Tiles
+            && let Some(Tab::Tileset(id)) = self.tabs_recent.first()
+        {
+            tileset_view::take_keys(ctx, *id);
+        }
+        // (A hak's table: the hak's in front, M4's U21.)
+        if next == Keys::Hak
+            && let Some(Tab::Hak(id)) = self.tabs_recent.first()
+        {
+            hak_view::take_keys(ctx, *id);
+        }
+        // (What has the keyboard's focus lets go of it: a stop that takes
+        // it (a panel's first field, Cell's Value, References' button)
+        // asks for it again as it is drawn, and the lists' keys work only
+        // with none, `tree::keys_free`. A stop left from References'
+        // button kept it, and the Outliner's keys did nothing.)
+        if let Some(focused) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(focused));
+        }
+        // (A talk table's lines: the tab's, M4's U17.)
+        if next == Keys::Talk
+            && let Some(which) =
+                self.tabs_recent.first().and_then(|t| talk_view::Which::of(self, t))
+        {
+            talk_view::take_keys(ctx, which);
+        }
+        if next == Keys::Marks
+            && let Some(key) = marks[at]
+        {
+            outliner::take_marks(self, ctx, key);
+        }
         if let Some(id) = table {
             table_view::take_keys(ctx, id);
             // (At its first cell, where none is selected: the arrows go
@@ -2564,12 +3620,67 @@ impl Moonglow {
                 doc.selected = Some((0, 0));
             }
         }
+        if next == Keys::Outliner {
+            outliner::take_keys(self, ctx);
+        }
         if next == Keys::Tree && self.tree_cursor.is_none() {
             self.tree_cursor = Some(tree::first_row());
             self.tree_cursor_moved = true;
         }
         if next == Keys::Palette {
             self.palette.to_first = true;
+        }
+        // (Tile Properties: its first control takes the focus as it is
+        // drawn, `tile_select::panel`.)
+        self.tile_props_focus = next == Keys::TileProperties;
+        // (Properties: its page shown takes the focus as it is drawn,
+        // `properties_panel::panel`.)
+        self.props_focus = next == Keys::Properties;
+        // (Reference: its filter takes the focus as it is drawn,
+        // `script_reference::reference`.)
+        self.script_tools.reference_focus = next == Keys::Reference;
+        self.script_tools.help_focus = next == Keys::Help;
+        // (Compiler, Bookmarks, Search Results: the panel takes it.)
+        let lists = [Keys::Compiler, Keys::Bookmarks, Keys::SearchResults];
+        self.script_tools.list_focus = lists.contains(&next).then_some(next);
+        // (A conversation's panels: their first field takes it.)
+        // (And a table's Cell and References, M4's U16.)
+        let node = [
+            Keys::NodeData,
+            Keys::NodeSearch,
+            Keys::Conversation,
+            Keys::Cell,
+            Keys::TableReferences,
+            // (And a talk table's String and Talk Table, M4's U17.)
+            Keys::TalkString,
+            Keys::TalkFile,
+            // (And a NUI designer's Components and Bindings, M4's U18.)
+            Keys::NuiComponents,
+            Keys::NuiBindings,
+            // (And its Checks, M4's U19.)
+            Keys::NuiChecks,
+            // (And Problems and a tileset's Textures, M4's U20.)
+            Keys::Problems,
+            Keys::Textures,
+            // (And a hak's Details, M4's U21.)
+            Keys::HakDetails,
+            // (And a journal's and the faction editor's panels, M4's U22.)
+            Keys::JournalEntry,
+            Keys::JournalCategory,
+            Keys::FactionPanel,
+            Keys::Reaction,
+            Keys::Reactions,
+        ];
+        self.dialog_panel_focus = node.contains(&next).then_some(next);
+        // (In two columns, the column the keys go to is the dock's panel.)
+        if self.right_columns
+            && let Some(p) = self.right_bars.iter().copied().find(|p| p.keys() == next)
+        {
+            shell::focus_right(self, p);
+        }
+        // (At the row they were at in the browser's list, else its first.)
+        if next == Keys::Browser && self.browser.cursor.is_none() {
+            self.browser.go_to(0);
         }
     }
 
@@ -2605,10 +3716,10 @@ impl Moonglow {
         }
     }
 
-    /// The middle's tab of a number (from 1; 9: its last), brought to the
-    /// front.
+    /// The tab of a number (from 1; 9: its last) of the pane the tab keys
+    /// work in ([`Moonglow::tab_pane`]), brought to the front.
     fn number_tab(&mut self, number: usize) {
-        let Some(leaf) = self.middle_pane().and_then(|p| self.dock.leaf(p).ok()) else {
+        let Some(leaf) = self.tab_pane().and_then(|p| self.dock.leaf(p).ok()) else {
             return;
         };
         let tab = if number == 9 { leaf.tabs.last() } else { leaf.tabs.get(number - 1) };
@@ -2645,120 +3756,141 @@ impl Moonglow {
         }
     }
 
-    /// With a module open, the middle of the window keeps its place when
-    /// its last tab is closed: a pane that says no area is open takes it,
-    /// and goes when something opens there. (Without it the palettes'
-    /// pane, the only one left, took the whole middle.)
+    /// With a module open, the editor area never goes empty: its editor
+    /// groups are its panes with tabs (a tab dragged to a side of a group
+    /// makes a group, and a group whose last tab goes is gone, the group
+    /// beside it taking its room, egui_dock's own), and with the last tab
+    /// of the last group closed a pane that says no area is open takes the
+    /// whole area, and goes when something opens there. A tool's group left
+    /// alone (the Faction Editor split off an area's right, the area and
+    /// Module Properties closed) is an editor group as any, and takes the
+    /// editor area (GitHub issues 11 and 20's last part, settled by the
+    /// editor groups of M3's T9: the boards' editor area holds editors
+    /// alone, the placeholder only where it has none).
     fn keep_middle(&mut self) {
         if self.ws.is_none() {
             return;
         }
-        // The middle's tabs: those of the main surface that are not in
-        // the palettes' pane. (A tab docked beside the palettes there, the
-        // resource browser's, is the side pane's, not the middle's: with
-        // it open the middle was let go all the same. GitHub issue 11.)
-        // (The palettes dropped into the middle, among its areas, make it
-        // no side pane: taken for one, the middle was found empty and a
-        // pane that says so was set beside it, the areas on the right.
-        // GitHub issue 20.)
-        let side = (self.dock.find_tab(&Tab::Palette))
-            .filter(|p| p.surface.is_main())
-            .filter(|p| {
-                let middle = |t: &Tab| matches!(t, Tab::Area(_) | Tab::NoArea);
-                self.dock
-                    .iter_leaves()
-                    .find(|(q, _)| q.surface == p.surface && q.node == p.node)
-                    .is_none_or(|(_, leaf)| !leaf.tabs.iter().any(middle))
-            })
-            .map(|p| (p.surface, p.node));
-        // (Without the palettes, a pane of the resource browser alone is
-        // the side pane all the same: the palettes closed, it took the
-        // whole window, and nothing could be docked beside it. GitHub
-        // issue 23.)
-        let side = side.or_else(|| {
-            let tools = |t: &Tab| matches!(t, Tab::Resources);
-            (self.dock.iter_leaves())
-                .filter(|(p, _)| p.surface.is_main())
-                .find(|(_, leaf)| !leaf.tabs.is_empty() && leaf.tabs.iter().all(tools))
-                .map(|(p, _)| (p.surface, p.node))
-        });
-        let main: Vec<Tab> = (self.dock.iter_all_tabs())
-            .filter(|(p, _)| p.surface.is_main() && Some((p.surface, p.node)) != side)
-            .map(|(_, t)| t.clone())
+        let main: Vec<&Tab> = (self.dock.iter_all_tabs())
+            .filter(|(p, _)| p.surface.is_main())
+            .map(|(_, t)| t)
             .collect();
-        let others = main.iter().any(|t| !matches!(t, Tab::Palette | Tab::NoArea));
-        let placeholder = main.contains(&Tab::NoArea);
-        // (Where the palettes' pane begins, kept for when the pane beside
-        // it is made anew.)
-        if let Some(palette) = self.dock.find_tab(&Tab::Palette).filter(|p| p.surface.is_main())
-            && let Some(parent) = palette.node.parent()
-            && let egui_dock::Node::Horizontal(split) = &self.dock.main_surface()[parent]
-            && palette.node == parent.right()
-        {
-            self.palette_share = Some(1.0 - split.fraction);
-        }
+        let others = main.iter().any(|t| **t != Tab::NoArea);
+        let placeholder = main.contains(&&Tab::NoArea);
         if others && placeholder {
             if let Some(path) = self.dock.find_tab(&Tab::NoArea) {
                 self.dock.remove_tab(path);
             }
         } else if !others && !placeholder {
-            match side {
-                Some((_, node)) => {
-                    let left = match self.palette_share {
-                        Some(share) if share < 0.95 => (1.0 - share).clamp(0.12, 0.88),
-                        _ => self.palette_split(),
-                    };
-                    self.dock.main_surface_mut().split_left(node, left, vec![Tab::NoArea]);
-                }
-                None => self.dock.main_surface_mut().push_to_first_leaf(Tab::NoArea),
-            }
-        }
-    }
-
-    /// Where the main panes split for the Palettes pane on the right: the
-    /// left side's share, leaving the palette as wide as the module tree.
-    /// (egui_dock's split fraction is always the left side's.)
-    fn palette_split(&self) -> f32 {
-        match (self.tree_width, self.dock_width) {
-            (Some(tree), Some(dock)) if dock > 0.0 => (1.0 - tree / dock).clamp(0.5, 0.9),
-            _ => 0.72,
+            self.dock.main_surface_mut().push_to_first_leaf(Tab::NoArea);
         }
     }
 
     /// Opens a tab in a window of its own, sized for it and fitted to the
-    /// screen, centred over the main pane (clear of the palette's), each a
-    /// little below and right of the last.
+    /// screen, centered over the main pane, each a little below and right
+    /// of the last.
     fn open_window(&mut self, tab: Tab) {
+        // (Kept from the main window's edges by a window of panes' first
+        // size.)
+        const WINDOW_MARGIN: f32 = 24.0;
         let screen = self
             .screen
             .unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)));
-        let palette = self.dock.find_tab(&Tab::Palette).map(|p| (p.surface, p.node));
         let main = self
             .dock
             .iter_leaves()
             // (The pane that says no area is open is as no pane: windows
             // open where they did with the middle empty.)
-            .find(|(p, leaf)| {
-                p.surface.is_main()
-                    && Some((p.surface, p.node)) != palette
-                    && !leaf.tabs.contains(&Tab::NoArea)
-            })
+            .find(|(p, leaf)| p.surface.is_main() && !leaf.tabs.contains(&Tab::NoArea))
             .map(|(_, leaf)| leaf.rect)
             .filter(|r| r.is_positive())
             .unwrap_or(screen);
-        // Below the menu and toolbar (the main pane's top), never over them.
+        // Below the Top Bar (the main pane's top), never over it.
         let room = egui::Rect::from_min_max(egui::pos2(screen.left(), main.top()), screen.max);
+        // Placed clear of a folded dock's strip: a window's resize handles
+        // reach past its edges by egui's corner grab
+        // (`resize_grab_radius_corner`, 10), and over the strip's buttons
+        // (Show the Left Dock) a click would take hold of the window's
+        // corner instead (M4's U22 review). Its size is still fitted to
+        // the room (the margin takes the strip), narrowed only where it
+        // would not fit beside it. (A dock open is the window's to lie
+        // over, as it was.)
+        const GRAB: f32 = 10.0;
+        let mut clear = room;
+        if let Some(strip) = self.strips[0] {
+            clear.min.x = clear.min.x.max(strip.right() + GRAB + 1.0);
+        }
+        if let Some(strip) = self.strips[1] {
+            clear.max.x = clear.max.x.min(strip.left() - GRAB - 1.0);
+        }
         // As wide and tall as one of its kind was last left.
         let left = kept_by_kind(&self.settings.window_sizes, &tab);
         // (One left too small to use, by an older version, is passed over.)
         let left = left
             .filter(|(_, s)| s[0] as f32 >= MIN_REMEMBERED.x && s[1] as f32 >= MIN_REMEMBERED.y);
-        let want = left.map_or(tab.window_size(), |(_, s)| egui::vec2(s[0] as f32, s[1] as f32));
+        // (A Properties form with its own Preview, the game's data read:
+        // that much wider, its pane beside the form's 980, M4's U11. A
+        // window of the kind left at a size opens so, its pane drawn only
+        // where the form keeps its least beside it.)
+        // (A conversation's, its Outliner at its left: that much wider,
+        // M4's U15, its tree keeping the room it had.)
+        let first = match shell::own_preview(self, Some(&tab)) {
+            Some(_) => tab.window_size() + egui::vec2(RIGHT_DOCK_LEAST + 1.0, 0.0),
+            None if matches!(tab, Tab::Dialog(_)) => {
+                tab.window_size() + egui::vec2(shell::WINDOW_LEFT_WIDE + 1.0, 0.0)
+            }
+            // (A table's, its Cell and References at its right and its
+            // columns at its left, M4's U16: that much wider, its grid
+            // keeping the room it had.)
+            // (A tileset's too, its Preview and Textures at its right and
+            // its parts at its left, M4's U20: its list and form keeping
+            // the room they had.)
+            // (A hak's too, its Preview and Details at its right and its
+            // types at its left, M4's U21: its table keeping its room.)
+            // (The faction editor's too, its Faction, Reaction and
+            // Reactions at its right and its factions at its left, M4's
+            // U22: its matrix keeping its room.)
+            None if matches!(
+                tab,
+                Tab::Table(_) | Tab::Nui(_) | Tab::Tileset(_) | Tab::Hak(_) | Tab::Factions
+            ) =>
+            {
+                tab.window_size()
+                    + egui::vec2(RIGHT_DOCK_LEAST + 1.0 + shell::WINDOW_LEFT_WIDE + 1.0, 0.0)
+            }
+            // (A talk table's, its String, References and Talk Table at
+            // its right, M4's U17: that much wider, its list keeping the
+            // room it had.)
+            // (The journal's too, its Entry and Category at its right,
+            // M4's U22.)
+            None if tab == Tab::TalkTable || tab == Tab::Journal => {
+                tab.window_size() + egui::vec2(RIGHT_DOCK_LEAST + 1.0, 0.0)
+            }
+            None => tab.window_size(),
+        };
+        let want = left.map_or(first, |(_, s)| egui::vec2(s[0] as f32, s[1] as f32));
         let remembered = left.is_some();
         // Some of the main pane (the area view) shows beside it.
         // (The Options need their width, and aren't worked in beside it.)
+        // (An editor that brings its panels into its window, a talk table,
+        // a 2DA, a conversation: clipped to the main window, less a margin,
+        // not to the room between the docks: it may stand over a dock, as a
+        // window dragged there does, and its panes and header keep their
+        // room. The coordinator's ruling at M4's U17 review.)
+        let panes = matches!(
+            tab,
+            Tab::Dialog(_)
+                | Tab::Table(_)
+                | Tab::Nui(_)
+                | Tab::Tileset(_)
+                | Tab::Hak(_)
+                | Tab::Factions
+                | Tab::Journal
+        ) || tab == Tab::TalkTable;
         let wide = if tab == Tab::Options {
             room.width()
+        } else if panes {
+            (room.width() - 2.0 * WINDOW_MARGIN).max(420.0).min(room.width())
         } else {
             (main.width() * 0.85).max(420.0).min(room.width())
         };
@@ -2768,6 +3900,7 @@ impl Moonglow {
         } else {
             egui::vec2(want.x.min(wide), want.y.min(room.height() * 0.9))
         };
+        let size = egui::vec2(size.x.min(clear.width()), size.y);
         let windows = self
             .dock
             .iter_surfaces()
@@ -2775,7 +3908,7 @@ impl Moonglow {
             .count();
         let step = 28.0 * (windows % 8) as f32;
         let mut at = main.center() - size / 2.0 + egui::vec2(step, step);
-        at.x = at.x.min(room.right() - size.x).max(room.left());
+        at.x = at.x.min(clear.right() - size.x).max(clear.left());
         at.y = at.y.min(room.bottom() - size.y).max(room.top());
         self.dock.add_window(vec![tab.clone()]);
         self.put_window(&tab, egui::Rect::from_min_size(at, size));
@@ -2783,67 +3916,106 @@ impl Moonglow {
 
     /// The bar beside a window's tabs does what its tab does: a double
     /// click maximizes the window and restores it, and a right click
-    /// offers that; a button at its right end before the close button
-    /// does it too, and shows which the window is (the `maximize` icon,
-    /// or `restore`). (egui_dock gives the bar nothing; a builder looked for
+    /// offers that; a button at its right end before the Close does it
+    /// too, and shows which the window is (the `maximize` icon, or
+    /// `restore`). (egui_dock gives the bar nothing; a builder looked for
     /// them there, as on any window's title.) The window is still dragged
-    /// by it.
+    /// by it. And each window's resize grip, in its bottom right corner
+    /// (the Floating board's `.fw-grip`), where it is not folded.
     fn window_bars(&mut self, ui: &mut egui::Ui) {
         let buttons = std::mem::take(&mut self.tab_buttons);
         let mut toggle = None;
+        let mut grips: Vec<(egui::LayerId, egui::Rect)> = Vec::new();
         for (path, leaf) in self.dock.iter_leaves() {
             let Some(tab) = leaf.tabs.get(leaf.active.0).or(leaf.tabs.first()) else { continue };
-            if path.surface.is_main() || tab.docks() || *tab == Tab::Palette {
+            if path.surface.is_main() || tab.docks() {
                 continue;
             }
             let own: Vec<_> = buttons.iter().filter(|(t, ..)| leaf.tabs.contains(t)).collect();
             let Some(layer) = own.first().map(|b| b.2) else { continue };
-            // From the last tab to the window's close button.
-            let left = own.iter().map(|b| b.1.right()).fold(leaf.rect.left(), f32::max) + 2.0;
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(left, leaf.rect.top()),
-                egui::pos2(leaf.rect.right() - 28.0, leaf.viewport.top()),
+            if !leaf.collapsed {
+                grips.push((layer, leaf.rect));
+            }
+            // Maximize beside the Close at the bar's right end (the
+            // board's `.tools`), both 22 points square.
+            let side = mg_uikit::metrics::ICON_BUTTON;
+            let row = leaf.rect.top()..=leaf.viewport.top();
+            let at = egui::Rect::from_min_size(
+                egui::pos2(
+                    leaf.rect.right() - tabs::WINDOW_BAR_END,
+                    (leaf.rect.top() + leaf.viewport.top()) / 2.0 - side / 2.0,
+                ),
+                egui::vec2(side, side),
             );
-            if !bar.is_positive() || leaf.collapsed {
+            if leaf.collapsed {
                 continue;
             }
-            let id = egui::Id::new(("window-bar", path.surface.0, path.node.0));
-            let builder = egui::UiBuilder::new().layer_id(layer).max_rect(bar);
-            let response =
-                ui.scope_builder(builder, |ui| ui.interact(bar, id, egui::Sense::click()));
-            let response = response.inner;
-            if response.double_clicked() {
+            // From the last tab to the Maximize (none where the tabs fill
+            // the bar: Maximize is there all the same).
+            let left = own.iter().map(|b| b.1.right()).fold(leaf.rect.left(), f32::max) + 2.0;
+            let bar = egui::Rect::from_x_y_ranges(left.min(at.left())..=at.left(), row);
+            let response = bar.is_positive().then(|| {
+                let id = egui::Id::new(("window-bar", path.surface.0, path.node.0));
+                let builder = egui::UiBuilder::new().layer_id(layer).max_rect(bar);
+                ui.scope_builder(builder, |ui| {
+                    // (Not cut to the editor area: a window's bar lies over
+                    // the docks too, a maximized one's over both. Cut so,
+                    // its double click did nothing over the Left and Right
+                    // Docks.)
+                    ui.set_clip_rect(bar);
+                    // (Not a stop of Tab: Maximize is the keyboard's.)
+                    ui.interact(bar, id, egui::Sense::CLICK)
+                })
+                .inner
+            });
+            if response.as_ref().is_some_and(egui::Response::double_clicked) {
                 toggle = Some(tab.clone());
             }
             let maximized = self.windows_maximized(&leaf.tabs);
             let label = if maximized { "Restore" } else { "Maximize" };
+            let tip = if maximized {
+                "Put the window back where it was, or double-click the bar"
+            } else {
+                "Fill the main window, or double-click the bar"
+            };
             // (Registered after the bar: it takes its clicks.)
             let icon = if maximized { icons::RESTORE } else { icons::MAXIMIZE };
-            let side = mg_uikit::metrics::ICON_BUTTON.min(bar.height());
-            let at = egui::Rect::from_center_size(
-                egui::pos2(bar.right() - side / 2.0 - 2.0, bar.center().y),
-                egui::vec2(side, side),
-            );
             let button = mg_uikit::IconButton::new(icon, label).icon_only(true);
             let pressed = ui
                 .scope_builder(egui::UiBuilder::new().layer_id(layer).max_rect(at), |ui| {
                     // (Its window's own layer, over the main window: not
                     // cut to the main window's panels, which hid it where
-                    // a window's bar lay over the toolbar.)
+                    // a window's bar lay over the Top Bar.)
                     ui.set_clip_rect(at.expand(1.0));
-                    ui.put(at, button).on_hover_text(label).clicked()
+                    ui.put(at, button).on_hover_text(tip).clicked()
                 })
                 .inner;
             if pressed {
                 toggle = Some(tab.clone());
             }
-            response.context_menu(|ui| {
-                mg_uikit::menu_rows(ui);
-                if ui.button(label).clicked() {
-                    toggle = Some(tab.clone());
-                    ui.close();
-                }
-            });
+            if let Some(response) = &response {
+                mg_uikit::context_menu(response, |ui| {
+                    if ui.button(label).clicked() {
+                        toggle = Some(tab.clone());
+                        ui.close();
+                    }
+                });
+            }
+        }
+        // The grips, one a window (its panes' union: a window split in
+        // two has one corner), framed by the window's stroke.
+        let mut windows: Vec<(egui::LayerId, egui::Rect)> = Vec::new();
+        for (layer, rect) in grips {
+            match windows.iter_mut().find(|(l, _)| *l == layer) {
+                Some((_, r)) => *r = r.union(rect),
+                None => windows.push((layer, rect)),
+            }
+        }
+        for (layer, panes) in windows {
+            let window = panes.expand(self.window_frame);
+            // (Lit where egui resizes it by the corner, no further.)
+            let hot = mg_uikit::window::resize_grip_hot(ui.ctx(), window, layer);
+            mg_uikit::paint_resize_grip(&ui.ctx().layer_painter(layer), window, hot);
         }
         if let Some(tab) = toggle {
             self.actions.push(Action::ToggleMaximize(tab));
@@ -2881,7 +4053,7 @@ impl Moonglow {
     /// how its panes have moved and grown since; and its size, by the kind
     /// of its first tab, for the next of the kind to open at (not a
     /// maximized one's).
-    fn remember_window_sizes(&mut self) {
+    fn remember_window_sizes(&mut self) -> bool {
         let mut again = Vec::new();
         // A maximized window stays so as Moonglow's window is resized:
         // put over the room again where it changed.
@@ -2952,6 +4124,7 @@ impl Moonglow {
                 None => self.settings.window_sizes.push((kind.to_string(), size)),
             }
         }
+        let put = !again.is_empty();
         for (tab, rect) in again {
             self.put_window(&tab, rect);
         }
@@ -2959,6 +4132,7 @@ impl Moonglow {
         let dock = &self.dock;
         self.maximized.retain(|t, _| dock.find_tab(t).is_some());
         self.windows.retain(|t, _| dock.find_tab(t).is_some());
+        put
     }
 
     /// Puts a tab's window at `rect` (position and size), and follows it
@@ -2975,7 +4149,7 @@ impl Moonglow {
     }
 
     /// The room a maximized window takes: the whole of Moonglow's window
-    /// under its menu and toolbar, over the module tree, the palettes and
+    /// under its Top Bar, over the module tree, the palettes and
     /// the log as well as the panes (a builder: Maximize "doesn't make it
     /// fill the screen").
     fn maximize_room(&self) -> Option<egui::Rect> {
@@ -3033,47 +4207,19 @@ impl Moonglow {
         }
         // (Find's keys, for the search fields.)
         self.keymap.share_find(ui.ctx());
-        // Options › Keyboard takes the next key itself, and the Command
-        // Palette what is typed into it.
-        if self.options.as_ref().is_some_and(|o| o.recording.is_some())
-            || self.command_palette.is_some()
-        {
+        // Options › Keyboard takes the next key itself. (While Quick Open's
+        // field has the keys, it is a text field as any: the keys that type
+        // are its, and the window's keys with Ctrl or a function key still
+        // run their commands, which close it: `commands::keys_pressed`.)
+        if self.options.as_ref().is_some_and(|o| o.recording.is_some()) {
             return;
         }
         commands::keys_pressed(self, ui);
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let module = match (self.module_path(), &self.ws) {
-            (Some(p), _) => p.display().to_string(),
-            (None, Some(_)) => "New module, not saved yet".to_string(),
-            (None, None) => "No module".to_string(),
-        };
-        let modified = self.ws.as_ref().is_some_and(Workspace::is_modified);
-        let install = match &self.install {
-            Some(gi) => gi.root.display().to_string(),
-            None => "No game install".to_string(),
-        };
-        // The game's folder on the right, the module's on the left; each
-        // shortened (with the whole path on hover) rather than overlapping.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.scope(|ui| {
-                ui.set_max_width(ui.available_width() * 0.4);
-                ui.add(egui::Label::new(&install).truncate()).on_hover_text(&install);
-            });
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                if let Some(note) = self.looking_note() {
-                    ui.label(note);
-                }
-                if modified {
-                    ui.label("(modified)");
-                }
-                ui.add(egui::Label::new(&module).truncate()).on_hover_text(&module);
-            });
-        });
-    }
-
-    fn log_ui(&mut self, ui: &mut egui::Ui) {
+    /// The log's lines (in the Bottom Dock, under its tab bar:
+    /// `shell::bottom_dock`).
+    pub(crate) fn log_ui(&mut self, ui: &mut egui::Ui) {
         use palette_view::Keys;
         let pane = ui.max_rect();
         // The keys (from a click in it, or Next Pane, F6) scroll it: a
@@ -3226,42 +4372,6 @@ impl Moonglow {
             palette_view::give_keys(ui.ctx(), Keys::Log);
         }
         palette_view::keys_outline(ui, shown.inner_rect, Keys::Log);
-        // Buttons in its corner: the whole log copied or saved (a line
-        // selected is copied alone: Jasperre's report), and emptied, so
-        // that a second Verify's report isn't mistaken for the first's.
-        // (The one that folds it away is on its edge: `pane_edge`.)
-        let mut right = ui.max_rect().right() - 4.0;
-        let top = ui.max_rect().top() + 2.0;
-        let buttons = [
-            ("Clear", "Clear Log", "Empty the log (View › Clear Log)"),
-            ("Save…", "Save Log", "The whole log into a text file (View › Save Log…)"),
-            ("Copy", "Copy Log", "The whole log to the clipboard (View › Copy Log)"),
-        ];
-        // (Each as wide as its word and the theme's padding, and as high
-        // as the theme's controls.)
-        let font = egui::TextStyle::Button.resolve(ui.style());
-        let (pad, height) = (ui.spacing().button_padding.x, ui.spacing().interact_size.y);
-        for (text, name, tip) in buttons {
-            let words = ui.fonts_mut(|f| {
-                f.layout_no_wrap(text.into(), font.clone(), egui::Color32::PLACEHOLDER)
-            });
-            let width = (words.size().x + 2.0 * pad).ceil();
-            let at = egui::Rect::from_min_size(
-                egui::pos2(right - width, top),
-                egui::vec2(width, height),
-            );
-            right -= width + 4.0;
-            let enabled = !self.log.entries.is_empty();
-            let b = ui.put(at, egui::Button::new(text));
-            b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
-            if b.on_hover_text(tip).clicked() && enabled {
-                match name {
-                    "Clear Log" => self.log.clear(),
-                    "Save Log" => self.save_log(),
-                    _ => self.copy_log(ui.ctx()),
-                }
-            }
-        }
     }
 
     /// Copy Log: the whole log to the clipboard, each line with its time.
@@ -3392,6 +4502,7 @@ impl Moonglow {
         }
         let mut m = m;
         self.restore_locks(&mut m);
+        self.let_go_of_module_job();
         self.ws = Some(Workspace::new(m));
         // (The last module's tags, and the bytes they were read from, let go.)
         self.tag_cache = Default::default();
@@ -3402,6 +4513,11 @@ impl Moonglow {
         self.area_names = Default::default();
         self.area_contents.clear();
         self.dock = DockState::new(vec![Tab::ModuleProperties]);
+        // (The Right Dock as the settings keep it for the editor in front,
+        // as each module opens: the owner's ruling of 2026-11-15, the area
+        // remembering its tab; the run's choices go.)
+        self.right_panel = None;
+        self.right_fronts.clear();
         // (The side editors kept by `close_keeping`: their tabs.)
         for tab in side {
             if self.side_doc(&tab).is_some() {
@@ -3409,7 +4525,6 @@ impl Moonglow {
             }
         }
         self.side_docs_follow_tabs();
-        self.open_palette = true;
         // On the area's tiles, what a new module needs first; or on the
         // palette shown last, where one was chosen.
         if self.settings.palette_type.is_none() {
@@ -3497,7 +4612,7 @@ impl Moonglow {
     /// What the module uses of its haks, worked out as a job and shown
     /// above the conflict report: each hak's line and every hak's, as
     /// `mg haks --usage` says them.
-    fn hak_usage_job(&mut self) {
+    pub(crate) fn hak_usage_job(&mut self) {
         let Some(install) = self.install.clone() else { return };
         let work = move |c: &jobs::Context| -> Result<String, String> {
             let started = std::time::Instant::now();
@@ -3522,23 +4637,42 @@ impl Moonglow {
         self.start_job("What the Module Uses", work, |app, made| match made {
             Ok(text) => {
                 app.log.info("What the module uses of its haks: in Hak Pak Conflict Analysis");
-                app.hak_usage = Some(text);
+                if let Some(h) = &mut app.hak_report {
+                    h.set_usage(text);
+                    dock_reports::bring(app, shell::Panel::HakConflicts);
+                }
             }
             Err(e) => app.log.error(format!("What the module uses: {e}")),
         });
     }
 
+    /// Hak Pak Conflict Analysis (Module Properties › Custom Content ›
+    /// Check for Conflicts…), as a job: each hak opened and its resources
+    /// listed against the game's, its progress told and Cancel there; the
+    /// report into its Bottom Dock tab, brought to the front (M4's U28).
     fn hak_report(&mut self) {
-        let (Some(ws), Some(install)) = (&self.ws, &self.install) else { return };
-        let haks = ws.module.haks().unwrap_or_default();
-        match mg_module::haks::hak_report(install, &haks) {
-            Ok(r) => {
-                self.log.info(format!("{} conflicting hak resources", r.conflicts().count()));
-                self.hak_report = Some(r.to_text());
-                self.hak_usage = None;
+        let Some(install) = self.install.clone() else { return };
+        let work = move |c: &jobs::Context| -> Option<Result<mg_module::haks::HakReport, String>> {
+            let haks = c.module.haks().unwrap_or_default();
+            // (A hak at a time: "Reading hak 3 of 40", Cancel stopping it
+            // before the next.)
+            let mut step = |n: usize, total: usize| {
+                c.progress.say(format!("Reading hak {} of {total}", (n + 1).min(total)));
+                c.progress.step(n, total);
+                !c.progress.cancelled()
+            };
+            let report = mg_module::haks::hak_report_with(&install, &haks, &mut step);
+            report.map_err(|e| e.to_string()).transpose()
+        };
+        self.start_job("Hak Pak Conflict Analysis", work, |app, made| match made {
+            Some(Ok(r)) => {
+                app.log.info(format!("{} conflicting hak resources", r.conflicts().count()));
+                app.show_hak_report(r);
             }
-            Err(e) => self.log.error(format!("Hak report failed: {e}")),
-        }
+            Some(Err(e)) => app.log.error(format!("Hak report failed: {e}")),
+            // (Called off: nothing to say.)
+            None => {}
+        });
     }
 
     /// Whether closing the module now would lose work: unsaved edits, or a
@@ -3651,7 +4785,14 @@ impl Moonglow {
         self.open_tabs = Default::default();
         // Closed (saved, or its changes discarded): no recovery copy.
         self.forget_recovery();
+        self.let_go_of_module_job();
         self.ws = None;
+        // (Quick Open's build of the load order gives up; with no game data
+        // there is nothing of it to keep.)
+        self.quick_open.index.give_up_build();
+        if self.game.is_none() {
+            self.quick_open.index.forget_game();
+        }
         self.sound_said.clear();
         self.tag_cache = Default::default();
         // (The project's plugins were its own.)
@@ -3685,12 +4826,23 @@ impl Moonglow {
         self.new_nui = None;
         self.laid_out.clear();
         self.tile_props = None;
+        self.tile_mode_areas.clear();
+        self.tile_props_aside.clear();
         self.area_stats = None;
+        self.hak_report = None;
+        self.claims.table = None;
         self.resize_area = None;
         self.rotate_area = None;
         self.change_tileset = None;
         self.adjust = None;
         self.find_instance = None;
+        if let Some(d) = &mut self.text_replace {
+            d.forget_hits();
+        }
+        // (Build's and Verify's findings are the module's: a click on one
+        // would open another module's resource.)
+        self.problems.remove(&problems::Source::Build);
+        self.problems.remove(&problems::Source::Verify);
         self.area_focus = None;
         self.start_focus = None;
         self.heard = None;
@@ -4050,6 +5202,29 @@ impl Moonglow {
                 }
             }
             Action::FoldPalettes => self.show_panel(commands::Id::ViewPalettes, false),
+            Action::ShowPanel(panel) => self.show_dock_panel(panel),
+            Action::ShowPreview(tab) => {
+                let brought = shell::own_preview(self, Some(&tab)).is_some();
+                let floating = self.dock.find_tab(&tab).is_some_and(|at| !at.surface.is_main());
+                if brought && self.active_editor() == Some(&tab) {
+                    self.show_dock_panel(Panel::Preview);
+                } else if !(brought && floating && !self.panes_dropped.contains(&tab)) {
+                    // (No Preview of its own drawn: the model's tab.)
+                    let model = model_view::Source::of_editor(&tab).map(|s| s.tab());
+                    if let Some(model) = model {
+                        self.actions.push(Action::OpenTab(model));
+                    }
+                }
+            }
+            Action::ShowProperties(area) => {
+                if self.active_editor() == Some(&Tab::Area(area)) {
+                    self.show_dock_panel(Panel::Properties);
+                } else if self.panes_dropped.contains(&Tab::Area(area)) {
+                    // (Dragged out into a window too narrow for its pane:
+                    // the Properties window, as before the panel.)
+                    properties_panel::open_in_tab(self, Some(&Tab::Area(area)));
+                }
+            }
             Action::PackTarget => _ = self.pack_target(),
             Action::TakeInLeftOut => self.take_in_left_out(),
             Action::ExportDialog(keys) => {
@@ -4149,8 +5324,8 @@ impl Moonglow {
             Action::Close => self.close(),
             Action::Undo | Action::Redo => {
                 // (Over a hak's, a 2DA's, a tileset's or the talk table's
-                // editor, its own.)
-                if self.local_undo(action == Action::Redo) {
+                // editor, its own; not Edit Areas Together's Cancel All.)
+                if !self.tools.history_only && self.local_undo(action == Action::Redo) {
                     return;
                 }
                 // (A Ctrl + wheel scaling under way is what Undo takes
@@ -4160,6 +5335,11 @@ impl Moonglow {
                 }
                 // (So is Q and E's turning, not yet a command.)
                 if action == Action::Undo && area_view::drop_key_turn(self) {
+                    return;
+                }
+                // (Nothing to redo while what is typed in the journal's
+                // panels waits to be set: `journal_view::typing_pending`.)
+                if action == Action::Redo && journal_view::typing_pending(self) {
                     return;
                 }
                 let Some(ws) = &mut self.ws else { return };
@@ -4220,28 +5400,47 @@ impl Moonglow {
             Action::NewNui(name) => nui_view::create(self, &name),
             Action::ImportNui => nui_view::import(self),
             Action::GenerateNui { name, export } => nui_view::generate(self, &name, export),
+            // (The tab alone goes. What it holds is let go of where its close
+            // was settled, before this is asked for: OK and Cancel's
+            // `forget_side`, the tab's own close (`TabViewer::on_close`,
+            // `Moonglow::closed`). Asked for on its own, a table's
+            // `TableDoc` stays in `tables` with its References' thread
+            // (`panels::Looking`, which runs on to its end: it is stopped as
+            // the document goes, or by a change seen in a frame that draws
+            // it), until the module closes (a table of the module's), else
+            // for the window's life; opened again, that same document comes
+            // back with its tab (`table_view::open_doc`). Tests close tabs
+            // so; nothing in the window does for a table.)
             Action::CloseTab(tab) => {
                 if tab == Tab::Options {
                     self.options = None;
-                }
-                if tab == Tab::TileProperties {
-                    self.tile_props = None;
                 }
                 if let Some(path) = self.dock.find_tab(&tab) {
                     self.dock.remove_tab(path);
                 }
             }
             Action::CloseTabs(tabs) => {
+                let one = tabs.len() == 1;
                 for tab in tabs {
                     if tab.closeable() && self.may_close(&tab) {
                         self.closed(&tab);
                         if let Some(path) = self.dock.find_tab(&tab) {
                             self.dock.remove_tab(path);
                         }
+                    } else if one && tab.closeable() {
+                        // (A tab that asks first, closed by its close
+                        // button or its menu's Close from behind another:
+                        // brought to the front, as the question is of it.)
+                        self.show_tab(tab);
                     }
                 }
             }
             Action::ToggleMaximize(tab) => self.toggle_maximize(&tab),
+            Action::SplitEditor => self.split_editor(),
+            // (A NUI designer's source group opens beside its design, the
+            // design first where it is not open: Reopen Closed Tab, a plugin's
+            // or a test's OpenTab, as Split source does. M4's U19 review.)
+            Action::OpenTab(Tab::NuiSource(key)) => self.open_nui_source(key),
             Action::OpenTab(tab) => {
                 if let Tab::Dialog(key) = &tab {
                     self.dialog_keys = Some(*key);
@@ -4254,8 +5453,7 @@ impl Moonglow {
                 // when the module opened) moves to a window of its own
                 // rather than come to the front over the area.
                 if !tab.docks()
-                    && tab != Tab::Palette
-                    && self.place_for(&tab) != Place::Middle
+                    && matches!(self.place_for(&tab), Some(Place::Window | Place::Split(..)))
                     && let Some(path) = self.dock.find_tab(&tab)
                     && let Ok(leaf) = self
                         .dock
@@ -4265,44 +5463,25 @@ impl Moonglow {
                     self.dock.remove_tab(path);
                 }
                 if self.dock.find_tab(&tab).is_none() {
-                    if tab == Tab::Palette {
-                        // Its own pane on the right, as in Aurora (the only
-                        // one when every other tab was closed).
-                        // (As wide as it was when it was folded away.)
-                        let fraction = match self.palette_share {
-                            Some(share) if share < 0.95 => (1.0 - share).clamp(0.12, 0.88),
-                            _ => self.palette_split(),
-                        };
-                        self.settings.hide_palettes = false;
-                        // (Where it was split off another side of the
-                        // middle: there again. GitHub issue 22.)
-                        let split = match self.place_for(&tab) {
-                            Place::Split(side, share) => self.split_middle(side, share, &tab),
-                            _ => None,
-                        };
-                        let main = self.dock.main_surface_mut();
-                        if split.is_none() && main.root_node().is_none_or(|n| n.is_empty()) {
-                            *main = egui_dock::Tree::new(vec![tab.clone()]);
-                        } else if split.is_none() {
-                            main.split_right(
-                                egui_dock::NodeIndex::root(),
-                                fraction,
-                                vec![tab.clone()],
-                            );
-                        }
-                    } else if !tab.docks() {
-                        // Where one of its kind was last dragged to, if
-                        // that pane is there; a window of its own else.
+                    if !tab.docks() {
+                        // Where one of its kind was last put, if that pane
+                        // is there; else as Options › General › Open
+                        // editors says: a tab of the focused editor group,
+                        // or a window of its own.
                         let pane = match self.place_for(&tab) {
-                            Place::Window => None,
-                            Place::Palettes => self
-                                .dock
-                                .find_tab(&Tab::Palette)
-                                .map(|p| egui_dock::NodePath { surface: p.surface, node: p.node }),
-                            Place::Middle => self.middle_pane(),
+                            // (A designer among the designs, never in a
+                            // source group: M4's U19 review.)
+                            None if matches!(tab, Tab::Nui(_)) => self.design_group(),
+                            None => self.focused_group(),
+                            Some(Place::Window) => None,
+                            Some(Place::Middle) => self.middle_pane(),
                             // A pane of its own off that side of the middle,
                             // as large as it was (GitHub issue 22).
-                            Place::Split(side, share) => self.split_middle(side, share, &tab),
+                            // (Into the group off that side where there
+                            // is one: a group, not one more each time.)
+                            Some(Place::Split(side, share)) => self
+                                .group_off(side)
+                                .or_else(|| self.split_middle(side, share, &tab)),
                         };
                         // A script, with a script's window open: a tab of
                         // that window, not one more window (Options ›
@@ -4341,40 +5520,33 @@ impl Moonglow {
                             (None, None) => self.open_window(tab.clone()),
                         }
                     } else {
-                        // Into the main window, not the palette's pane: the
-                        // focused pane, else the first other one. (Right after
-                        // the palette's pane is made, egui_dock reports no
-                        // focused pane but would push into the palette's; an
-                        // editor window that has the focus isn't a place for
-                        // an area.)
-                        let palette =
-                            self.dock.find_tab(&Tab::Palette).map(|p| (p.surface, p.node));
-                        let other = |p: &egui_dock::NodePath| {
-                            p.surface.is_main() && Some((p.surface, p.node)) != palette
-                        };
+                        // Into the main window: the focused pane, else the
+                        // first. (An editor window that has the focus isn't
+                        // a place for an area.)
+                        let main = |p: &egui_dock::NodePath| p.surface.is_main();
                         let target =
-                            self.dock.focused_leaf().filter(other).or_else(|| self.middle_pane());
-                        match (target, palette) {
-                            (Some(pane), _) => {
+                            self.dock.focused_leaf().filter(main).or_else(|| self.middle_pane());
+                        match target {
+                            Some(pane) => {
                                 self.dock.set_focused_node_and_surface(pane);
                                 self.dock.push_to_focused_leaf(tab.clone());
                             }
-                            // The palette's is the only pane: a new one on its left.
-                            (None, Some((_, node))) => {
-                                let fraction = self.palette_split();
-                                self.dock.main_surface_mut().split_left(
-                                    node,
-                                    fraction,
-                                    vec![tab.clone()],
-                                );
-                            }
-                            (None, None) => self.dock.push_to_first_leaf(tab.clone()),
+                            None => self.dock.push_to_first_leaf(tab.clone()),
                         }
                     }
                 }
-                // Bring it to the front, new or not.
+                // Bring it to the front, new or not. (In the main surface,
+                // its pane given the focus: the active editor, whose
+                // panels the docks show. An area opened from the module
+                // tree into its own pane, beside a tool's with the focus,
+                // left the docks the tool's.)
                 if let Some(path) = self.dock.find_tab(&tab) {
                     let _ = self.dock.set_active_tab(path);
+                    if path.surface.is_main() {
+                        let (surface, node) = (path.surface, path.node);
+                        self.dock
+                            .set_focused_node_and_surface(egui_dock::NodePath { surface, node });
+                    }
                 }
             }
             Action::RenameBlueprint { from, to } => blueprint::rename(self, from, to),
@@ -4433,6 +5605,46 @@ impl Moonglow {
             Action::TalkCsv(import) => talk_view::transfer(self, import, false),
             Action::TalkJson(import) => talk_view::transfer(self, import, true),
             Action::TalkFile(new) => talk_view::file(self, new),
+            Action::GameTalkExport(json) => talk_view::export_game(self, json),
+            Action::ShowGameTalk => talk_view::show_game(self),
+            Action::ShowModuleTalk => {
+                talk_view::hide_game(self);
+                self.run_now(Action::OpenTab(Tab::TalkTable));
+            }
+            Action::NuiSource(key, true) => self.open_nui_source(key),
+            Action::NuiSource(key, false) => {
+                if let Some(path) = self.dock.find_tab(&Tab::NuiSource(key)) {
+                    self.dock.remove_tab(path);
+                }
+                // (A floating designer's window as wide as it was before.)
+                let at = self.tracked_window(&Tab::Nui(key));
+                if let (Some((was, given, corner)), Some((tracked, now))) =
+                    (self.nui_widened.remove(&key), at)
+                {
+                    let near = |a: egui::Rect, b: egui::Rect| {
+                        (a.min - b.min).length() < 1.5 && (a.size() - b.size()).length() < 1.5
+                    };
+                    let back = near(now, given);
+                    let to = match back {
+                        true => was,
+                        false => {
+                            let added = given.width() - was.width();
+                            let width = (now.width() - added).max(was.width().min(now.width()));
+                            egui::Rect::from_min_size(now.min, egui::vec2(width, now.height()))
+                        }
+                    };
+                    self.put_window(&tracked, to);
+                    // (Put back while still wide, egui holds it inside the
+                    // screen: put there again once it is narrow, as a
+                    // maximized window's way back is.)
+                    if let (true, Some(corner), Some(track)) =
+                        (back, corner, self.windows.get_mut(&tracked))
+                    {
+                        track.aim = Some(corner);
+                    }
+                }
+            }
+
             Action::SaveResource(key, layer) => {
                 browser::save_as(self, key, layer.as_deref(), false)
             }
@@ -4564,6 +5776,8 @@ impl Moonglow {
         self.warn_shadowing(&cmd);
         // Claimed areas kept read-only, protected names asked about.
         claims::gate(self, &cmd)?;
+        // (One of Edit Areas Together's: its step kept for its Cancel All.)
+        let ours = tool_sections::marked(self, &cmd);
         // (Where what the open Properties windows show goes.)
         let followed = blueprint::follow::followed(self, &cmd.edits);
         let Some(ws) = &mut self.ws else { return Ok(()) };
@@ -4586,6 +5800,9 @@ impl Moonglow {
         self.typed.prune(ws.undo_depth(), ws.redo_depth());
         ws.apply(cmd)?;
         self.typed.applied();
+        if ours {
+            tool_sections::made(self);
+        }
         blueprint::follow::retarget(self, followed);
         blueprint::after_apply(self, derived);
         tag_clash::check(self, &tagged.1, tagged.0, false);
@@ -4636,6 +5853,8 @@ impl Moonglow {
         // and so is Q and E's turning.)
         area_view::commit_wheel_scales(self);
         area_view::commit_key_turns(self);
+        // (And a NUI designer's field still typed in.)
+        nui_view::store_typed(self);
         // Options > General: Build module on save.
         if self.settings.build_on_save && self.ws.is_some() {
             build_view::build_on_save(self);
@@ -4661,12 +5880,14 @@ impl Moonglow {
             if !compiled.is_empty() {
                 self.log.info(format!("Compiled on save: {}", transfer::listed(&compiled)));
             }
-            let failed: Vec<String> = stored
-                .iter()
-                .filter(|k| !compiled.contains(&k.resref.to_string()))
-                .filter(|k| self.script_fails(**k))
-                .map(|k| k.resref.to_string())
-                .collect();
+            // (Each failure's error in Compiler, as its own Compile says.)
+            let mut failed = Vec::new();
+            for k in stored.iter().filter(|k| !compiled.contains(&k.resref.to_string())) {
+                if let Some(e) = self.script_failure(*k) {
+                    self.note_failure(*k, e);
+                    failed.push(k.resref.to_string());
+                }
+            }
             if !failed.is_empty() {
                 self.log.error(format!(
                     "Did not compile (saved as they are; Compile in the script's editor says why): {}",
@@ -5455,6 +6676,8 @@ impl Moonglow {
     /// What was shown from the game data is shown anew: its layers changed.
     fn game_data_changed(&mut self) {
         self.release_game_data();
+        // (Quick Open's part of the load order is read again from it.)
+        self.quick_open.index.forget_game();
         if let Some(game) = exclusive(&mut self.game) {
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
@@ -5685,6 +6908,9 @@ impl Moonglow {
         if self.look_at_palettes() {
             ui.ctx().request_repaint();
         }
+        // (The tilesets open in their editor, changed outside: with or
+        // without game data, as their watch heard it.)
+        self.reload_changed_tilesets(ui.ctx());
         // (Not under a job, which reads the game data and the module.)
         if self.busy() {
             return;
@@ -5850,6 +7076,7 @@ impl Moonglow {
             o.step = step;
             o.record = Some(record);
         }
+        self.log.fixes_revision += 1;
         true
     }
 
@@ -5875,6 +7102,7 @@ impl Moonglow {
     /// offered again (their guard as before them), or made again.
     pub(crate) fn fixes_follow(&mut self, step: Option<u64>, redo: bool) {
         let Some(step) = step else { return };
+        self.log.fixes_revision += 1;
         let at: Vec<usize> = (self.log.fixes.iter().enumerate())
             .filter(|(_, o)| o.step == Some(step))
             .map(|(i, _)| i)
@@ -6032,8 +7260,29 @@ impl Moonglow {
                 }
                 // (The last Verify's fixes alone are offered.)
                 app.log.fixes.clear();
+                app.log.fixes_revision += 1;
                 app.log.fix_guard = guard;
+                // (Its errors and warnings to Problems too, each with its
+                // place and the log's line of its fix: the owner's Q5.)
+                let mut places = verify_places(&missing, &found).into_iter();
+                let mut problems = Vec::new();
                 for (level, text, fix) in verify_report_fixes(&missing, &found) {
+                    let severity = match level {
+                        LogLevel::Error => Some(mg_module::doctor::Severity::Error),
+                        LogLevel::Warn => Some(mg_module::doctor::Severity::Warning),
+                        LogLevel::Info => None,
+                    };
+                    if let Some(severity) = severity {
+                        let key = places.next();
+                        let at = key.map(|k| k.to_string()).unwrap_or_default();
+                        let go = key.map(problems::Go::Resource);
+                        // (Problems' font has no right arrow, the log's has:
+                        // M4's U28 review saw a box in its place.)
+                        let said = text.replace(" \u{2192} ", " › ");
+                        let mut p = problems::Problem::new(severity, at, said, go);
+                        p.fix = fix.is_some().then_some(app.log.entries.len());
+                        problems.push(p);
+                    }
                     if let Some(fix) = fix {
                         let line = app.log.entries.len();
                         let check = (found.iter())
@@ -6057,6 +7306,11 @@ impl Moonglow {
                         LogLevel::Info => app.log.info(text),
                     }
                 }
+                let found_any = !problems.is_empty();
+                let checked = app.ws.as_ref().map(|ws| ws.revision());
+                app.problems.replace(problems::Source::Verify, problems, checked);
+                app.problems.ask_forward(found_any);
+                app.problems.take_keys = found_any;
                 let findings: Vec<&mg_module::doctor::Finding> =
                     found.iter().map(|f| &f.finding).collect();
                 let errors = missing.iter().filter(|m| m.is_error()).count()
@@ -6167,6 +7421,7 @@ impl Moonglow {
     /// folder has the game's data read again, and then the module is opened
     /// again from its file (the caller has asked about unsaved work).
     fn apply_options(&mut self, draft: OptionsDraft) {
+        self.options_applied += 1;
         let reload = self.options_reload(&draft);
         let settings = draft.apply(&self.settings);
         let language = settings.edit_language != self.settings.edit_language;
@@ -6253,6 +7508,9 @@ impl Moonglow {
     /// of a module just closed, read on). Not a job: the window waits for
     /// none while one runs (its game data is changed once it is done).
     pub(crate) fn release_game_data(&mut self) {
+        // (Quick Open's build of the load order lets go at once, rather
+        // than be waited for: begun again when Quick Open next opens.)
+        self.quick_open.index.give_up_build();
         let Some(game) = &self.game else { return };
         if Arc::strong_count(game) == 1 {
             return;
@@ -6368,6 +7626,24 @@ pub fn verify_report(
     verify_report_fixes(missing, &found).into_iter().map(|(l, t, _)| (l, t)).collect()
 }
 
+/// The resource each error and warning of [`verify_report_fixes`] is
+/// about, in its order (Problems' places): a missing reference's, where it
+/// is made; a finding's resource.
+fn verify_places(
+    missing: &[mg_module::verify::Missing],
+    found: &[mg_edit::fix::Found],
+) -> Vec<ResKey> {
+    use mg_module::doctor::Severity;
+    let missing: Vec<_> = missing.iter().filter(|m| !m.placed_from_gone_blueprint()).collect();
+    let of = |s: Severity| found.iter().filter(move |x| x.finding.severity == s);
+    let mut out: Vec<ResKey> =
+        missing.iter().filter(|m| m.is_error()).map(|m| m.reference.from).collect();
+    out.extend(of(Severity::Error).map(|x| x.finding.resource));
+    out.extend(missing.iter().filter(|m| !m.is_error()).map(|m| m.reference.from));
+    out.extend(of(Severity::Warning).map(|x| x.finding.resource));
+    out
+}
+
 /// [`verify_report`], each finding's line with the fix it offers.
 pub fn verify_report_fixes(
     missing: &[mg_module::verify::Missing],
@@ -6467,7 +7743,7 @@ fn load_game(install: Option<&GameInstall>, log: &mut Log) -> Option<Arc<GameDat
             }
         },
         None => {
-            log.warn("No Neverwinter Nights installation found; choose it in Tools > Options.");
+            log.warn("No Neverwinter Nights installation found; choose it in Tools › Options.");
             None
         }
     }
@@ -6495,6 +7771,66 @@ fn drawn_with_changed(was: &mg_resman::MemContainer, module: &Module) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where an editor opens with no place kept for its kind, in each mode
+    /// (Options › General › Open editors), and the place of its kind kept
+    /// when one is moved: a window of its own kept in As Tabs (where it is
+    /// not where one opens anyway), not in As Floating Windows; a group of
+    /// the editor area kept in both, in As Tabs only for a tab moved by
+    /// hand; a kept place opens there in both modes; Tile Properties and
+    /// the model views open in windows in both.
+    #[test]
+    fn the_window_place_is_kept_where_editors_open_as_tabs() {
+        use settings::OpenEditors::{Floating, Tabs};
+        let ctx = egui::Context::default();
+        let model = Tab::Model(ResKey::parse("c_dragon", ResType::MDL).unwrap());
+        for mode in [Tabs, Floating] {
+            let mut app = Moonglow::new(None, Box::new(NoDialogs::default()));
+            app.settings.open_editors = mode;
+            let default = (mode == Floating).then_some(Place::Window);
+            assert_eq!(app.place_for(&Tab::Factions), default, "{mode:?}");
+            assert_eq!(app.place_for(&model), Some(Place::Window), "{mode:?} {model:?}");
+            // Opened in the main window, then moved to a window of its own
+            // (as Eject does).
+            app.dock.push_to_first_leaf(Tab::Factions);
+            app.remember_window_places(&ctx);
+            assert!(app.settings.window_places.is_empty());
+            let at = app.dock.find_tab(&Tab::Factions).unwrap();
+            app.dock.remove_tab(at);
+            app.dock.add_window(vec![Tab::Factions]);
+            app.remember_window_places(&ctx);
+            let window = vec![("factions".to_string(), "window".to_string())];
+            match mode {
+                Tabs => assert_eq!(app.settings.window_places, window),
+                Floating => assert!(app.settings.window_places.is_empty()),
+            }
+            assert_eq!(app.place_for(&Tab::Factions), Some(Place::Window), "{mode:?}");
+            // Back into the main window: kept in both, in As Tabs only when
+            // moved by hand.
+            let at = app.dock.find_tab(&Tab::Factions).unwrap();
+            app.dock.remove_tab(at);
+            app.dock.push_to_first_leaf(Tab::Factions);
+            app.remember_window_places(&ctx);
+            let middle = vec![("factions".to_string(), "middle".to_string())];
+            match mode {
+                Tabs => assert_eq!(app.settings.window_places, window, "not moved by hand"),
+                Floating => assert_eq!(app.settings.window_places, middle),
+            }
+            let at = app.dock.find_tab(&Tab::Factions).unwrap();
+            app.dock.remove_tab(at);
+            app.dock.add_window(vec![Tab::Factions]);
+            app.remember_window_places(&ctx);
+            let at = app.dock.find_tab(&Tab::Factions).unwrap();
+            app.dock.remove_tab(at);
+            app.dock.push_to_first_leaf(Tab::Factions);
+            app.moved_by_hand(&Tab::Factions);
+            app.remember_window_places(&ctx);
+            assert_eq!(app.settings.window_places, middle, "{mode:?}");
+            assert_eq!(app.place_for(&Tab::Factions), Some(Place::Middle));
+            // The hand's move noted once: forgotten with the button up.
+            assert!(app.moved_by_hand.is_empty());
+        }
+    }
 
     /// The module's layer is made again after every build and before
     /// every job: the renderer's textures are forgotten with it only

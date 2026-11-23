@@ -94,6 +94,28 @@ impl TypedState {
         self.redo.clear();
     }
 
+    /// The last `n` steps of the module's history, its depth `top` before,
+    /// made one (`Workspace::join_last`, Edit Areas Together's Cancel All):
+    /// their typed lines go with the one step, so its Undo and Redo take
+    /// and put back them all, and what Redo puts back lands that much
+    /// lower. (No page of Edit Areas Together has a localized field today,
+    /// but one added carries its lines rightly.)
+    pub(crate) fn joined(&mut self, n: usize, top: usize) {
+        let fewer = n.saturating_sub(1);
+        let from = (top + 1).saturating_sub(n);
+        let mut lines = Vec::new();
+        while self.undo.last().is_some_and(|(d, _)| *d >= from) {
+            let (_, t) = self.undo.pop().expect("checked");
+            lines.splice(0..0, t);
+        }
+        if !lines.is_empty() {
+            self.undo.push((from, lines));
+        }
+        for (d, _) in &mut self.redo {
+            *d = d.saturating_sub(fewer);
+        }
+    }
+
     /// The rows Redo would put lines back on: not given to another text.
     fn held(&self) -> BTreeSet<usize> {
         self.redo.iter().flat_map(|(_, t)| t.iter().map(|t| t.row)).collect()
@@ -590,54 +612,52 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     show_when_free(app);
     let Some(ask) = app.typed.ask.clone() else { return };
     let mut answer = None;
-    let mut always = false;
     let title = "Text in the Talk Table";
+    let always_id = egui::Id::new("talk-typed-always");
+    let (on, tip) = crate::widgets::always_now(
+        ctx,
+        always_id,
+        "Tools › Options › Language › When the talk table has the text",
+    );
     // (Escape is this question's, as a dialog's is: the Properties window
     // under it doesn't take it for its Cancel.)
     let escape = crate::widgets::escape_closes(ctx, title);
-    let modal = egui::Modal::new(egui::Id::new("talk-typed-ask")).show(ctx, |ui| {
-        ui.set_max_width(420.0);
-        ui.heading(title);
-        ui.add_space(4.0);
-        ui.label(format!(
-            "The talk table has this text already, at line {} (StrRef {}):",
-            ask.row,
-            strref(ask.row)
-        ));
-        ui.add(egui::Label::new(egui::RichText::new(short(&ask.text)).strong()).wrap());
-        ui.add_space(4.0);
-        ui.weak(
+    let modal =
+        crate::widgets::modal_window(ctx, egui::Id::new("talk-typed-ask")).show(ctx, |ui| {
+            crate::widgets::modal_titled_foot(ui, title, |ui| {
+                ui.set_max_width(ui.available_width().min(420.0));
+                ui.label(format!(
+                    "The talk table has this text already, at line {} (StrRef {}):",
+                    ask.row,
+                    strref(ask.row)
+                ));
+                ui.add(egui::Label::new(egui::RichText::new(short(&ask.text)).strong()).wrap());
+                ui.add_space(4.0);
+                ui.weak(
             "The field can name that line, or have a line of its own: a line named by several \
              fields changes for each of them when it is changed in the talk table editor.",
         );
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui
-                .button(format!("Use Line {}", ask.row))
-                .on_hover_text("The field names the line the table has")
-                .clicked()
-                || crate::widgets::enter(ui)
-            {
-                answer = Some(Answer::Use(ask.row));
-            }
-            if ui.button("Add a Line").on_hover_text("A new line with the same text").clicked() {
-                answer = Some(Answer::Add);
-            }
-            if ui
-                .button("Keep in the File")
-                .on_hover_text("The text is the field's own, as Aurora writes it")
-                .clicked()
-            {
-                answer = Some(Answer::File);
-            }
+                let foot = crate::widgets::Foot::new()
+                    .check("Always do this", on, Some(tip))
+                    .main(format!("Use Line {}", ask.row), true)
+                    .tip("The field names the line the table has")
+                    .button("Add a Line", true)
+                    .tip("A new line with the same text")
+                    .leave("Keep in the File")
+                    .tip("The text is the field's own, as Aurora writes it");
+                ((), foot)
+            })
+            .1
         });
-        always = crate::widgets::always_box(
-            ui,
-            egui::Id::new("talk-typed-always"),
-            "Always do this",
-            "Tools › Options › Language › When the talk table has the text",
-        );
-    });
+    let (stop, pressed) = (modal.should_close(), modal.inner);
+    let always = crate::widgets::always_kept(ctx, always_id, pressed.checked);
+    if pressed.main() {
+        answer = Some(Answer::Use(ask.row));
+    } else if pressed.clicked("Add a Line") {
+        answer = Some(Answer::Add);
+    } else if pressed.cancelled() {
+        answer = Some(Answer::File);
+    }
     // (Always so: Options › Language's choice, from now on.)
     if always && let Some(a) = answer {
         app.settings.talk_reuse = match a {
@@ -646,7 +666,7 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
             Answer::File => TalkReuse::File,
         };
     }
-    if escape || modal.should_close() {
+    if escape || stop {
         answer = answer.or(Some(Answer::File));
     }
     if let Some(answer) = answer {
@@ -769,5 +789,31 @@ mod tests {
         app.talk = Some(other);
         assert_eq!(room(&app), Some(look(&app)));
         assert!(room(&app).unwrap().0.is_err(), "the range is full");
+    }
+
+    /// Edit Areas Together's Cancel All made its steps one (ruling 66):
+    /// their typed lines go with the one step, and the lines of steps
+    /// undone above them are redone that much lower.
+    #[test]
+    fn steps_made_one_keep_their_typed_lines_and_redo_lands_lower() {
+        let dir = mg_testkit::scratch_dir("ui-typed-joined");
+        let mut t = Table::create("mg_joined", &dir, Language::ENGLISH, false);
+        let mut typed = |row: usize| {
+            let text = format!("line {row}");
+            let line = Line { text, feminine: None, sound: String::new(), sound_length: 0.0 };
+            vec![t.put_typed(row, &line).unwrap()]
+        };
+        let mut s = TypedState {
+            undo: vec![(1, typed(1)), (3, typed(3)), (4, typed(4))],
+            redo: vec![(6, typed(6)), (5, typed(5))],
+            ..Default::default()
+        };
+        // (Steps 2 to 4, the history 4 deep, made one: at depth 2.)
+        s.joined(3, 4);
+        let rows = |v: &[(usize, Vec<Typed>)]| -> Vec<(usize, Vec<usize>)> {
+            v.iter().map(|(d, t)| (*d, t.iter().map(|t| t.row).collect())).collect()
+        };
+        assert_eq!(rows(&s.undo), [(1, vec![1]), (2, vec![3, 4])], "the lines with the one step");
+        assert_eq!(rows(&s.redo), [(4, vec![6]), (3, vec![5])], "redone two lower");
     }
 }

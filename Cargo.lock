@@ -1316,8 +1316,6 @@ dependencies = [
 [[package]]
 name = "egui_dock"
 version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d9f668eb59ff0ab130c8bce71a513135e1d3017fb3103fb8758e9eea99d759f"
 dependencies = [
  "duplicate",
  "egui",
@@ -2646,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "mg"
-version = "4.2.0-layonara.2"
+version = "5.0.0-layonara.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2706,6 +2704,7 @@ dependencies = [
  "mg-resman",
  "mg-rules",
  "mg-set",
+ "mg-testkit",
  "mg-tiles",
  "mg-tlk",
  "thiserror 2.0.21",
@@ -2972,6 +2971,7 @@ dependencies = [
  "png",
  "pollster 0.4.0",
  "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -2999,6 +2999,7 @@ dependencies = [
  "mg-mdl",
  "mg-resman",
  "mg-schema",
+ "mg-set",
  "mg-tlk",
  "thiserror 2.0.21",
 ]
@@ -3061,6 +3062,7 @@ version = "0.0.0"
 dependencies = [
  "mg-resman",
  "mg-serve",
+ "mg-testkit-gpu",
  "mg-update",
  "minisign",
  "naga",
@@ -3068,10 +3070,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mg-testkit-gpu"
+version = "0.0.0"
+
+[[package]]
 name = "mg-tiles"
 version = "0.0.0"
 dependencies = [
  "fastrand",
+ "glam",
  "mg-core",
  "mg-set",
  "thiserror 2.0.21",
@@ -3100,6 +3107,7 @@ dependencies = [
  "image",
  "jiff",
  "log",
+ "memchr",
  "mg-2da",
  "mg-area",
  "mg-audio",
@@ -3144,6 +3152,7 @@ name = "mg-uikit"
 version = "0.0.0"
 dependencies = [
  "egui",
+ "egui_dock",
  "egui_kittest",
  "mg-testkit",
  "serde",
@@ -3245,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "moonglow"
-version = "4.2.0-layonara.2"
+version = "5.0.0-layonara.1"
 dependencies = [
  "eframe",
  "egui",

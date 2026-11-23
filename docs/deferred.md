@@ -3,7 +3,7 @@ type: Backlog
 title: 'Deferred: what was left out, for a decision later'
 description: What finished work left undone or unchecked, filed by area of the program (an entry's last words say which report, issue or review it came from), each awaiting a verdict - fix, add or drop; what is settled by decision or design is gathered at the end.
 tags: [backlog, deferred, after-parity]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-12T14:34:27Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-22T10:57:17Z }
 ---
 
 # Deferred: what was left out, for a decision later
@@ -182,7 +182,14 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   (676 tiles, 16,000 meshes) with the wheel zooming over all of it: 7.5
   to 9.6 ms a frame since 2 November (9.1 to 10.8 before;
   `frame_perf`'s `sound_ranges_frames_at_144`, named in its
-  `KNOWN_OVER`), its draws encoded in 6.1 ms (7.4); TDoD's synthetic
+  `KNOWN_OVER`; since 21 November, when M5's V3 opened the area with
+  its camera over its ground, about 34 m up, also the wheel of the nine
+  views after "close", which zooms out over all of it from where that
+  view left the camera: 8.6 to 10.3 ms, and its "all selected,
+  walkmesh" view, the whole area drawn from 120 m while turning: 11.4
+  to 13.0 ms, of which the overlays are about 2, both named there too),
+  its draws
+  encoded in 6.1 ms (7.4); TDoD's synthetic
   woods (33,000 meshes in sight, 25,000 draws of meshes mostly drawn
   once each) 14 to 31 ms, as before. Done that day: the lights' sets
   numbered as a mesh's lights are chosen and a mesh's choice found by
@@ -257,7 +264,8 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   - the area editor: every object selected and dragged, and so with
     Adjust Location or the context menu open (A16); Paint at radius 25
     m and density 50, the pointer still (A17); Update Instances with
-    30,000 listed, Edit Areas Together with 3,000 areas (A18's rest);
+    30,000 listed (A18's rest: Edit Areas Together with 3,000 areas has
+    its view since M4's U29, `frame_perf::edit_areas_together_3000`);
     2,000 placeables with the Position menu open (A20); a light placed
     with 30,000 more rows in placeables.2da (A21); a 2,000-tile set's
     Tiles page, its last tile chosen (A22); a hill tileset's 32 by 32
@@ -359,12 +367,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   that capture alone. Whether Moonglow's Properties window should sort
   them so too is not checked; the choice is to confirm. (S) (the review
   of November 2026, G8)
-- **A preview shown twice in a frame, the owner's call:** a 3D view
-  shown in two places in one frame (the Preview window over the
-  model's tab) is drawn in the first, and the second says "The preview
-  is shown elsewhere in the window." (the review's B19), rather than
-  getting targets of its own. The wording, and whether the second
-  should draw too, are asked. (S) (the review of November 2026, B19)
 
 ## Bulk editing
 
@@ -499,7 +501,7 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   `engine_custom_light.rs`), and the client answered the proposal's two
   questions (2026-10-29, the third client batch): a `LightColor` light
   and a model's light node light creatures and placeables as they light
-  tiles, so the window's "Lights creatures and placeables too" starts
+  tiles, so the Custom Light section's "Lights creatures and placeables too" starts
   ticked; a draw takes as many lights as the client's Max Lights (32 by
   default). Not built: a flicker (the node's color or multiplier keyed in
   the model's `default` animation). Read for it (2026-10-30, the fourth
@@ -510,7 +512,7 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   the area view holds a static placeable still since, and plays a
   dynamic one's light node keys and its meshes' self-illumination keys
   since 2026-10-30 (`point_lights_at`, `idle_keys_meshes`; the fifth
-  client batch). Left: the window's flicker itself (Custom Light…
+  client batch). Left: the flicker itself in the Custom Light section (Custom Light…
   writing the keyed `default` and a dynamic placeable). (S) (from
   builders' reports after 1.16.2)
 - **A drag when a key changes the mode, the owner's call:** a drag under
@@ -549,15 +551,22 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   built on it; left filed by the owner's word, 2026-11-10. (the part
   textures, 2026-11-10)
 
-- **A mesh whose texture is nowhere is drawn black, the client draws it
-  light gray:** seen beside the part textures' reading
-  (`part_textures_look`, rows l and z: a head's mesh naming its own
-  missing texture), with the Shaders switch off and on alike, though the
-  renderer binds white for a missing texture. Deferred as beyond what was
-  asked (it is every model's missing textures, not a part's, and wants a
-  reading of its own: whether the client lights it as white, or as the
-  material's diffuse). S to M. (a builder's report on 4.0, the part
-  textures, 2026-11-10)
+- **A mesh whose texture is nowhere is drawn darker than the client
+  draws it, black on top where the client's is gray:** seen beside the
+  part textures' reading (`part_textures_look`, rows l and z: a head's
+  mesh naming its own missing texture), with the Shaders switch off and
+  on alike. Read since (2026-11-13, GitHub issue 45, group `Z9@^~`): the
+  client draws such a mesh, a helmet's and a part's alike, close to a
+  white TGA of alpha 0 (row @), its object's environment map reflected
+  over all of it; Moonglow draws it so too, and draws row @ as dark as
+  its own row Z. What differs is how `chrome1` is reflected by a surface
+  that reflects wholly (the tops black in Moonglow, gray in the client),
+  which is every fully reflective texture's, not a missing one's.
+  Deferred as beyond what was asked (it would change the reflections of
+  every such texture in every view, and wants a reading of its own:
+  `chrome1` on a fully reflective box seen from several sides and
+  above, under the area's sun and without). M. (a builder's report on
+  4.0, the part textures, 2026-11-10; GitHub issue 45, 2026-11-13)
 - **A creature holding a torch** stands in the client with its arm
   raised, the torch held up, and the torch lights the area around it;
   Moonglow draws the arm as in any other stance and no light (its flame
@@ -892,40 +901,46 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   load order without `ashlw_033`. Waits on his hak list or a blueprint.
   (His armor showing only a head and pelvis was Beamdog's HD bodies,
   drawn whole since 1.34.1.) (S–M)
+- **Zoom in the picture viewer, the owner's call:** the hak editor's
+  Preview and a read-only tab show a picture with one viewer
+  (`viewers::Picture`, M5's W6). It is fitted to its room and never
+  enlarged, with no zoom, so a 2048 by 2048 texture is never seen at
+  1:1. W6's brief asked for zoom "by the viewer's own controls", but
+  the hak viewer has none. Adding zoom (the wheel, a 1:1 toggle,
+  panning) would go beyond the viewer the owner's ruling 49 said to
+  share. Asked: whether it gets zoom, and with which controls. (S–M)
+  (the review of M5, reviewer C, W6)
 
 ## The main window and its panes
 
-- **The light theme's own colors:** it is egui's light theme; the script
+- **The light theme's own colors:** it is the redesign's Light theme
+  (`mg-uikit`'s tokens, since its M2; this entry said egui's); the script
   editor's syntax colors and the conversation editor's line colors
-  follow it, the Factions' sliders keep Aurora's red and blue (legible
-  on both: `conversation_and_factions_in_both_themes`), and the area
+  follow it, the Faction Editor's sliders keep Aurora's red and blue
+  (legible on both: `conversation_and_factions_in_both_themes`, which
+  shows Basic's chart), and so do its matrix cells' frames and the
+  Reactions panel's bars (legible on both: `screens.rs`'s
+  `board_factions` in the light theme, Advanced with Reactions beside
+  it, shows the red and blue cells and a friendly bar), and the area
   view's overlays are drawn over the 3D view, whatever the theme. What
   else a builder who uses it finds wanting waits on such a pass. (S) (a
   senior builder's review, October 2026)
-- **Panes folded away** (GitHub issue 10, open: waits on its reporter's
-  retest of the one-button rule, built on 1.31.0): a View menu (Module
-  Tree, Palettes Panel, Log, ticked while shown; Hide All Panels; Reset
-  Layout), with keys (Ctrl+Alt+1, 2, 3 and 0, in Options › Keyboard); a
-  pane folded away leaves a strip at its edge that brings it back, as
-  wide as it was; the palettes' pane closed by its ✕ counts as folded;
-  the state is kept in the settings. Each pane has one button of its
-  own to fold it away, by the reporter's rule: a chevron on the edge it
-  faces the middle by (the tree's right, the palettes' left, or right
-  where they were split off the middle's left, the log's top), centered
-  along it, in a thin strip that is all a folded pane leaves, the button
-  in the same place. egui_dock's arrow on the palettes' tab bar is
-  covered over and its clicks taken (egui_dock has it on every pane or
-  none, and windows fold to their bar by it), and the keyboard passes
-  it (Tab and Shift+Tab, `the_palettes_covered_arrow_is_passed_by_the_keyboard`).
-  Left for the reporter's word, as their rule shapes each (S each): the
-  strip names its pane only in the tip (a name along a 16-point strip
-  would be drawn turned); the palettes' bar keeps the arrow's blank room
-  before its first tab, and the middle's panes keep their arrows
-  (egui_dock offers no per-pane choice: a patched egui_dock, or the
-  middle's arrows covered the same way); palettes joined to the middle's
-  tabs, split above or below it or in a window have no edge button (View
-  and their ✕ fold them), and those split above or below leave their
-  strip on the right. (from builders' reports after 1.19.1)
+- **The docks' fold controls and a window dropped on the middle, by
+  hand** (GitHub issues 10 and 21, open: wait on a hand in the running
+  program). Issue 10's one-button rule is built as the shell's (M3, the
+  proposal's U3): each dock has one control of its own to fold it away,
+  the Left and Right Docks a button at the end of their tab bar (folded,
+  the chevron at the top of their strip, which brings the dock back as
+  wide as it was), the Bottom Dock its Log switch in the Status Bar;
+  View › Left Dock, Right Dock, Log, Hide All Panels and Reset Layout,
+  with their keys; the state kept in the settings. It waits on its
+  reporter's retest on the release that carries M3. Issue 21: a tool
+  window dragged from a window of its own onto a side target of the
+  middle was seen to move and not to dock, by the tests' drag, which
+  can't make a window of its own; it waits on a drag by hand, the
+  owner's (a tool's tab dropped on a side of the middle is docked there,
+  `a_tool_tab_dropped_on_a_side_is_docked_there`). (S) (GitHub issues 10
+  to 24, after 1.19.1 and 1.20.0; 21 after 1.30.2)
 - **The menus by the keyboard** (GitHub issue 9), on egui's own menus:
   Alt alone or F10 opens the first menu and closes them (over an area's
   view F10 is Select Tiles', as in Aurora), Left and Right
@@ -941,22 +956,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   events). Waits: Alt alone on Windows, where the system may take Alt
   for its own menu (a Windows build). (S) (from builders' reports
   after 1.19.1)
-- **The middle with a tab beside the palettes** (issue 11): the middle
-  was let go where another tab (the resource browser) shared the
-  palettes' pane; the pane's tabs no longer count as the middle's. The
-  palettes dropped among the middle's areas are the middle's (issue 20:
-  they were taken for the side pane, and the areas pushed to the
-  right), and the resource browser's pane alone is a side pane once the
-  palettes are closed (issue 23: it took the whole window). Another
-  tool docked alone on the right (the talk table, a script) is not
-  known as a side pane. Issue 21's drop on a side target is docked
-  there from a pane; from a window of its own, the window was seen to
-  move and not to dock, by the tests' drag (not confirmed either way in
-  the window). (S) (GitHub issues 10 to 24, after 1.20.0; 20, 21 and
-  23 after 1.30.2) (the window's drop waits on a drag by hand in the
-  running program, the owner's or issue 21's reporter's: the UI tests
-  can't make a window of its own, and issue 21 has no answer since
-  2026-10-10)
 - **The module tree and the palettes by the keyboard** (GitHub issue
   12, after 1.20.0, and a builder: Aurora's arrows go to the parent on
   Left and fold the tree): after a click in a list (the module tree, a
@@ -1212,6 +1211,22 @@ contribution itself states as not done or not checked.
   `[TILE1869573190]` (one section, no hang). What to do with a file
   whose count lies is asked. (S) (what the fixers of the review of
   November 2026 saw on the way)
+- **A tileset kept in the module, changed, not redrawn in open areas:**
+  the areas and the Tiles palette draw a tileset from the game data
+  (`GameData`, the install, haks, override and development folders),
+  which a tileset changed outside in one of those is read again into
+  (M5's W5) with every area view reloaded; a `.set` kept inside the
+  module (or put into it) changes only the game data's module layer,
+  in place (`update_module_layer`, which forgets the tables for a 2DA,
+  the Appearance marks for a model and the drawn textures, not the
+  tilesets read nor the areas drawn from them), so an open area keeps
+  drawing the tileset as it was until it is opened again. Redrawing
+  them means dropping the game data's tileset and every area and
+  palette made from it on a module change too, which reloads every
+  open area for any `.set` change of the module's: a change to how the
+  module layer and the views meet, beyond what the answer asked (the
+  editor's own file, at any path, is read again).
+  (M) (the review of M5's W5)
 
 ## The install, starting and crashes
 
@@ -1325,16 +1340,31 @@ contribution itself states as not done or not checked.
     to it: `pick_adapter` repeats wgpu 30's order of adapter kinds and
     the app checks the surface. A later wgpu that orders otherwise is
     not followed by itself: look at it at the next wgpu bump. (S)
-  - **OpenGL draws wrong.** Not offered in Options (the owner's
-    decision), but wgpu still falls back to it where neither Vulkan,
-    Direct3D 12 nor Metal draws, and `WGPU_BACKEND=gl` takes it:
-    `WGPU_BACKEND=gl cargo test -p mg-render --test render` fails 20
-    of its 44 tests on the development machine (no visible particles,
-    the game's programs, the framebuffer's copies, animations...): the
-    renderer was never made for wgpu's GL backend. (M)
+  - **OpenGL is not offered, and is tried on one machine.** The
+    renderer draws on wgpu's OpenGL back end (`WGPU_BACKEND=gl`): its
+    93 picture tests pass on Mesa radeonsi, and the three causes of the
+    failures are guarded without OpenGL. What stays open: NVIDIA and
+    Intel drivers, Windows and GLES are untried (waiting on machines to
+    try them on); whether Options offers OpenGL among the backends in
+    the adapter pick, and the wording of the fallback message where it
+    is taken (the owner's decision); and anti-aliasing on OpenGL, which
+    draws one sample a pixel until wgpu-hal makes multisampled textures
+    there (waiting on wgpu). (S each)
   - `mg` and the other headless renderers take Automatic (or
     `WGPU_BACKEND`), not the GUI's setting; Moonglow Viewer, which builds
     on mg-render, doesn't use `pick_adapter` yet. (S each)
+- **The texture and picture readers end detached, holding the GPU:**
+  the threads "moonglow textures" (`mg_render::renderer`) and "moonglow
+  pictures" (`model_view`) hold `Gpu` clones and end by themselves, so
+  one still working as the process exits can race its end, as the
+  shader worker and the lit check did (a crash at exit, debug builds
+  with Vulkan's validation layer only, which release builds do not
+  load; none with the layers off). Those two are joined at drop since
+  M5's S1; these are not: they are replaced mid-session (the texture
+  reader whenever the game data changes), where a join would hold the
+  window. Not seen to crash (picture readers 0 in 10 lone runs).
+  Deferred for the unintended consequence, by the owner's ruling of
+  2026-11-22. (S, the owner's ruling; M5 S1's review)
 
 ## Documentation
 
@@ -1419,7 +1449,7 @@ File › Project. What is left:
 - **Windows signing:** the installer isn't code-signed, so SmartScreen
   warns. (S, needs a certificate)
 
-## NWSync content read (Layonara's fork)
+## NWSync content read
 
 - **Test Module's user folder on Windows without links:** Test Module
   gives the game a user folder of Moonglow's that links the player's
@@ -1429,7 +1459,7 @@ File › Project. What is left:
   content. (S, needs a Windows machine and a Mac)
 - **Haks written from NWSync, end to end:** written and read back from
   made-up storage and manifests in the tests; a whole persistent world's
-  (Layonara's 16.6 GB) waits on a machine that has downloaded it all
+  (one of 16.6 GB) waits on a machine that has downloaded it all
   (`mg nwsync-haks MODULE --out DIR` says what it wrote and how long it
   took). (S, waits on a machine with the content)
 - **`mg serve` and `development/`:** the server's own folder gets the
@@ -1473,13 +1503,17 @@ log.
   system: his word that it places would settle it. (a builder's report,
   October 2026)
 - **Creature Properties' overlapping elements:** reported, not
-  reproduced: every page is checked for widgets drawn over each other at
-  four window sizes (`blueprint_editor_pages_draw_nothing_over_anything_else`)
-  and none are. A screenshot, or the page and the interface size, would
-  find it. (S) (a senior builder's review, October 2026)
+  reproduced: every page of every kind is walked whole, top to bottom on
+  the window's one scroll, at four window sizes at 100% interface size
+  (`blueprint_editor_pages_draw_nothing_over_anything_else`, since M4's
+  U9) and none draws over another. A screenshot, or the page and the
+  interface size, would find it. (S) (a senior builder's review, October
+  2026)
 - **A drag on a number field moving objects in the area behind:**
   reported, not reproduced
-  (`a_drag_in_a_window_over_the_area_moves_nothing_there`). (needs the
+  (`a_drag_in_a_window_over_the_area_moves_nothing_there`; with the
+  Properties panel beside the area since M4's U6,
+  `a_drag_on_a_number_field_in_the_panel_moves_nothing_in_the_area`). (needs the
   steps) (a second builder's review, October 2026)
 - **"It kept randomly exiting"** on a persistent world's module (ten
   times before it stayed open), reported without a log. One cause was
@@ -1714,9 +1748,6 @@ is not taken for a new gap.
   keep the plain strong style; only section headings were made larger.
 - **Scripts and conversations by name:** they have no names; the tree
   lists them by ResRef.
-- **A window's bar:** egui_dock gives a folded window the height of its
-  tab bar, frame included, so the dock's windows are drawn without a
-  frame margin and their tabs' contents are given one instead.
 - **Copy… of a script** takes its compiled script along; its debug
   information (`.ndb`) is made when the copy is next compiled.
 - **Deleting a prefab** isn't Edit › Undo's: the palette's Undo Delete
@@ -1973,8 +2004,10 @@ is not taken for a new gap.
   found (or not readable) falls back on the tileset's flags, which say
   every light and loop; a tile model's `animloop` animations from a
   supermodel are not looked for (the game's tile models have none).
-  Aurora's ✕ discards without asking (seen on the oracle); Moonglow asks,
-  as the builder asked. (S) (from Jasperre's tile feedback, October 2026) (Settled in the triage of 2026-10-28.)
+  (Its discard question is gone since Tile Properties became the Right
+  Dock's panel, M4's U5: there is no OK, Cancel or close to ask about.)
+  (S) (from Jasperre's tile feedback, October 2026) (Settled in the
+  triage of 2026-10-28; restated by M4's U5 review, 2026-11-15.)
 - **Uniforms a script sets:** a custom shader's uniform that a module's
   scripts set in the game (`SetMaterialShaderUniformInt`,
   `SetMaterialShaderUniformVec4` on an object that isn't static) shows
@@ -2028,13 +2061,6 @@ is not taken for a new gap.
 - **A picture of a model that emits** is drawn four seconds in, framed
   with its particles (a flame is small under its smoke). (S)
   (from builders' reports after 1.10.1) (Settled in the triage of 2026-10-28.)
-- **The palette's header, not as drawn in the issue:** "More" is a
-  word, and the clear button "×" and the Gallery's "⊞" are the glyphs
-  egui's fonts have (the mock-up's were boxes); the icons are the
-  toolbar's glyphs, not a drawn set; the tile palette and the prefabs
-  keep their own bodies under the same two top rows. Seen in one
-  rendered picture, with the dropdown (not with the row of icons). (S)
-  (GitHub issue 16) (Settled in the triage of 2026-10-28.)
 - **Inventory lists:** a store page or inventory lays out the rows in
   sight and builds their icons only (the persistent world's store, 449
   items on its first page: 30 ms to show where it took 0.4 s, 0.5 ms a
@@ -2120,10 +2146,6 @@ is not taken for a new gap.
   tabs by the keyboard): closing tabs together asks nothing of its own;
   only a hak's and a tileset's editors have work of their own to lose,
   and each asks for itself as it closes. (S) (Settled in the triage of 2026-10-28.)
-- **`mg test`'s results outside a test:** a result reported while no
-  test is running (a delayed assertion after its test ended, a
-  module's own driver) goes under "(outside a test)", since NWScript
-  does not say which script is running. (S) (Settled in the triage of 2026-10-28.)
 - **`mg serve --restart-on-change`** looks at a file's size and time
   twice a second, and at a folder six levels deep (no file-system
   notifications). (S) (Settled in the triage of 2026-10-28.)
@@ -2143,8 +2165,8 @@ is not taken for a new gap.
   `mg replace` changes text in names; a name in one language would
   need a language to be given), nor list fields one by one (an ARE's
   tiles and `Expansion_List`: a tile's own lights aren't set;
-  variables are `--var`'s, in the GIT where the game reads them). Give
-  Every Area This Page's Visual Settings gives an area of another
+  variables are `--var`'s, in the GIT where the game reads them). Copy
+  This Page to Every Area (Visual's) gives an area of another
   scheme the first's tiles' lights picked anew; an area of the same
   scheme keeps its own, and the first area's own picks aren't copied
   tile by tile (the areas' tiles differ). (S) (Settled in the triage of 2026-10-28.)
@@ -2240,10 +2262,12 @@ is not taken for a new gap.
   set-up, not the walk, as the renders hold the GPU and the others read
   each area differently; no walk of the five together. (Settled by the
   owner, 2026-10-29.)
-- **The Command Palette's Undo in a script** is the module's (its field
-  has the keys), where Edit › Undo, the toolbar's Undo and Ctrl+Z are the
-  script's while its editor has the keyboard. (a builder's report on
-  1.25.1) (Settled by the owner, 2026-10-29.)
+- **Undo chosen in Quick Open, with a script in front,** is the module's
+  (the field has the keys), where Edit › Undo, the Top Bar's Undo and
+  Ctrl+Z are the script's while its editor has the keyboard. Ctrl+Z typed
+  in the field is the field's own (M3 T8's review). (a builder's report on
+  1.25.1, of the Command Palette Quick Open took the place of in M3 T8)
+  (Settled by the owner, 2026-10-29.)
 - **A module's files changed outside, read on a thread of their own**
   (`mg_module::outside`), leave the files' memory in that thread's
   allocator arena: the process keeps about 200 MB more after a 970-file
@@ -2346,14 +2370,19 @@ is not taken for a new gap.
   Sets window is open and a rename is put back by renaming it (neither
   is in Edit › Undo, the module's), and `variable-sets` has no folders
   inside it. (Settled by the owner, 2026-10-29: the triage's proposals.)
-- **Tile Properties on several tiles** writes only the controls set
-  into every tile chosen. Aurora's OK writes every value shown, the
-  first tile's, into all of them, and the source lights and loops it
-  shows disabled as 0 (captured 2026-10-30, `captures/wave2/tiles-one.mod`:
-  Main Light 1 changed alone on two tiles of lights 5, 6, 1, 2 and 10,
-  11, 3, 4 left both 27, 6, 0, 0, their loops 0); Moonglow keeps its own,
-  as the owner's report on Tile Properties asked. (Settled by the
-  owner, 2026-10-30.)
+- **Tile Properties on several tiles** writes only the control changed
+  into every tile chosen: since Tile Properties became the Right Dock's
+  panel (M4's U5) there is no OK, and "set" means changed in the panel,
+  each change written at once as its own step (a control chosen, even
+  to the value the first tile shows, goes to every tile that has it; a
+  control not touched writes nothing). Aurora's OK writes every value
+  shown, the first tile's, into all of them, and the source lights and
+  loops it shows disabled as 0 (captured 2026-10-30,
+  `captures/wave2/tiles-one.mod`: Main Light 1 changed alone on two
+  tiles of lights 5, 6, 1, 2 and 10, 11, 3, 4 left both 27, 6, 0, 0,
+  their loops 0); Moonglow keeps its own, as the owner's report on Tile
+  Properties asked. (Settled by the owner, 2026-10-30; restated by M4's
+  U5, 2026-11-15.)
 - **The game's text in the language edited, and the feminine talk
   table:** the install is read as that language when its
   `lang/<code>/data/dialog.tlk` is there (its talk table, and the rest

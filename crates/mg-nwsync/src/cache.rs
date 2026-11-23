@@ -202,8 +202,8 @@ mod tests {
 
     #[test]
     fn servers_are_file_names() {
-        assert_eq!(server_key("https://nwsync.layonara.com"), "nwsync.layonara.com");
-        assert_eq!(server_key("https://NWSync.Layonara.com/"), "nwsync.layonara.com");
+        assert_eq!(server_key("https://nwsync.example.com"), "nwsync.example.com");
+        assert_eq!(server_key("https://NWSync.Example.com/"), "nwsync.example.com");
         assert_eq!(server_key("http://host:4443/nw/sync"), "host_4443_nw_sync");
         assert_eq!(server_key("host"), "host");
     }

@@ -12,10 +12,12 @@ fn welcome_then_open_a_module_through_the_dialog() {
     h.get_by_label("Open Module…").click();
     h.run();
     assert_eq!(h.state().module_path().as_deref(), Some(path.as_path()));
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     // The tree lists the area and the script; Module Properties is open.
     h.get_by_label("Areas (1)");
     h.get_by_label_contains("Scripts (1)");
-    h.get_by_label("Module Properties");
+    tree_row(&h, "Module Properties");
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("Opened")));
 }
 
@@ -82,6 +84,72 @@ fn the_build_window_s_advanced_controls_keep_its_buttons_in_reach() {
     h.get_by_label("Creature CR");
     let done = h.get_by_label("Done").rect();
     assert!(done.bottom() < 800.0, "the buttons are in the window: {done:?}");
+}
+
+/// Module Properties' event rows yield at a window of 420, the least
+/// (U30's #14): each field narrows, its "…" and Edit stay inside the
+/// window; at 1000 the fields keep their 160.
+#[test]
+fn module_properties_event_rows_yield_to_a_narrow_window() {
+    let dir = mg_testkit::scratch_dir("ui-module-events-420");
+    let path = sample_module(&dir);
+    for width in [420.0, 1000.0] {
+        let mut app = app_with(Vec::new());
+        app.open_module(&path);
+        app.actions.push(mg_ui::Action::OpenTab(Tab::ModuleProperties));
+        let mut h = harness(app, width, 600.0);
+        settle(&mut h);
+        // (The page's, not the menu bar's Edit.)
+        let edits: Vec<egui::Rect> =
+            h.get_all_by_label("Edit").map(|n| n.rect()).filter(|r| r.top() > 60.0).collect();
+        assert!(edits.len() >= 10, "at {width}: the events' Edit buttons: {}", edits.len());
+        for edit in &edits {
+            assert!(edit.right() <= width, "at {width}: Edit at {edit:?} past the window");
+        }
+        if width > 900.0 {
+            let fields = (h.get_all_by_role(egui::accesskit::Role::TextInput))
+                .map(|n| n.rect())
+                .filter(|r| edits.iter().any(|e| (e.center().y - r.center().y).abs() < 4.0));
+            for field in fields {
+                assert!((field.width() - 160.0).abs() < 1.0, "at {width}: {field:?}");
+            }
+        }
+    }
+}
+
+/// Missing Resources' two columns of kinds stand the Dialogs board's 8
+/// apart (`.two-c`; U30's #10: "Encounters" 4 from the check box after
+/// it).
+#[test]
+fn the_build_window_s_missing_resources_columns_stand_8_apart() {
+    let dir = mg_testkit::scratch_dir("ui-build-columns");
+    let path = sample_module(&dir);
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    app.build = Some(Default::default());
+    let mut h = harness(app, 1200.0, 1000.0);
+    h.run();
+    h.get_by_label("Advanced Controls").click();
+    h.run();
+    // (The kinds: the check boxes under Advanced Controls, between
+    // Missing Resources' heading and Compile's.)
+    let under = h.get_by_label("Advanced Controls").rect().bottom();
+    let heading = |name: &str| {
+        let rects = h.get_all_by_label(name).map(|n| n.rect());
+        rects.filter(|r| r.top() > under).map(|r| r.left()).next().unwrap()
+    };
+    let (from, to) = (heading("Missing Resources"), heading("Compile"));
+    let boxes: Vec<egui::Rect> = (h.get_all_by_role(egui::accesskit::Role::CheckBox))
+        .map(|n| n.rect())
+        .filter(|r| r.top() > under && r.left() >= from - 0.5 && r.left() < to - 0.5)
+        .collect();
+    assert_eq!(boxes.len(), 11, "the eleven kinds: {boxes:?}");
+    let first = boxes.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
+    let (left, right): (Vec<egui::Rect>, Vec<egui::Rect>) =
+        boxes.iter().partition(|r| r.left() < first + 1.0);
+    let end = left.iter().map(|r| r.right()).fold(0.0, f32::max);
+    let next = right.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
+    assert!(next - end >= 7.5, "the columns {:.1} apart", next - end);
 }
 
 #[test]
@@ -307,6 +375,8 @@ fn new_module_and_area_through_the_wizards() {
     h.run();
     let key = ResKey::parse("area001", ResType::ARE).unwrap();
     assert!(h.state().ws.as_ref().unwrap().module.contains(&key), "{:?}", h.state().log.entries);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.get_by_label_contains("Areas (1)");
     // Open Area in the Area Viewer is on by default, as in Aurora.
     assert!(
@@ -352,9 +422,8 @@ fn recent_modules_reopen_from_the_welcome_page() {
     app.close();
     let mut h = window_harness(app);
     h.run();
-    // (Its name, and the folder it is in.)
-    let place = dir.file_name().unwrap().to_string_lossy().into_owned();
-    h.get_by_label(&format!("sample.mod  in {place}")).click();
+    // (Its name, and the folder it is in: M4's U24.)
+    h.get_by_label_contains("sample.mod in ").click();
     h.run();
     assert_eq!(h.state().module_path().as_deref(), Some(path.as_path()));
 }
@@ -1210,9 +1279,12 @@ fn the_welcome_page_tells_a_folder_from_its_mod() {
     app.settings.module_folders = mg_ui::settings::ModuleFolders::Folder;
     let mut h = window_harness(app);
     h.run();
+    // (Named with the folder each is in: M4's U24.)
     let place = dir.file_name().unwrap().to_string_lossy().into_owned();
-    h.get_by_label(&format!("sample.mod  in {place}"));
-    h.get_by_label(&format!("sample/  in {place}")).click();
+    let mod_row =
+        h.get_by_label_contains("sample.mod in ").accesskit_node().label().unwrap_or_default();
+    assert!(mod_row.ends_with(&place), "{mod_row}");
+    h.get_by_label_contains("sample/ in ").click();
     h.run();
     let location = h.state().ws.as_ref().unwrap().module.location.clone();
     assert_eq!(location, Some(ModuleLocation::Folder(folder)));
@@ -1262,7 +1334,7 @@ fn module_name_in_every_language_and_variables() {
     };
 
     // String Edit: add a German name.
-    h.get_by_label("…").click();
+    in_page(&h, "Basic").get_by_label("…").click();
     h.run();
     h.get_by_label("Add Text").click();
     h.run();
@@ -1282,11 +1354,11 @@ fn module_name_in_every_language_and_variables() {
     assert_eq!(name.strref.0, 12);
 
     // Variables on the Advanced tab (scrolled to: below the edge).
-    h.get_by_label("Advanced").click();
+    page(&mut h, "Advanced");
     h.run();
     click_in_sight(&mut h, "Variables (0)…");
     h.run();
-    h.get_by_label("Add").click();
+    h.get_all_by_label("Add").last().unwrap().click();
     h.run();
     {
         let v = h.state_mut().var_edit.as_mut().unwrap();
@@ -1363,12 +1435,17 @@ fn nwsync_content_from_the_build_menu() {
     let hex = mg_nwsync::sha1_hex(&sha1(&manifest));
     let (served, asked) = (away.clone(), std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
     let (latest, log_of) = (hex.clone(), asked.clone());
+    // (The data file is held until the test lets it go: the Sync seen
+    // under way.)
+    let (go, held) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Mutex::new(held);
     app.nwsync_content.fetch = Some(mg_nwsync::fetch::from_fn(move |u: &str| {
         log_of.lock().unwrap().push(u.to_string());
         let h = mg_nwsync::sha1_hex(&mg_core::sha1::sha1(&served));
         Ok(if u.ends_with("/latest") {
             Some(latest.clone().into_bytes())
         } else if u.ends_with(&h) {
+            let _ = held.lock().unwrap().recv_timeout(std::time::Duration::from_secs(30));
             Some(mg_erf::compressedbuf::compress(&served, *b"NSYC").unwrap())
         } else {
             None
@@ -1405,8 +1482,24 @@ fn nwsync_content_from_the_build_menu() {
     h.get_by_label_contains("1 data file (");
     h.get_by_label("Sync").click();
     h.run_steps(1);
+    // Under way it is no job (the window takes input meanwhile), and the
+    // Status Bar shows it as one: its title and a bar; gone when it ends.
+    let shown = |h: &Harness<'_, Moonglow>| {
+        h.get_by_label("Status Bar")
+            .query_by(|n| n.role() == egui::accesskit::Role::ProgressIndicator)
+            .map(|n| n.accesskit_node().label().unwrap_or_default())
+    };
+    let started = std::time::Instant::now();
+    while shown(&h).as_deref() != Some("Sync NWSync Content, under way") {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(started.elapsed().as_secs() < 30, "never shown: {:?}", shown(&h));
+    }
+    assert!(!h.state().busy(), "no job");
+    go.send(()).unwrap();
     until_done(&mut h);
     until_done(&mut h);
+    assert_eq!(shown(&h), None, "gone with the Sync");
     let c = &h.state().nwsync_content;
     assert_eq!(c.error, None, "{}", log(&h));
     assert!(c.synced.as_deref().is_some_and(|l| l.starts_with("1 data file of 1 downloaded")));
@@ -1592,6 +1685,9 @@ fn published_to_nwsync_from_the_build_menu() {
         let text = std::fs::read_to_string(&order).unwrap_or_default();
         text.lines().map(|l| l.trim().to_string()).collect()
     };
+    // (A few frames first: the footer is at the window's foot, which the
+    // window finds in the frames after it opens.)
+    h.run_steps(4);
     h.get_by_label("Publish").click();
     h.run_steps(1);
     until_done(&mut h);
@@ -1781,11 +1877,11 @@ fn journal_editor_builds_what_aurora_builds() {
     click(&mut h, "Add");
     click(&mut h, "Root");
     click(&mut h, "Add");
-    click(&mut h, "Category000  [Category000]");
+    click(&mut h, "Category000 [Category000]");
     click(&mut h, "Add");
-    click(&mut h, "Category000  [Category000]");
+    click(&mut h, "Category000 [Category000]");
     click(&mut h, "Add");
-    click(&mut h, "Category001  [Category001]");
+    click(&mut h, "Category001 [Category001]");
     click(&mut h, "Add");
     let key = ResKey::parse("module", ResType::JRL).unwrap();
     let ws = h.state_mut().ws.as_mut().unwrap();
@@ -1882,7 +1978,7 @@ fn turkish_harness(name: &str, table: bool) -> Option<(Harness<'static, Moonglow
     )));
     app.actions.push(mg_ui::Action::OpenTab(Tab::Blueprint(key)));
     close_tab(&mut app, &Tab::ModuleProperties);
-    app.open_palette = false;
+    app.palette_dock = false;
     let h = harness(app, 1000.0, 800.0);
     Some((h, key))
 }
@@ -1997,11 +2093,13 @@ fn build_module_compiles_and_reports() {
     assert!(w.compile && w.missing && !w.unused, "Aurora's defaults");
     h.get_all_by_label("Build").last().unwrap().click();
     h.run_steps(3);
-    let results: Vec<String> =
-        h.state().build.as_ref().unwrap().results.iter().map(|f| f.text.clone()).collect();
+    // (Its results in Problems, M4's U28: brought to the front, open.)
+    let results = build_results(&h);
     let has = |s: &str| results.iter().any(|r| r.contains(s));
-    assert!(has("Error:"), "the bad script: {results:?}");
+    assert!(has("Error: mg_bad.nss"), "the bad script: {results:?}");
     assert!(has("mg_nosuchscript"), "{results:?}");
+    assert_eq!(h.state().bottom_dock_shows(), Some(mg_ui::Panel::Problems));
+    h.get_by_label_contains("Error: mg_bad.nss");
     let log = &h.state().log.entries;
     assert!(
         log.iter().any(|(_, m)| m.contains("1 encounter creature entries")),
@@ -2034,14 +2132,19 @@ fn build_module_marks_an_unused_script_as_used() {
         .with_size([900.0, 900.0])
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run_steps(2);
+    dock_high(&mut h, 360);
     h.get_all_by_label("Build").last().unwrap().click();
     h.run_steps(3);
-    let results = |h: &Harness<'_, Moonglow>| -> Vec<String> {
-        h.state().build.as_ref().unwrap().results.iter().map(|f| f.text.clone()).collect()
-    };
-    let line = "Unused: hello.nss (source and compiled)";
+    let results = build_results;
+    // (In Problems, M4's U28: a warning, its place the script.)
+    let line = "Warning: hello.nss, Unused (source and compiled)";
     assert!(results(&h).iter().any(|r| r == line), "{:?}", results(&h));
     assert!(!results(&h).iter().any(|r| r.contains("hello.ncs")), "once: {:?}", results(&h));
+    // (Nothing chosen: the dialog's Mark as Used can't be.)
+    assert!(
+        h.get_by_label("Mark as Used").accesskit_node().is_disabled(),
+        "no Unused result chosen"
+    );
     h.get_by_label(line).click();
     h.run();
     h.get_by_label("Mark as Used").click();
@@ -2055,8 +2158,12 @@ fn build_module_marks_an_unused_script_as_used() {
     // Built again: still not said.
     h.get_all_by_label("Build").last().unwrap().click();
     h.run_steps(3);
-    assert!(!results(&h).is_empty() && !results(&h).iter().any(|r| r.contains("hello")));
-    // Counted as Used lists it, and takes it out.
+    assert!(!results(&h).iter().any(|r| r.contains("hello")), "{:?}", results(&h));
+    let log = &h.state().log.entries;
+    let last = &log[log.len().saturating_sub(3)..];
+    assert!(last.iter().any(|(_, m)| m == "No errors found"), "{log:?}");
+    // Counted as Used (Build's heading's, in Problems) lists it, and takes
+    // it out.
     h.get_by_label("Counted as Used").click();
     h.run();
     h.get_by_label("Script: hello");
@@ -2265,10 +2372,9 @@ fn a_build_without_game_data_says_so() {
     h.run_steps(2);
     h.get_all_by_label("Build").last().unwrap().click();
     h.run_steps(3);
-    let results: Vec<String> =
-        h.state().build.as_ref().unwrap().results.iter().map(|f| f.text.clone()).collect();
+    let results = build_results(&h);
     assert_eq!(results.len(), 1, "{results:?}");
-    assert!(results[0].starts_with("No game data"), "{results:?}");
+    assert!(results[0].starts_with("Error: No game data"), "{results:?}");
 }
 
 /// Verify's report: errors first; objects placed from a blueprint that is
@@ -2336,7 +2442,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     };
     let scratch = dir.join("scratch");
     let mut h = open(&path, &scratch);
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     assert_eq!(std::fs::read(scratch.join("hello.nss")).unwrap(), b"void main() { }\n");
     let ncs = std::fs::read(scratch.join("hello.ncs")).unwrap();
@@ -2357,7 +2463,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     if apart {
         std::fs::write(&other_spelling, b"NCS V1.0 older").unwrap();
     }
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     assert!(std::fs::read(scratch.join("hello.ncs")).unwrap().starts_with(b"NCS V1.0"));
     assert!(!scratch.join("hello.ndb").exists(), "no debug file of an older compile");
@@ -2372,7 +2478,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     }
     // With debug information: the debug file made goes with it.
     h.state_mut().settings.debug_info = true;
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     assert!(scratch.join("hello.ndb").exists(), "{:?}", texts(&h));
     h.state_mut().settings.debug_info = false;
@@ -2385,7 +2491,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     m.save().unwrap();
     let scratch = dir.join("scratch2");
     let mut h = open(&broken_path, &scratch);
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     assert_eq!(std::fs::read(scratch.join("hello.nss")).unwrap(), b"void main() { x = 1; }\n");
     assert!(!scratch.join("hello.ncs").exists(), "no compiled script");
@@ -2399,7 +2505,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     std::fs::write(scratch.join("hello.ncs"), b"NCS V1.0 older").unwrap();
     std::fs::write(scratch.join("hello.ndb"), b"NDB older").unwrap();
     std::fs::write(scratch.join("other.ncs"), b"NCS V1.0 other").unwrap();
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     assert!(!scratch.join("hello.ncs").exists() && !scratch.join("hello.ndb").exists());
     assert!(scratch.join("other.ncs").exists(), "another script's is left");
@@ -2415,7 +2521,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
     m.save().unwrap();
     let scratch = dir.join("scratch3");
     let mut h = open(&include_path, &scratch);
-    h.get_by_label("To Scratch").click();
+    script_click(&mut h, "To Scratch");
     h.run_steps(3);
     let source = std::fs::read(scratch.join("hello.nss")).unwrap();
     assert_eq!(source, b"int Twice(int n) { return 2 * n; }\n");
@@ -2538,13 +2644,13 @@ fn an_area_goes_to_the_scratch_folder() {
         return;
     };
     // No scratch folder yet, and none chosen when asked: nothing is copied.
-    area_tool(&h, "To Scratch").click();
+    area_click(&mut h, "To Scratch");
     h.run_steps(2);
     assert_eq!(h.state().settings.scratch_dir, None);
     let scratch = mg_testkit::scratch_dir("ui-area-scratch").join("scratch");
     h.state_mut().settings.scratch_dir = Some(scratch.clone());
     h.run_steps(2);
-    area_tool(&h, "To Scratch").click();
+    area_click(&mut h, "To Scratch");
     h.run_steps(3);
     let mut names: Vec<String> = std::fs::read_dir(&scratch)
         .unwrap()
@@ -2652,7 +2758,7 @@ fn a_field_typed_in_sets_its_text_before_files_changed_outside_are_read() {
     app.open_module(&folder);
     let mut h = harness(app, 1200.0, 800.0);
     h.run_steps(3);
-    h.get_by_label("Description").click();
+    page(&mut h, "Description");
     h.run_steps(3);
     let memo = egui_kittest::kittest::by().role(egui::accesskit::Role::MultilineTextInput);
     let at = h.get(memo).rect().center();
@@ -2903,12 +3009,15 @@ fn check_for_conflicts_says_what_the_module_uses_of_its_haks() {
     h.run();
     h.state_mut().actions.push(mg_ui::Action::HakReport);
     h.run();
+    // (A Bottom Dock tab, M4's U28: brought to the front.)
     assert!(h.state().hak_report.is_some());
+    assert_eq!(h.state().bottom_dock_shows(), Some(mg_ui::Panel::HakConflicts));
     h.get_by_label("What the Module Uses").click();
     h.run();
-    let used = h.state().hak_usage.clone().expect("the walk ran");
+    let used = h.state().hak_report.as_ref().and_then(|r| r.usage.clone()).expect("the walk ran");
     assert!(used.contains("mg_content\t2 of 3 used"), "{used}");
     assert!(used.contains("1 unused"), "{used}");
+    // (Its lines its own view's rows, shown.)
     assert!(h.query_by_label_contains("What the module uses (in the game a player has)").is_some());
 }
 

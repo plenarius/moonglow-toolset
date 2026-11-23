@@ -4,11 +4,11 @@
 //! copy of each name that won:
 //!
 //! ```text
-//! Erf:/srv/haks/l64_parts.hak
+//! Erf:/srv/haks/pw_parts.hak
 //!     pfh0_head001.mdl
 //!     pfh0_head001.plt
-//! ResFile:/srv/tlk/layonara.tlk
-//!     layonara.tlk
+//! ResFile:/srv/tlk/world.tlk
+//!     world.tlk
 //! ```
 //!
 //! A container's line is its kind and the file it was opened from, as the
@@ -101,21 +101,21 @@ mod tests {
     /// without one by its number.
     #[test]
     fn origins_are_read() {
-        let text = "Erf:/srv/layonara/hak/l64_parts.hak\n\tpfh0_head001.mdl\n\tpfh0_head001.plt\n\
-                    Erf:C:\\NWN\\hak\\L64_VFX.HAK\r\n\tvfx_fire.mdl\r\n\
-                    ResFile:/srv/layonara/tlk/layonara.tlk\n\tlayonara.tlk\n\
+        let text = "Erf:/srv/pw/hak/pw_parts.hak\n\tpfh0_head001.mdl\n\tpfh0_head001.plt\n\
+                    Erf:C:\\NWN\\hak\\PW_VFX.HAK\r\n\tvfx_fire.mdl\r\n\
+                    ResFile:/srv/pw/tlk/world.tlk\n\tworld.tlk\n\
                     Erf:sounds.erf\n\tsnd_a.wav\n\tthing.9999\n";
         let o = Origins::parse(text);
         assert_eq!(o.containers.len(), 4);
-        assert_eq!(o.containers[0].path, "/srv/layonara/hak/l64_parts.hak");
+        assert_eq!(o.containers[0].path, "/srv/pw/hak/pw_parts.hak");
         assert_eq!(o.containers[0].resources, ["pfh0_head001.mdl", "pfh0_head001.plt"]);
-        assert_eq!(o.containers[1].file_name(), "L64_VFX.HAK");
+        assert_eq!(o.containers[1].file_name(), "PW_VFX.HAK");
         assert_eq!(o.containers[1].resources, ["vfx_fire.mdl"]);
-        assert_eq!(o.haks().collect::<Vec<_>>(), ["l64_parts", "L64_VFX"]);
-        assert!(o.hak("L64_Parts").is_some());
-        assert!(o.hak("l64_vfx").is_some());
+        assert_eq!(o.haks().collect::<Vec<_>>(), ["pw_parts", "PW_VFX"]);
+        assert!(o.hak("PW_Parts").is_some());
+        assert!(o.hak("pw_vfx").is_some());
         // (A talk table and an .erf are no haks.)
-        assert!(o.hak("layonara").is_none() && o.hak("sounds").is_none());
+        assert!(o.hak("world").is_none() && o.hak("sounds").is_none());
         assert_eq!(o.containers[2].kind, "ResFile");
         assert_eq!(o.containers[3].resources[1], "thing.9999");
         assert_eq!(o.resources(), 6);

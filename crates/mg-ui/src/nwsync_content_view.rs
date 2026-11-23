@@ -7,15 +7,19 @@
 //!
 //! The look and the download run on a thread of their own, not as a job:
 //! a first download of a persistent world's content is gigabytes, and the
-//! module stays open to work on meanwhile. The window says how far it is
-//! and has Cancel; what was downloaded stays, so a Sync canceled or cut
-//! off goes on from there the next time. Once it is done the NWSync layer
-//! is put in again (the newer manifest, or the one there was none of).
+//! module stays open to work on meanwhile. The Status Bar shows a Sync
+//! under way as it shows a job ([`NwSyncContent::shown`], read by
+//! [`Moonglow::job_shown`] while no job runs), and the window says how
+//! far it is and has Cancel; what was downloaded stays, so a Sync canceled
+//! or cut off goes on from there the next time. Once it is done the
+//! NWSync layer is put in again (the newer manifest, or the one there was
+//! none of).
 //!
 //! **Clean Up Cache…** prunes Moonglow's cache ([`mg_nwsync::prune`]): it
 //! says first what would go (a dry run), and removes it when asked. Kept:
 //! the module's manifest, the newest each server named, and the last used
-//! (`[nwsync] keep`, 3).
+//! (`[nwsync] keep`, 3). The Status Bar shows a clean-up too, as it shows
+//! a Sync.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,10 +31,18 @@ use mg_resman::GameInstall;
 
 use crate::Moonglow;
 
+/// What the Status Bar calls a Sync under way.
+pub const SYNC_TITLE: &str = "Sync NWSync Content";
+/// What the Status Bar calls a clean-up of the cache under way (its dry
+/// run too: it reads the whole cache).
+pub const CLEAN_TITLE: &str = "Clean Up NWSync Cache";
+
 /// What a thread of the window is doing, and what it made.
 #[derive(Default)]
 struct Run {
     syncing: bool,
+    /// A clean-up of the cache: whether it is a dry run.
+    cleaning: Option<bool>,
     cancel: AtomicBool,
     step: Mutex<Option<Step>>,
     done: Mutex<Option<Made>>,
@@ -86,6 +98,40 @@ impl NwSyncContent {
         self.run.as_ref().is_some_and(|r| r.syncing)
     }
 
+    /// A Sync or a clean-up under way as the Status Bar shows a job: its
+    /// title; a Sync's data files downloaded of those missing (once it
+    /// knows them), and what it is doing (where its Cancel is, in the tip).
+    pub(crate) fn shown(&self) -> Option<crate::jobs::JobShown> {
+        let run = self.run.as_ref()?;
+        if let Some(dry_run) = run.cleaning {
+            let note = if dry_run {
+                "Finding what no kept manifest needs"
+            } else {
+                "Removing what no kept manifest needs"
+            };
+            let title = CLEAN_TITLE.to_string();
+            return Some(crate::jobs::JobShown { title, steps: None, note: note.to_string() });
+        }
+        if !run.syncing {
+            return None;
+        }
+        let step = *run.step.lock().unwrap_or_else(|e| e.into_inner());
+        let (steps, doing) = match step {
+            None | Some(Step::Asking) => (None, "Asking the server for its manifest".to_string()),
+            Some(Step::Looking) => {
+                (None, "Looking for its data in the game's storage and the cache".to_string())
+            }
+            Some(Step::Downloading(p)) => (
+                (p.of_files > 0).then_some((p.files.min(p.of_files), p.of_files)),
+                format!("{} of {}", megabytes(p.bytes), megabytes(p.of_bytes)),
+            ),
+        };
+        let doing =
+            if run.cancel.load(Ordering::Relaxed) { "Canceling".to_string() } else { doing };
+        let note = format!("{doing}\nBuild › NWSync Content… has its Cancel");
+        Some(crate::jobs::JobShown { title: SYNC_TITLE.to_string(), steps, note })
+    }
+
     /// The module closed: its content forgotten, a download under way
     /// called off (what it downloaded stays in the cache).
     pub(crate) fn module_closed(&mut self) {
@@ -106,11 +152,11 @@ fn settings(app: &Moonglow) -> Option<Settings> {
 /// frame ([`window`]).
 fn start(
     app: &mut Moonglow,
-    syncing: bool,
+    run: Run,
     work: impl FnOnce(&Run) -> Made + Send + 'static,
     ctx: Option<&egui::Context>,
 ) {
-    let run = Arc::new(Run { syncing, ..Default::default() });
+    let run = Arc::new(run);
     let theirs = run.clone();
     let ctx = ctx.cloned();
     let spawned = std::thread::Builder::new().name("nwsync-content".into()).spawn(move || {
@@ -132,7 +178,7 @@ fn look(app: &mut Moonglow, ctx: Option<&egui::Context>) {
     if app.nwsync_content.running() {
         return;
     }
-    start(app, false, move |_| Made::Looked(survey_of(&settings, &install)), ctx);
+    start(app, Run::default(), move |_| Made::Looked(survey_of(&settings, &install)), ctx);
 }
 
 fn survey_of(settings: &Settings, install: &GameInstall) -> Result<Survey, String> {
@@ -160,7 +206,7 @@ fn sync(app: &mut Moonglow, ctx: &egui::Context) {
     let ctx_thread = ctx.clone();
     start(
         app,
-        true,
+        Run { syncing: true, ..Default::default() },
         move |run| {
             let pulled = (|| {
                 let game = mg_module::nwsync_content::game_storage(&install)?;
@@ -215,7 +261,7 @@ pub(crate) fn prune(app: &mut Moonglow, dry_run: bool, ctx: Option<&egui::Contex
     }
     start(
         app,
-        false,
+        Run { cleaning: Some(dry_run), ..Default::default() },
         move |_| {
             Made::Pruned((|| {
                 let game = mg_module::nwsync_content::game_storage(&install)?;
@@ -364,13 +410,13 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     let settings = settings(app);
     let c = &mut app.nwsync_content;
     let mut open = true;
-    let (mut go, mut cancel, mut close) = (false, false, false);
+    let (mut go, mut cancel) = (false, false);
     let (mut look_prune, mut remove, mut unprune) = (false, false, false);
     let step = c.run.as_ref().and_then(|r| *r.step.lock().unwrap_or_else(|e| e.into_inner()));
-    crate::widgets::dialog(ctx, "NWSync Content", &mut open)
+    let footed = crate::widgets::dialog(ctx, "NWSync Content", &mut open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_foot(ctx, |ui| {
             ui.label(
                 "The module's haks and talk table, read from the NWSync server players download \
                  them from, without the hak files.",
@@ -380,8 +426,7 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
                     "The module's project names no NWSync server. Add its address to the \
                      project's moonglow.toml: [nwsync] source = \"https://…\".",
                 );
-                close = ui.button("Close").clicked();
-                return;
+                return ((), crate::widgets::Foot::new().leave("Close"));
             };
             egui::Grid::new("nwsync-content").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                 crate::widgets::field_label(ui, "Server");
@@ -491,35 +536,37 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
             if let Some(e) = &c.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
-            ui.horizontal(|ui| {
-                go = ui
-                    .add_enabled(!c.running(), egui::Button::new("Sync"))
-                    .on_hover_text("Download the server's latest manifest and the data not here")
-                    .clicked();
-                if c.syncing() {
-                    cancel = ui.button("Cancel").clicked();
-                }
-                look_prune = ui
-                    .add_enabled(!c.running(), egui::Button::new("Clean Up Cache…"))
-                    .on_hover_text(
-                        "Say what of Moonglow's cache no kept manifest needs (data files, \
-                         written haks, older manifests), to remove it",
-                    )
-                    .clicked();
-                close = ui.button("Close").clicked();
-            });
             ui.weak(
                 "Downloads and haks written for testing go to Moonglow's own cache; the game's \
                  NWSync storage is read, never changed.",
             );
+            let mut foot = crate::widgets::Foot::new()
+                .main("Sync", !c.running())
+                .tip("Download the server's latest manifest and the data not here");
+            if c.syncing() {
+                foot = foot.button("Cancel", true);
+            }
+            let foot = foot.button("Clean Up Cache…", !c.running()).tip(
+                "Say what of Moonglow's cache no kept manifest needs (data files, written haks, \
+                 older manifests), to remove it",
+            );
+            ((), foot.leave("Close"))
         });
+    if let Some(f) = footed {
+        go = f.pressed.main();
+        cancel = f.pressed.clicked("Cancel");
+        look_prune = f.pressed.clicked("Clean Up Cache…");
+        if f.pressed.cancelled() {
+            open = false;
+        }
+    }
     if c.running() {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
     if cancel && let Some(r) = &c.run {
         r.cancel.store(true, Ordering::Relaxed);
     }
-    if !open || close {
+    if !open {
         c.open = false;
     }
     if go {
@@ -533,5 +580,56 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     }
     if remove {
         prune(app, false, Some(ctx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Sync under way shows in the Status Bar as a job does: under way
+    /// while it asks and looks, then its data files done of those missing,
+    /// the megabytes and where Cancel is in the tip; a look alone (the
+    /// window's, as it opens) shows nothing there.
+    #[test]
+    fn a_sync_under_way_is_shown_as_a_job() {
+        let at = |syncing: bool, step: Option<Step>| {
+            let run = Run { syncing, step: Mutex::new(step), ..Default::default() };
+            let c = NwSyncContent { run: Some(Arc::new(run)), ..Default::default() };
+            c.shown().map(|s| (s.title, s.steps, s.note))
+        };
+        assert!(at(false, None).is_none(), "a look is no Sync");
+        assert!(NwSyncContent::default().shown().is_none());
+        let (title, steps, note) = at(true, Some(Step::Asking)).unwrap();
+        assert_eq!((title.as_str(), steps), (SYNC_TITLE, None));
+        assert!(note.starts_with("Asking the server"), "{note}");
+        assert!(note.ends_with("Build › NWSync Content… has its Cancel"), "{note}");
+        let p = fetch::Progress {
+            files: 3,
+            of_files: 10,
+            bytes: 3 << 20,
+            of_bytes: 10 << 20,
+            received: 1 << 20,
+        };
+        let (_, steps, note) = at(true, Some(Step::Downloading(p))).unwrap();
+        assert_eq!(steps, Some((3, 10)));
+        assert!(note.starts_with("3.0 MB of 10.0 MB\n"), "{note}");
+        // (Nothing missing yet counted: under way, not 0 of 0.)
+        let none = fetch::Progress::default();
+        assert_eq!(at(true, Some(Step::Downloading(none))).unwrap().1, None);
+    }
+
+    /// A clean-up of the cache under way shows in the Status Bar too, its
+    /// dry run and the removal each saying which it is.
+    #[test]
+    fn a_clean_up_under_way_is_shown_as_a_job() {
+        for dry_run in [true, false] {
+            let run = Run { cleaning: Some(dry_run), ..Default::default() };
+            let c = NwSyncContent { run: Some(Arc::new(run)), ..Default::default() };
+            let shown = c.shown().unwrap();
+            assert_eq!((shown.title.as_str(), shown.steps), (CLEAN_TITLE, None));
+            let word = if dry_run { "Finding" } else { "Removing" };
+            assert!(shown.note.starts_with(word), "{}", shown.note);
+        }
     }
 }

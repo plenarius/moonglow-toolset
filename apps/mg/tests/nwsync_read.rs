@@ -80,9 +80,9 @@ fn module_naming(dir: &Path, url: &str) -> PathBuf {
 fn a_module_s_nwsync_content_is_pulled_into_the_cache() {
     let dir = mg_testkit::scratch_dir("mg-nwsync-read");
     let resources: Vec<(ResKey, &[u8])> = vec![
-        (key("l64_appear", ResType::TWODA), b"2DA V2.0\n\n A\n0 x\n"),
-        (key("l64_head", ResType::MDL), b"a model of a head, a model of a head"),
-        (key("layonara", ResType::TLK), b"TLK V3.0 and the rest of a talk table"),
+        (key("pw_appear", ResType::TWODA), b"2DA V2.0\n\n A\n0 x\n"),
+        (key("pw_head", ResType::MDL), b"a model of a head, a model of a head"),
+        (key("world", ResType::TLK), b"TLK V3.0 and the rest of a talk table"),
     ];
     let contents: Vec<(ResKey, Source)> =
         resources.iter().map(|(k, b)| (*k, Source::Bytes((*b).into()))).collect();
@@ -171,10 +171,10 @@ fn a_module_s_nwsync_content_is_pulled_into_the_cache() {
 fn a_module_s_haks_are_written_from_its_nwsync_content() {
     let dir = mg_testkit::scratch_dir("mg-nwsync-haks");
     let resources: Vec<(ResKey, &[u8])> = vec![
-        (key("l64_appear", ResType::TWODA), b"2DA V2.0\n\n A\n0 x\n"),
-        (key("l64_head", ResType::MDL), b"a model of a head, a model of a head"),
-        (key("l64_tex", ResType::TGA), b"a texture"),
-        (key("layonara", ResType::TLK), b"TLK V3.0 and the rest of a talk table"),
+        (key("pw_appear", ResType::TWODA), b"2DA V2.0\n\n A\n0 x\n"),
+        (key("pw_head", ResType::MDL), b"a model of a head, a model of a head"),
+        (key("pw_tex", ResType::TGA), b"a texture"),
+        (key("world", ResType::TLK), b"TLK V3.0 and the rest of a talk table"),
     ];
     let contents: Vec<(ResKey, Source)> =
         resources.iter().map(|(k, b)| (*k, Source::Bytes((*b).into()))).collect();
@@ -184,13 +184,13 @@ fn a_module_s_haks_are_written_from_its_nwsync_content() {
     let folder = module_naming(&dir, &url);
     let mut m = mg_module::Module::open(&folder).unwrap();
     let mut info = m.info().unwrap();
-    let haks = ["l64_one", "l64_two"].map(|h| {
+    let haks = ["pw_one", "pw_two"].map(|h| {
         let mut s = mg_gff::Struct::new(8);
         s.set("Mod_Hak", mg_gff::Value::String(h.as_bytes().to_vec()));
         s
     });
     info.root.set("Mod_HakList", mg_gff::Value::List(haks.to_vec()));
-    info.root.set("Mod_CustomTlk", mg_gff::Value::String(b"layonara".to_vec()));
+    info.root.set("Mod_CustomTlk", mg_gff::Value::String(b"world".to_vec()));
     m.set_info(&info).unwrap();
     m.save().unwrap();
     let (cache, out) = (dir.join("cache"), dir.join("out"));
@@ -211,10 +211,10 @@ fn a_module_s_haks_are_written_from_its_nwsync_content() {
     assert!(haks.iter().all(|h| h["written"] == true));
     let total: u64 = haks.iter().map(|h| h["resources"].as_u64().unwrap()).sum();
     assert_eq!(total, 3);
-    assert_eq!(j["tlk"]["name"], "layonara.tlk");
-    assert_eq!(std::fs::read(out.join("tlk/layonara.tlk")).unwrap(), resources[3].1);
+    assert_eq!(j["tlk"]["name"], "world.tlk");
+    assert_eq!(std::fs::read(out.join("tlk/world.tlk")).unwrap(), resources[3].1);
     let mut found = 0;
-    for name in ["l64_one", "l64_two"] {
+    for name in ["pw_one", "pw_two"] {
         let bytes = std::fs::read(out.join(format!("hak/{name}.hak"))).unwrap();
         let erf = mg_erf::Erf::read(&bytes).unwrap();
         for (k, b) in &resources[..3] {

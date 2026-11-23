@@ -3,14 +3,14 @@ resolver = "3"
 members = ["crates/*", "apps/*"]
 # (Vendored crates patched below, which aren't Moonglow's to lint or
 # format.)
-exclude = ["vendor/winit"]
+exclude = ["vendor/winit", "vendor/egui_dock"]
 
 [workspace.package]
 # The release: the version of the two programs (apps/mg, apps/moonglow),
 # the one line a release changes (packaging/README.md). The libraries
 # keep "0.0.0", so that a release rebuilds the programs alone; what they
 # say of the release they read from the program (mg_core::release).
-version = "4.2.0-layonara.2"
+version = "5.0.0-layonara.1"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-only"
@@ -47,6 +47,7 @@ mg-shader = { path = "crates/mg-shader" }
 mg-set = { path = "crates/mg-set" }
 mg-ssf = { path = "crates/mg-ssf" }
 mg-testkit = { path = "crates/mg-testkit" }
+mg-testkit-gpu = { path = "crates/mg-testkit-gpu" }
 mg-tiles = { path = "crates/mg-tiles" }
 mg-tlk = { path = "crates/mg-tlk" }
 mg-ui = { path = "crates/mg-ui" }
@@ -102,6 +103,8 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 rars = { version = "0.12", default-features = false }
 rfd = "0.17"
 regex-lite = "0.1"
+# (Quick Open's search of the load order: already in the tree, by aho-corasick.)
+memchr = "2"
 # (eframe's settings file, read before the window opens: the version
 # eframe writes it with.)
 ron = "0.12"
@@ -194,3 +197,8 @@ strip = "debuginfo"
 # moves to a winit that has. `vendor/winit/MOONGLOW.md` says what changed.
 [patch.crates-io]
 winit = { path = "vendor/winit" }
+# egui_dock 0.21.1 with two additions for the editor area (the main
+# surface's tab bars without the leaf buttons, the windows' with them, and
+# a call for the tab being dragged): `vendor/egui_dock/MOONGLOW.md` says
+# what changed, why and when to drop it.
+egui_dock = { path = "vendor/egui_dock" }

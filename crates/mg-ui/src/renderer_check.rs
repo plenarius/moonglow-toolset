@@ -1,7 +1,7 @@
 //! What Moonglow found of how its renderer draws on this machine: the
 //! startup check's verdict (`apps/moonglow`, [`mg_render::backend::start`])
 //! and the area view's watch ([`mg_render::watch`]); the notice under the
-//! toolbar when either found it drawing nothing, with **Restart with …**
+//! Top Bar when either found it drawing nothing, with **Restart with …**
 //! (the same GPU's other backend), and the restart itself. The notice
 //! that the game's shaders alone draw wrong, which says the same each run
 //! on that driver, offers **Don't Show Again** too.
@@ -57,7 +57,20 @@ pub struct RendererCheck {
 pub struct LitCheck {
     started: bool,
     pending: Option<std::sync::mpsc::Receiver<mg_render::probe::Lit>>,
+    /// The check's thread, waited for when the window ends: it holds the
+    /// GPU, and a check still making a pipeline as the process exited
+    /// crashed it there (with Vulkan's validation layer, which debug
+    /// builds load).
+    thread: Option<std::thread::JoinHandle<()>>,
     pub found: Option<mg_render::probe::Lit>,
+}
+
+impl Drop for LitCheck {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl LitCheck {
@@ -98,8 +111,9 @@ pub(crate) fn lit_check(app: &mut Moonglow) {
             std::thread::Builder::new().name("moonglow lit check".into()).spawn(move || {
                 let _ = tx.send(mg_render::probe::probe_lit(&gpu, &assets, cache));
             });
-        if spawned.is_ok() {
+        if let Ok(thread) = spawned {
             app.lit_check.pending = Some(rx);
+            app.lit_check.thread = Some(thread);
         }
         return;
     }
@@ -373,7 +387,7 @@ pub(crate) fn device_lost(app: &mut Moonglow, why: String) {
     app.renderer_check.device_lost = Some(said);
 }
 
-/// The notice of a renderer that draws nothing, under the toolbar while
+/// The notice of a renderer that draws nothing, under the Top Bar while
 /// there is one.
 pub(crate) fn notice_bar(app: &mut Moonglow, ui: &mut egui::Ui) {
     let Some(trouble) = app.renderer_check.trouble.clone() else { return };

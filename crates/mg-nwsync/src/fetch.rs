@@ -17,7 +17,7 @@ use crate::{
     parse_sha1, sha1_hex, survey, unpack_checked,
 };
 
-/// The most of a manifest that is read (Layonara's, 220,000 resources, is
+/// The most of a manifest that is read (a large persistent world's, 220,000 resources, is
 /// 9 MB).
 pub const MANIFEST_LIMIT: u64 = 256 << 20;
 /// The most of a side file (`latest`, `.json`, `.origin`) that is read.

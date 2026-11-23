@@ -3,7 +3,7 @@ type: Finding
 title: Findings
 description: What Moonglow's authors learned about NWN:EE that is undocumented or documented wrongly - item costs, creatures, areas and tiles, talk tables and 2DAs, haks, GFF fields, what Aurora writes - each saying how it was checked, where Moonglow implements it and what nwn.wiki says.
 tags: [findings, engine, aurora, gff, 2da, nwn-wiki]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-12T17:18:46Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-20T23:46:40Z }
 sources:
   - id: engine
     resource: The game itself (NWN:EE 89.8193.37) - a private nwserver, and the game client read back by screenshot; tests engine_* and client_* in crates/mg-corpus-tests/tests
@@ -693,8 +693,8 @@ the Area Wizard writes from the row (above), and more:
 - **Checked:** Aurora, `aurora_lighting_scheme.rs` (Interior Evil, row 16,
   on a 4×4 Rural area whose tiles were lit 31).
 - **Moonglow:** `Scheme::applied_fields` and `tile_fields` in
-  `crates/mg-module/src/new.rs`; Area Properties, Give Every Area This
-  Page's Settings and `mg areas --lighting-scheme` use them.
+  `crates/mg-module/src/new.rs`; Area Properties, Copy This Page to
+  Every Area and `mg areas --lighting-scheme` use them.
 - **Wiki:** not described.
 
 ### ARE colors and tile lights, stored and read
@@ -713,15 +713,26 @@ return `0xRRGGBB`. `Tile_SrcLight1/2` stores the
 
 ### Fog
 
-`fogEnd` = `FogClipDist`; `fogStart` = min(30 − `Sun/MoonFogAmount`,
-`fogEnd` − 1), in meters. Fog is always on, even at amount 0; amounts above
-30 start it behind the camera. A skybox changes neither value. The fog
-color is the stored color, in gamma space.
+`fogEnd` = `FogClipDist`; `fogStart` = min(30 − `Sun/MoonFogAmount` −
+(20 − the camera's distance), `fogEnd` − 1), in meters, where the
+camera's distance is how far the client's camera stands from the player
+(as `SetCameraFacing` gives it; 20 as a player enters, where the
+formula reads min(30 − amount, end − 1)). Zoomed in, the fog starts
+nearer: with an amount of 12 and the camera at 5.5 m it starts 3.5 m off,
+not 18. The pitch changes nothing, nor day or night (the moon's amount
+and color at night, the sun's by day). Fog is always on, even at amount
+0; amounts above 30 start it behind the camera. A skybox changes neither
+value. The fog color is the stored color, in gamma space.
 
 - **Checked:** game client, `client_render.rs` `fog_uniforms_match_the_client`
-  (the shader's uniforms read back by a debug copy of the game's own shader
-  include in a scratch `override`).
-- **Moonglow:** `crates/mg-area/src/scene.rs` (`fog`).
+  (the camera as a player enters) and `night_fog.rs`
+  `fog_start_follows_the_camera` (cameras from 5.5 to 25 m, the start moving
+  back past 20 m as before it, pitch 45 and
+  84, amounts 0 to 30, day and night), the shader's uniforms read back by
+  a debug copy of the game's own shader include in a scratch `override`;
+  `night_fog_matches_the_client` compares the pictures (The Domains of
+  Dread's Shard at night with a clip distance of 22, and a rural area).
+- **Moonglow:** `crates/mg-area/src/scene.rs` (`fog_from`, `View::camera`).
 - **Wiki:** no formula. "Area Lighting" and "Render Distance with Fog and
   Skyboxes" say a skybox extends the fog clip distance; the fog end stays
   at `FogClipDist` (the draw distance was not measured).
@@ -979,6 +990,26 @@ else is drawn in the PLT, a mesh naming the part's own name in the
 material. Robes (`p<g><r><pheno>_robeNNN`) are parts as any: an elf's
 takes the human man's PLT.
 
+Helmets are drawn the same way: a helmet (`helm_NNN`, worn or as an
+item) with a PLT of its own name is drawn in it on every mesh, whatever
+the mesh names (a texture that is nowhere, another helmet's PLT, a TGA
+of no part's name, no texture); a mesh naming a material with a
+`texture0` keeps it, and a TGA of the helmet's name alone replaces
+nothing. The game's hood, `helm_033`, names `helm`, which is nowhere
+(as `helm_035` does), and nine of the game's helmets name another
+helmet's PLT (`helm_006` names `helm_003`'s); Moonglow drew the hood
+untextured and shiny, the others in the other helmet's PLT (GitHub
+issue 45, a builder's report on 4.0: "the hoods are still missing their
+texture"). Of the game's and The Domains of Dread's models, only
+helmets, body parts and the game's `gi_cloak01` (the cloak dropped,
+whose mesh names its own name) have a PLT of their own name: no shield
+or weapon has one. A mesh keeps the material (its normal and specular
+maps) of the name it gives, not of the name it is drawn in, on helmets
+and body parts alike: a helmet whose mesh names `helm_003` beside the
+helmet's own `helm_006.mtr` is drawn with `helm_003`'s normal map. A
+mesh whose texture is nowhere is drawn close to a white texture of
+alpha 0: wholly reflecting its object's environment map.
+
 The earlier finding said a mesh naming something that is no part's
 texture keeps it (a head's hair, a gem): that half had never been read in
 the client (no stock body part names such a texture: only the cloaks do,
@@ -1002,8 +1033,26 @@ report on 4.0: a part drawn in the texture its mesh names).
   to a color texture. Nine of them read in the client beside Moonglow
   before and after (`part_textures_tdod_look`): eight the client draws
   as the rule does (Moonglow before did not), and a head of 146 (its
-  mesh naming a material) neither draws.
-- **Moonglow:** `crates/mg-preview` (`creature::plt_fallbacks`; tests
+  mesh naming a material) neither draws. Helmets (2026-11-13,
+  `part_textures_look` rows W to Z and 0 to 2, authored, and 3 and 6,
+  the game's `helm_033` and `helm_006`): as above. Over the game and
+  TDoD's haks the rule draws 11 of the game's helmets and 78 of TDoD's
+  otherwise (`models_with_a_plt_of_their_own_name` in mg-preview's
+  `tests/previews.rs`, run by hand, lists them); six of TDoD's read in
+  the client beside Moonglow before
+  and after (`part_textures_tdod_look`, `MG_TDOD_SET=3`: `helm_017`,
+  `036`, `071`, `076`, `096`, `033`): the client draws them as the rule
+  does (a kettle hat whose mesh names a texture that is nowhere textured
+  and dark, where Moonglow drew it shiny gray; horns whose meshes name
+  TGAs of other names in the helmet's PLT, where Moonglow drew them
+  blue). The same day: two meshes of a helmet ($), a TGA beside its PLT
+  (&), the normal maps of materials with striped normal maps on helmets
+  and parts (4, 5, 7, 8 and %, +, #, =, seen from above in a darker
+  light), and meshes whose texture is nowhere beside white TGAs (Z, 9,
+  @, ^, ~).
+- **Moonglow:** `crates/mg-preview` (`creature::plt_fallbacks`,
+  `creature::helmet_textures`; tests
+  `a_helmet_with_a_plt_of_its_name_is_drawn_in_it_whatever_its_meshes_name`,
   `a_part_with_a_plt_of_its_name_is_drawn_in_it_whatever_its_meshes_name`,
   `a_part_s_own_plt_is_used_whatever_its_mesh_names`) and
   `mg_render::Assets::texture_kept` (`only_a_plt_takes_an_instance_s_colors`;
