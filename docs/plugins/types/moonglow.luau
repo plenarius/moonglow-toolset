@@ -1,5 +1,5 @@
 --!strict
--- The types of Moonglow's plugin API, version 0.9, for editors that check
+-- The types of Moonglow's plugin API, version 0.10, for editors that check
 -- Luau (luau-lsp): point the alias "moonglow" at this file in a `.luaurc`
 -- in or above your plugin's folder, and `require("@moonglow")` is typed
 -- and completed:
@@ -82,6 +82,8 @@ export type Module = Reader & {
     gff: (self: Module, name: string) -> Struct,
     text: (self: Module, name: string) -> string,
     bytes: (self: Module, name: string) -> string,
+    -- A GFF as `mg gff` writes its JSON (API 0.10).
+    json: (self: Module, name: string) -> string,
     new_name: (self: Module, name: string, kind: string) -> string,
 }
 
@@ -90,6 +92,7 @@ export type Game = Reader & {
     gff: (self: Game, name: string, layer: string?) -> Struct,
     text: (self: Game, name: string, layer: string?) -> string,
     bytes: (self: Game, name: string, layer: string?) -> string,
+    json: (self: Game, name: string, layer: string?) -> string,
     table: (self: Game, name: string) -> TwoDa,
     string: (self: Game, strref: number) -> string?,
 }
@@ -102,7 +105,40 @@ export type Edit = {
     write: (self: Edit, name: string, text: string) -> (),
     write_bytes: (self: Edit, name: string, bytes: string) -> (),
     write_gff: (self: Edit, name: string, document: Struct) -> (),
+    -- A GFF from its JSON: text, or what mg.json.decode made of it (API 0.10).
+    write_json: (self: Edit, name: string, json: any) -> (),
     delete: (self: Edit, name: string) -> (),
+}
+
+-- A request to a host the manifest declares (API 0.10).
+export type Request = {
+    url: string,
+    method: string?,
+    headers: { [string]: string }?,
+    body: string?,
+    json: any?,
+    -- A sign-in's id: its access token is the Authorization header.
+    signin: string?,
+}
+
+export type Response = {
+    status: number,
+    ok: boolean,
+    headers: { [string]: string },
+    body: string,
+}
+
+export type Net = {
+    request: (self: Net, request: Request) -> Response,
+}
+
+export type SignInStatus = { signed_in: boolean, name: string?, kept: boolean }
+
+-- Signing in by a device code (API 0.10): Moonglow keeps the tokens.
+export type SignIn = {
+    start: (self: SignIn, id: string) -> SignInStatus,
+    status: (self: SignIn, id: string) -> SignInStatus,
+    stop: (self: SignIn, id: string) -> (),
 }
 
 -- A finding's fix, or a warning's (ctx.fix, in a check or a
@@ -293,6 +329,9 @@ export type Context = {
     edit: Edit,
     hak: Hak,
     terrain: Terrain,
+    -- The declared hosts, and signing in to them (API 0.10).
+    net: Net,
+    signin: SignIn,
     log: Log,
     ui: Ui,
     progress: (done: number, total: number, note: string?) -> (),
@@ -371,7 +410,7 @@ export type Element = string | {
 
 local mg = {}
 
-mg.api = "0.9"
+mg.api = "0.10"
 
 -- A command's handler may return what Undo calls the change:
 -- { label = "..." }, or the text alone.
@@ -479,6 +518,15 @@ export type VarDescription = {
 mg.vars = {
     describe = function(name: string): VarDescription? return nil end,
     described = function(): { VarDescription } return {} end,
+}
+
+-- JSON, losslessly (API 0.10): a whole number past 2^53 decodes as a raw
+-- value, which encodes as its digits again.
+mg.json = {
+    encode = function(value: any, options: { pretty: boolean? }?): string return "" end,
+    decode = function(text: string): any return nil end,
+    raw = function(text: string): any return nil end,
+    null = (nil :: any),
 }
 
 -- Talk tables made, read and written.

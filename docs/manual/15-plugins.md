@@ -3,7 +3,7 @@ type: Manual Page
 title: Plugins
 description: Plugins for the people who use them - what a plugin can and cannot do, installing, enabling and removing, a project's own plugins (asked about when the project is opened), a plugin's settings, commands, exporters and importers, wizards, panels, checks and the fixes beside their findings, what plugins do by themselves (before a save, on a paste, on what a wizard makes), the console, the command line and when something goes wrong.
 tags: [manual, plugins]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-21T23:55:14Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 ---
 
 # Plugins
@@ -14,7 +14,7 @@ doesn't have: **commands** (a batch edit, a report, a generator) and
 plugin is a folder with a few text files; anyone can write one
 ([Writing plugins](16-writing-plugins.md)).
 
-**Plugins are experimental.** The plugin API (version 0.9) may change in a
+**Plugins are experimental.** The plugin API (version 0.10) may change in a
 later release as the people who write plugins try it. A plugin written for
 an older version of the API runs (each version only adds to the one
 before); one written for a version this Moonglow doesn't have is not run:
@@ -57,10 +57,29 @@ A plugin's code runs in a sandbox. It can:
   it was (its files edited by hand, even under the same version, ask
   again), the Plugins tab says how much, and **Forget** there makes
   it ask again. Disabling, removing or installing the plugin anew
-  forgets it too.
+  forgets it too;
+- send to and receive from the hosts **its manifest names**, **if you
+  allow it** (since plugin API 0.10): the Plugins tab lists them
+  ("Talks to: …") before you ever enable it, and the plugin asks before
+  its first request, once for all of them: "*Plugin* wants to send and
+  receive data with *hosts*. It can send what it reads of your module
+  there." Only over HTTPS, only from a command or a wizard you run
+  (never from a check, a panel's view or what it does by itself), and
+  only those hosts. What you allowed is kept as a folder's leave is
+  (for the plugin's code as it is), the Plugins tab says which hosts,
+  and **Forget** takes it back;
+- sign you in to a service its manifest names (since plugin API 0.10):
+  Moonglow, not the plugin, shows the code to enter and the page to enter
+  it at (**Open Browser**, **Copy Code**), and keeps the sign-in in your
+  system's keychain (Windows' Credential Manager, the macOS Keychain, the
+  Secret Service of GNOME Keyring or KWallet on Linux). The plugin never
+  sees the tokens: Moonglow adds them to its requests. Where there is no
+  keychain, the sign-in lasts until Moonglow is closed. **Sign Out** on
+  the Plugins tab, Forget, disabling and removing the plugin sign you out
+  (the service is told, and the keychain's entry deleted).
 
-It cannot open files of its own choosing, write any other file, use the
-network, start other programs, or reach anything of Moonglow's beyond
+It cannot open files of its own choosing, write any other file, reach
+any other host, start other programs, or reach anything of Moonglow's beyond
 the above: the language it is written in is given no means to. It has a limit on memory (256 MB of its own, and 512 MB of what Moonglow holds for it), and
 **Cancel** stops it.
 
@@ -443,6 +462,7 @@ mg plugin import mymodule.mod plugins/creature-sheet creatures-csv creatures.csv
 mg plugin wizard mymodule.mod plugins/store-wizard new-store --answers store.json --answer kind=Smith
 mg plugin install tag-conventions-1.0.0.zip plugins
 mg plugin remove example.tag-conventions plugins
+mg plugin run mymodule.mod plugins/area-share send --select tavern.are --allow-network areas.example.org --allow-network auth.example.org
 ```
 
 `mg` has no list of enabled plugins: it runs the plugin you name, and
@@ -473,6 +493,14 @@ run with `mg plugin export` and `mg plugin import`, and its wizards with
 `mg plugin wizard`, each page answered from `--answers` (a JSON file of
 the fields' values by id) and `--answer`, the rest by their defaults
 (since plugin API 0.6). A panel is the window's alone.
+
+A plugin reaches the network from `mg` only with `--allow-network HOST`,
+once for each host it may reach (its manifest's hosts and the issuers it
+signs in at; a build pipeline never calls out by accident). Signing in
+prints the code and the page to enter it at, and waits.
+`--allow-network-insecure` lets it reach plain `http://` on this computer
+(`localhost`, `127.0.0.1`) too, for tests against a server of your
+own.
 
 ## When something goes wrong
 

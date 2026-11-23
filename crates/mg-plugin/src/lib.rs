@@ -2,7 +2,8 @@
 //! add commands and checks to Moonglow (`docs/plugin-proposal.md`).
 //!
 //! A plugin never changes a module itself. Its code runs in a sandbox (no
-//! files, no network, no other programs) on a snapshot of the module, and
+//! files or other programs, and no network but the hosts its manifest
+//! declares, once the user allows it) on a snapshot of the module, and
 //! what it hands back is data: the edits it made, for the host to apply as
 //! one undoable command, or a check's findings. The host is the window or
 //! `mg`; both use this crate the same way.
@@ -18,13 +19,16 @@
 //!   a plugin keeps.
 
 mod files;
+mod json;
 mod kept;
 mod kinds;
 mod manifest;
+pub mod net;
 mod package;
 pub mod project;
 mod runtime;
 pub mod settings;
+pub mod signin;
 mod tables;
 mod terrain;
 mod testing;
@@ -36,8 +40,8 @@ use std::sync::Arc;
 
 pub use manifest::{
     API, APIS, CheckDecl, CommandDecl, EventDecl, EventKind, ExporterDecl, ImporterDecl, Manifest,
-    PanelDecl, RESOURCE_TARGETS, Scope, SettingDecl, SettingKind, SettingValue, Target, WizardDecl,
-    is_color, path_title,
+    PanelDecl, RESOURCE_TARGETS, Scope, SettingDecl, SettingKind, SettingValue, SigninDecl, Target,
+    WizardDecl, is_color, path_title,
 };
 use mg_core::{ResRef, ResType};
 pub use mg_edit::fix::{Fix, Found};
@@ -47,12 +51,14 @@ use mg_module::doctor::Finding;
 use mg_resman::ResKey;
 use mg_rules::GameData;
 use mg_rules::ObjectKind;
+pub use net::Network;
 pub use package::{
     Existing, MARKER, MAX_ALL, MAX_ARCHIVE, MAX_BYTES, MAX_FILES, MAX_PLUGINS, Package,
     from_archive, pack, remove,
 };
 pub use runtime::EVENT_NAMES;
 pub use settings::{SettingWrite, Settings};
+pub use signin::{SignInCode, SignIns};
 pub use testing::{GAME_FOLDER, GameFor, TestResult, run_tests, test_faults, test_files};
 use thiserror::Error;
 
@@ -326,6 +332,14 @@ pub enum Question {
     Folder { title: String },
     /// A page of a wizard (API 0.6), answered by [`Answer::Page`].
     Page(Page),
+    /// Leave to send to and receive from these hosts (API 0.10): the
+    /// plugin's name, and its hosts not allowed yet. Yes or no; a host
+    /// that keeps the answer does not ask again.
+    Network { plugin: String, hosts: Vec<String> },
+    /// A sign-in's code to enter at the issuer (API 0.10), shown until the
+    /// issuer answers ([`SignInCode::waiting`] is done: then answered
+    /// with yes) or the user cancels (`None`).
+    SignIn(SignInCode),
 }
 
 /// A page of a plugin's wizard, as the window shows it: its fields (their
@@ -402,6 +416,12 @@ pub trait Host {
     /// a plugin's test with no game says that the list is only of the
     /// module and the test's game folder (or that there is none).
     fn game_listed(&self) {}
+
+    /// The network a command's or a wizard's job may reach (API 0.10);
+    /// none: no request is sent.
+    fn network(&self) -> Option<Network> {
+        None
+    }
 }
 
 /// What a job reads.

@@ -1,14 +1,14 @@
 ---
 type: Manual Page
 title: Plugin API reference
-description: Reference of the plugin API - mg, findings and their fixes (ctx.fix), exporters, importers, wizards and panels (their fields), ctx.selection, ctx.open and ctx.values, ctx.event (the events, a resource's own around a save, objects placed or pasted, resources made, and what a handler may edit), ctx.module, ctx.game, ctx.edit, ctx.hak, ctx.terrain, logging, progress and UI (files and folders the user chooses), pictures, ctx.plugin, ctx.settings, Luau, limits and what the API doesn't have yet.
+description: Reference of the plugin API - mg, findings and their fixes (ctx.fix), exporters, importers, wizards and panels (their fields), ctx.selection, ctx.open and ctx.values, ctx.event (the events, a resource's own around a save, objects placed or pasted, resources made, and what a handler may edit), ctx.module, ctx.game, ctx.edit, ctx.hak, ctx.terrain, ctx.net and ctx.signin (the network and signing in), mg.json, logging, progress and UI (files and folders the user chooses), pictures, ctx.plugin, ctx.settings, Luau, limits and what the API doesn't have yet.
 tags: [manual, plugins, api]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-21T23:55:14Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 ---
 
 # Plugin API reference
 
-Everything a plugin's code can use, for plugin API 0.9. The API is
+Everything a plugin's code can use, for plugin API 0.10. The API is
 experimental: a later release may change it, and each change is listed
 in the API's [change list](https://github.com/jadzziaa/moonglow-toolset/tree/develop/docs/plugins).
 How plugins work and how to write one is in
@@ -29,7 +29,7 @@ nothing, and a check is reported as failed.
 
 | | |
 | --- | --- |
-| `mg.api` | The plugin API of the Moonglow running, as text: `"0.9"`. |
+| `mg.api` | The plugin API of the Moonglow running, as text: `"0.10"`. |
 | `mg.command(id, handler)` | Registers the function for the command the manifest declares as `id`. `handler(ctx)` makes its edits with `ctx.edit`. It may return what Undo calls the change, as `{ label = "…" }` or the text alone; else that is the command's title. |
 | `mg.check(id, handler)` | Registers the function for the check the manifest declares as `id`. `handler(ctx)` returns a list of findings (below), or nothing for none. A check that edits fails. |
 | `mg.on(id, handler)` | Registers the function for the event the manifest declares as `id` (`[event]`, its `on` one of the events of [`ctx.event`](#ctxevent)). `handler(ctx)` is called when it happens, as a command's is, with what happened as `ctx.event`: `ctx.event.name`, and what the event is of. It may return what Undo calls its change. |
@@ -43,6 +43,7 @@ nothing, and a check is reported as failed.
 | `mg.path(struct)` | Where a struct read with `gff` is, as a path for `ctx.edit`: `""` for the root, `"/ClassList[0]"`. Nil for a table that is no such struct. |
 | `mg.struct_id(struct)` | A struct's id (since Moonglow 2.2.0): of one read with `gff`, kept beside its table as its path is, never among its fields (an equipped item's is its slot, `Equip_ItemList`); of one read with `raw`, its `__struct_id`. Nil for a table that is neither. |
 | `mg.vars` | The variables the module's project describes (its `variables.toml`): `describe(name)` and `described()` (below; since Moonglow 2.13.0). |
+| `mg.json` | JSON, losslessly: `encode(value, options?)`, `decode(text)`, `raw(text)` and `null` (below; since API 0.10). |
 
 An id is registered once; registering one the manifest doesn't declare,
 or not registering one it does, is a fault `mg plugin check` reports.
@@ -56,6 +57,21 @@ A **finding** is a table:
 | `at` | Where in the resource: a field, a row. |
 | `severity` | `"warning"` or `"error"`; else the check's, from the manifest. |
 | `fix` | Its fix, made with `ctx.fix` (below; since API 0.4): offered beside the finding in the log, where Verify Module writes it (and in Problems), made only when the user asks. |
+
+### `mg.json`
+
+JSON text and the plugin's values (since API 0.10), for what a plugin
+sends and gets over the network (`ctx.net`) and for a GFF's JSON
+(`ctx.module:json`, `ctx.edit:write_json`). Nothing is lost on the way
+there and back: a whole number past 2⁵³ (a GFF's `dword64` and `int64`
+reach 2⁶⁴) is not rounded, an empty list stays a list, a null stays.
+
+| | |
+| --- | --- |
+| `mg.json.decode(text)` | JSON text as values: an object a table by its keys, an array a table from 1 (marked, so that one encodes as an array again, empty or not), text, numbers, true and false, and null as `mg.json.null`. A whole number past 2⁵³ is a raw value (below), whose `tostring` is its digits. Text that is no JSON is an error. |
+| `mg.json.encode(value, options?)` | A value as JSON text: a table with keys 1 to n (and no others) or one `decode` made of an array as an array, another table as an object (its keys sorted; a key is text or a whole number), `mg.json.null` and nil as null, a raw value as its text. `options.pretty`: laid out on lines. NaN and infinity are errors, and so is a table that holds itself. |
+| `mg.json.raw(text)` | JSON text kept as it is, to put into a value to encode: a GFF's JSON in a request's body (`{ are = mg.json.raw(ctx.module:json("tavern.are")) }`). Text that is no JSON is an error. |
+| `mg.json.null` | JSON's null, which a table can hold (nil it can't). |
 
 ### `mg.vars`
 
@@ -407,6 +423,7 @@ and without anything that changes in the window while it runs.
 | `ctx.module:raw(name, path?)` | A GFF resource with every field's type, as `mg gff` writes it: fields as `{ type = "…", value = … }`, structs with `__struct_id`, the root with `__data_type`. With `path`, the struct there alone. |
 | `ctx.module:text(name)` | A resource as text (a script, a 2DA), converted from the module's codepage. |
 | `ctx.module:bytes(name)` | A resource as it is, a string of bytes. |
+| `ctx.module:json(name)` | A GFF resource as JSON text, as `mg gff` writes it (neverwinter.nim's `nwn_gff` JSON, which nasher keeps): every field with its type, 64-bit numbers whole. Read it with `mg.json.decode`, or send it as it is (`mg.json.raw`). Since API 0.10. |
 | `ctx.module:new_name(name, kind)` | A name (`name.ext`) for a new resource of a kind (`"utc"`, `"dlg"`, `"are"`…), made from `name` (`"Gate Guard"`) as the window makes one: with the builder's code where the project's pattern puts it (Edit › Builder Code, `[resrefs] pattern`), the first the module hasn't (`ab_gateguard.utc`, `ab_gateguard001.utc`; an area's as the Area Wizard numbers them). Write it with `ctx.edit`. Since Moonglow 2.13.0. |
 
 ### Plain values
@@ -440,6 +457,7 @@ the module's haks over them and its custom talk table.
 | `ctx.game:raw(name, path?)` | As `ctx.module:raw`. |
 | `ctx.game:text(name, layer?)` | As `ctx.module:text` (`nwscript.nss`, say); a `layer`'s copy, as for `gff`. |
 | `ctx.game:bytes(name, layer?)` | As `ctx.module:bytes`; a `layer`'s copy, as for `gff`. |
+| `ctx.game:json(name, layer?)` | As `ctx.module:json`; a `layer`'s copy, as for `gff` (since API 0.10). |
 | `ctx.game:table(name)` | A 2DA by its name without extension (`"classes"`), as a `twoda` (below). |
 | `ctx.game:string(strref)` | A talk-table string, from the custom talk table for a reference with the custom flag; nil if there is none. |
 
@@ -559,6 +577,7 @@ to the module as one undoable step.
 | `ctx.edit:write(name, text)` | Writes a resource as text (new, or in place of what was there), converted to the module's codepage. A new resource's name is one a file can have (no `/`, `\` or `:`), here and in the two below. |
 | `ctx.edit:write_bytes(name, bytes)` | Writes a resource as the bytes given. |
 | `ctx.edit:write_gff(name, document)` | Writes a GFF resource from its `raw` form (with `__data_type`). |
+| `ctx.edit:write_json(name, json)` | Writes a GFF resource from its JSON, as `ctx.module:json` gives it: the text, or a value `mg.json.decode` made of it (encoded again, losslessly). An untouched resource read and written back is the same bytes. Since API 0.10. |
 | `ctx.edit:delete(name)` | Removes a resource from the module. |
 
 ### Paths
@@ -635,6 +654,48 @@ Tiles are chosen at random among those that fit, as in the area editor:
 two runs paint the same ground with different tiles. New tiles get
 lights from the area's lighting scheme, and bring and take the doors
 their tiles have.
+
+## `ctx.net`
+
+Requests to the hosts the manifest declares (`[network]`; since API
+0.10), over HTTPS. Before the plugin's first request Moonglow asks the
+user, once for all its hosts (those of `[network]` and its sign-ins'
+issuers): "*Plugin* wants to send and receive data with *hosts*". The
+answer is kept, for the plugin's code as it is (other code asks again),
+until Forget on the Plugins tab, or the plugin is disabled or removed.
+With `mg plugin run` (and `import`, `wizard`), only the hosts
+`--allow-network HOST` names are reached, each named.
+
+Only a command's job and a wizard's reach the network (a command run
+from a panel too); a check, an event's handler, a panel's view, an
+exporter and an importer don't: `ctx.net` and `ctx.signin` are errors
+there.
+
+| | |
+| --- | --- |
+| `ctx.net:request(request)` | Sends a request and waits for its answer, which it returns. `request` is a table: `url` (needed; `https://` and a declared host), `method` (`"GET"`, the default, `"POST"`, `"PUT"`, `"PATCH"`, `"DELETE"` or `"HEAD"`), `headers` (a table of names and values; not `Host`, `Content-Length` and the like, which Moonglow sets), `body` (a string), or `json` (a value, sent as `mg.json.encode` writes it, as `application/json` unless the headers say another), and `signin` (the id of one of the manifest's sign-ins: its access token is sent as the `Authorization` header, which the plugin never sees). Returns `{ status, ok, headers, body }`: the status, whether it is 2xx, the headers by their names in lower case, and the body as a string. An error status is an answer like any other; a redirect is returned, not followed. No answer at all (no connection, past the time limit) is an error. |
+
+A request with `signin` whose token is refused (401) is sent once more
+with a new token, from the refresh token; one whose sign-in has ended is
+an error that says to sign in again.
+
+## `ctx.signin`
+
+Signing the user in to a service (since API 0.10): an OAuth 2.0 device
+authorization (RFC 8628) against the OpenID issuer the manifest
+declares (`[signin]`), run by Moonglow. Moonglow shows the code to enter
+and the page to enter it at (Open Browser, Copy Code), and waits while
+the user approves it there; the refresh token is kept in the system's
+keychain (Windows' Credential Manager, the macOS Keychain, the Secret
+Service on Linux), or, where there is none, for this run of Moonglow
+alone. The plugin's code never sees a token. The issuer is reached as
+`ctx.net`'s hosts are, with the user's leave.
+
+| | |
+| --- | --- |
+| `ctx.signin:start(id)` | Signs in to the sign-in `id`: shows the code, and returns once the issuer answers: `{ signed_in, name, kept }` (`name` the ID token's `preferred_username`; `kept` whether the keychain keeps it). The user closing the question is `signed_in = false`; the issuer refusing it, or the code running out, is an error. |
+| `ctx.signin:status(id)` | Whether the user is signed in, as `start` returns it, without the network. |
+| `ctx.signin:stop(id)` | Signs out: the refresh token revoked at the issuer (if it has a `revocation_endpoint`), and deleted here. The Plugins tab's Sign Out, and Forget, do the same. |
 
 ## `ctx.log`, `ctx.progress`, `ctx.ui`
 
@@ -757,9 +818,11 @@ The rest is [Luau's library](https://luau.org/library): `string`,
 `table`, `math`, `utf8`, `bit32`, `buffer`, `vector`, `coroutine`,
 `os.clock`, `os.time`, `os.date`, `os.difftime`, and the globals
 (`pairs`, `pcall`, `tostring`, `tonumber`, `error`, `assert`, `type`…).
-There is no `io`, no `package`, and nothing else of `os`: files are
-reached only through what the user chooses (`ctx.ui:open_file`,
-`ctx.ui:open_folder`) and allows (`ctx.hak`, `folder:write`).
+There is no `io`, no `package`, no socket, and nothing else of `os`:
+files are reached only through what the user chooses
+(`ctx.ui:open_file`, `ctx.ui:open_folder`) and allows (`ctx.hak`,
+`folder:write`), and the network only through `ctx.net`, to the hosts
+the manifest declares, once the user allows them.
 
 ## Limits
 
@@ -776,7 +839,11 @@ reached only through what the user chooses (`ctx.ui:open_file`,
   they are stopped ([`ctx.event`](#ctxevent)).
 - Where a plugin is only checked (`mg plugin check`, `mg plugin pack`,
   an archive about to be installed), its code has 5 seconds to load.
-- A job is stopped when the user cancels; no `pcall` catches that.
+- A job is stopped when the user cancels; no `pcall` catches that. A
+  request under way is let go of then.
+- A job makes at most 200 requests (`ctx.net`, with what signing in
+  sends); each has 30 seconds, and its body and its answer's at most
+  64 MB.
 - Nothing is kept between jobs but the plugin's settings
   (`ctx.settings:set`). A plugin runs when its command is chosen, when
   its check runs with Verify Module, and by itself only on the events its

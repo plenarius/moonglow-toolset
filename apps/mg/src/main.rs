@@ -1609,6 +1609,14 @@ enum PluginCmd {
         /// (else: no).
         #[arg(long)]
         yes: bool,
+        /// A host the plugin may reach (one its manifest declares), as
+        /// often as needed: without, it reaches none.
+        #[arg(long, value_name = "HOST")]
+        allow_network: Vec<String>,
+        /// Plain http:// to this computer (localhost, 127.0.0.1) too, for
+        /// any plugin: for tests against a server of your own.
+        #[arg(long)]
+        allow_network_insecure: bool,
         /// A setting of the plugin for this run, `ID=VALUE` (repeatable),
         /// over what the project's files hold and the defaults. What the
         /// plugin sets itself is kept in the project's files (but for a
@@ -2899,10 +2907,13 @@ fn run(cli: &Cli) -> Result<Output> {
                 file,
                 hak_dir,
                 yes,
+                allow_network,
+                allow_network_insecure,
                 setting,
                 dry_run,
             } => {
-                let host = plugins::CliHost::new(answer, answers.as_deref(), file, *yes)?;
+                let host = plugins::CliHost::new(answer, answers.as_deref(), file, *yes)?
+                    .with_network(allow_network, *allow_network_insecure);
                 // (A plugin that reads no game data needs no game.)
                 let gi = install(cli).ok();
                 let hak_dir = hak_dir.as_deref();

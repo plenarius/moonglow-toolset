@@ -63,6 +63,10 @@ pub(crate) struct CliHost {
     used: RefCell<Vec<String>>,
     /// What went wrong answering (reported after the run).
     faults: RefCell<Vec<String>>,
+    /// The hosts `--allow-network` names, and the network they are
+    /// reached over (none: none named).
+    net_hosts: Vec<String>,
+    network: Option<mg_plugin::Network>,
 }
 
 impl Host for CliHost {
@@ -100,7 +104,35 @@ impl Host for CliHost {
                 }
                 given.map(Answer::Path)
             }
+            // Only what --allow-network names, each host.
+            Question::Network { plugin, hosts } => {
+                let missing: Vec<&String> =
+                    hosts.iter().filter(|h| !self.net_hosts.contains(h)).collect();
+                if missing.is_empty() {
+                    self.log(Level::Info, &format!("{plugin} may reach {}", hosts.join(", ")));
+                    return Some(Answer::Yes);
+                }
+                let names: Vec<&str> = missing.iter().map(|h| h.as_str()).collect();
+                self.log(
+                    Level::Info,
+                    &format!("{plugin} may not reach {} (--allow-network HOST)", names.join(", ")),
+                );
+                Some(Answer::No)
+            }
+            // The code on the terminal, until the issuer answers.
+            Question::SignIn(code) => {
+                let at = code.uri_complete.as_deref().unwrap_or(&code.uri);
+                eprintln!("To sign in to {}, go to {at} and enter {}", code.service, code.code);
+                while !code.waiting.done() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Some(Answer::Yes)
+            }
         }
+    }
+
+    fn network(&self) -> Option<mg_plugin::Network> {
+        self.network.clone()
     }
 }
 
@@ -208,6 +240,21 @@ impl CliHost {
         }
         let files = RefCell::new(files.iter().cloned().collect());
         Ok(CliHost { answers: all, files, yes, ..Default::default() })
+    }
+
+    /// The network for the hosts `--allow-network` names (and with
+    /// `local_http`, plain HTTP to this computer): none named, none.
+    pub(crate) fn with_network(mut self, hosts: &[String], local_http: bool) -> CliHost {
+        self.net_hosts = hosts.iter().map(|h| h.trim().to_ascii_lowercase()).collect();
+        if !self.net_hosts.is_empty() || local_http {
+            let transport = std::sync::Arc::new(mg_plugin::net::Http::new(local_http));
+            let keychain = Box::new(mg_plugin::signin::OsKeychain);
+            let sign_ins = std::sync::Arc::new(mg_plugin::SignIns::new(keychain));
+            let mut net = mg_plugin::Network::new(transport, sign_ins);
+            net.local_http = local_http;
+            self.network = Some(net);
+        }
+        self
     }
 
     /// What was wrong with the answers given, if anything: nothing is
@@ -1250,6 +1297,14 @@ pub(crate) struct JobArgs {
     /// (else: no).
     #[arg(long)]
     pub yes: bool,
+    /// A host the plugin may reach (one its manifest declares), as often
+    /// as needed: without, it reaches none.
+    #[arg(long, value_name = "HOST")]
+    pub allow_network: Vec<String>,
+    /// Plain http:// to this computer (localhost, 127.0.0.1) too, for any
+    /// plugin: for tests against a server of your own.
+    #[arg(long)]
+    pub allow_network_insecure: bool,
     /// A setting of the plugin for this run, `ID=VALUE` (repeatable).
     #[arg(long, value_name = "ID=VALUE")]
     pub setting: Vec<String>,
@@ -1280,7 +1335,8 @@ pub(crate) fn selection_of(
 
 impl JobArgs {
     pub(crate) fn host(&self) -> Result<CliHost> {
-        CliHost::new(&self.answer, self.answers.as_deref(), &self.file, self.yes)
+        let host = CliHost::new(&self.answer, self.answers.as_deref(), &self.file, self.yes)?;
+        Ok(host.with_network(&self.allow_network, self.allow_network_insecure))
     }
 
     pub(crate) fn selection(&self) -> Result<mg_plugin::Selection> {

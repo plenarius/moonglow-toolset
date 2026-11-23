@@ -741,6 +741,9 @@ impl Host for TestHost {
             Question::File { .. } | Question::Folder { .. } => {
                 self.files.borrow_mut().pop_front().map(Answer::Path)
             }
+            // (A test reaches no network: it has none.)
+            Question::Network { .. } => Some(Answer::No),
+            Question::SignIn(_) => None,
         }
     }
 }

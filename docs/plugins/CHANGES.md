@@ -3,7 +3,7 @@ type: Changelog
 title: Plugin API changes
 description: What changed in each version of the plugin API, and what a plugin written for the version before has to change.
 tags: [plugins, api, changelog]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-09T00:38:51Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 ---
 
 # Plugin API changes
@@ -13,6 +13,48 @@ Moonglow runs a plugin only if it has that API; while the API is at 0.x,
 each version may change what the one before had. This file lists each
 version's changes and what a plugin written for the version before has
 to change.
+
+## 0.10
+
+In Moonglow's Layonara build (the fork's `layonara` branch), not in
+upstream Moonglow. Only an addition: a plugin written for 0.9 or before
+runs as it is, and has nothing to change. A plugin that uses what is new
+says `api = "0.10"`, so that a Moonglow without it refuses it with the
+reason.
+
+- **The network.** A manifest may declare the hosts its plugin talks
+  to, `[network] hosts = "api.example.org"` (exact names, no wildcards,
+  IP addresses or ports). `ctx.net:request{ url, method, headers, body,
+  json, signin }` sends a request to one of them over HTTPS and returns
+  `{ status, ok, headers, body }`; a redirect is returned, not followed.
+  The user is asked once, before the first request, for all the
+  plugin's hosts; the answer is kept for the plugin's code as it is,
+  shown on the Plugins tab (which lists the hosts before the plugin is
+  ever enabled) and taken back by Forget, disabling or removing it. Only
+  a command's job and a wizard's reach the network (a check, an event's
+  handler, a panel's view, an exporter and an importer don't). Limits:
+  30 seconds a request, 64 MB a body, 200 requests a job; Cancel lets go
+  of a request under way. `mg plugin run` (and `import`, `wizard`)
+  reaches only the hosts `--allow-network HOST` names, and
+  `--allow-network-insecure` plain HTTP to this computer, for tests.
+- **Signing in.** `[signin] id, issuer, client, scopes` declares an
+  OpenID issuer with the OAuth 2.0 device flow (RFC 8628), a public
+  client. `ctx.signin:start(id)` signs the user in: Moonglow shows the
+  code and the page to enter it at (Open Browser, Copy Code) and polls
+  the issuer; `status(id)` and `stop(id)` (which revokes the refresh
+  token) go with it. The refresh token is kept in the system's keychain
+  (Credential Manager, Keychain, Secret Service; where there is none,
+  for the session), access tokens in memory; `ctx.net:request{ signin =
+  id }` sends the access token as the Authorization header, refreshed
+  when it runs out or is refused, and the plugin never sees either.
+  The Plugins tab's Sign Out does what `stop` does.
+- **JSON.** `mg.json.encode`, `decode`, `raw` and `null`, lossless: a
+  whole number past 2⁵³ (a GFF's 64-bit fields) decodes as a raw value
+  that encodes as its digits again, empty arrays stay arrays, null
+  stays. `ctx.module:json(name)` (and `ctx.game:json`) gives a GFF as
+  `mg gff` writes its JSON, `ctx.edit:write_json(name, json)` writes
+  one from it (text, or what `decode` made of it). The example
+  `area-share` signs in, sends an area and fetches it back.
 
 ## 0.9
 

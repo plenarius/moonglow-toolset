@@ -215,6 +215,8 @@ pub(crate) struct Shared {
     /// have ended.
     budget: Option<std::time::Duration>,
     deadline: std::cell::Cell<Option<std::time::Instant>>,
+    /// The plugin's hosts and sign-ins, and what the job sent (API 0.10).
+    pub(crate) net: crate::net::NetJob,
 }
 
 pub(crate) fn fail<T>(message: impl std::fmt::Display) -> mlua::Result<T> {
@@ -667,6 +669,21 @@ fn reader(lua: &Lua, sh: &Rc<Shared>, game: bool) -> mlua::Result<Table> {
     )?;
     let s = sh.clone();
     t.set(
+        "json",
+        lua.create_function(move |_, (_, name, layer): (This, String, Option<String>)| {
+            let key = key_of(&name)?;
+            let gff = match layer_of(game, layer)? {
+                Some(layer) => {
+                    let bytes = s.layer_bytes(&key, &layer)?;
+                    Gff::read(&bytes).or_else(|e| fail(format!("{key}: {e}")))?
+                }
+                None => s.gff(&key, game)?,
+            };
+            crate::json::gff_text(&gff, &key.to_string())
+        })?,
+    )?;
+    let s = sh.clone();
+    t.set(
         "text",
         lua.create_function(move |lua, (_, name, layer): (This, String, Option<String>)| {
             let key = key_of(&name)?;
@@ -894,6 +911,16 @@ fn editor(lua: &Lua, sh: &Rc<Shared>) -> mlua::Result<Table> {
             let json = json_of(lua, doc)?;
             let gff =
                 mg_gff::from_json(&json, codepage()).or_else(|e| fail(format!("{key}{e}")))?;
+            let data = gff.to_bytes().or_else(|e| fail(format!("{key}: {e}")))?;
+            s.apply(Edit::SetResource { key, data: Some(data) })
+        })?,
+    )?;
+    let s = sh.clone();
+    t.set(
+        "write_json",
+        lua.create_function(move |_, (_, name, doc): (This, String, LuaValue)| {
+            let key = key_to_write(&s, &name)?;
+            let gff = crate::json::gff_of(&doc, &key.to_string())?;
             let data = gff.to_bytes().or_else(|e| fail(format!("{key}: {e}")))?;
             s.apply(Edit::SetResource { key, data: Some(data) })
         })?,
@@ -1322,6 +1349,8 @@ pub(crate) fn context(lua: &Lua, sh: &Rc<Shared>, about: [&str; 3]) -> mlua::Res
     ctx.set("edit", editor(lua, sh)?)?;
     ctx.set("hak", crate::files::hak(lua, sh)?)?;
     ctx.set("terrain", crate::terrain::terrain(lua, sh)?)?;
+    ctx.set("net", crate::net::net_api(lua, sh)?)?;
+    ctx.set("signin", crate::signin::signin_api(lua, sh)?)?;
     let plugin = lua.create_table()?;
     plugin.set("id", about[0])?;
     plugin.set("name", about[1])?;
@@ -1506,6 +1535,7 @@ fn api(lua: &Lua, sh: &Rc<Shared>) -> mlua::Result<Table> {
     mg.set("twoda", crate::tables::twoda_api(lua, &sh.budget_held, sh.game.clone())?)?;
     mg.set("tlk", crate::tables::tlk_api(lua, &sh.budget_held)?)?;
     mg.set("vars", vars_api(lua, sh)?)?;
+    mg.set("json", crate::json::json_api(lua)?)?;
     // Where a struct read with `gff` is: its path, for the edits.
     mg.set(
         "path",
@@ -1753,6 +1783,10 @@ pub(crate) fn shared(plugin: &Plugin, input: Input, host: &Rc<dyn Host>) -> Rc<S
         settings.values.retain(|k, _| plugin.setting(k).is_some());
     }
     *sh.decls.borrow_mut() = plugin.manifest.settings.clone();
+    let mut sh = sh;
+    if let Some(s) = Rc::get_mut(&mut sh) {
+        s.net = crate::net::NetJob::of(plugin);
+    }
     sh
 }
 
@@ -1793,6 +1827,7 @@ fn shared_holding(
         settings: RefCell::new(input.settings.unwrap_or_default()),
         settings_set: RefCell::default(),
         no_set: std::cell::Cell::new(None),
+        net: crate::net::NetJob::default(),
     })
 }
 
@@ -1813,6 +1848,7 @@ pub(crate) fn run_command(
     host: Rc<dyn Host>,
 ) -> Result<Outcome, PluginError> {
     let sh = shared(plugin, input, &host);
+    sh.net.open.set(true);
     let run = || -> mlua::Result<String> {
         let lua = start(Some(&plugin.manifest.entry), &sh)?;
         let f = handler(&lua, "mg.commands", "command", &decl.id)?;
@@ -2535,6 +2571,7 @@ pub(crate) fn api_names() -> Vec<String> {
         out.extend(crate::kinds::NAMES.map(String::from));
         out.extend(crate::tables::NAMES.map(String::from));
         out.extend(crate::terrain::NAMES.map(String::from));
+        out.extend(crate::json::NAMES.map(String::from));
         out.sort();
         Ok(out)
     };

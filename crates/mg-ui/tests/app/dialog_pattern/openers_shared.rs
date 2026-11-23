@@ -330,6 +330,25 @@ fn folder() -> Question {
     Question::Folder { title: "The folder of tables".into() }
 }
 
+fn network() -> Question {
+    Question::Network {
+        plugin: "Area share".into(),
+        hosts: vec!["areas.example.org".into(), "auth.example.org".into()],
+    }
+}
+
+/// A sign-in's code, the issuer never answering (the test does).
+fn sign_in() -> Question {
+    Question::SignIn(mg_plugin::SignInCode {
+        service: "auth.example.org".into(),
+        plugin: "Area share".into(),
+        code: "WXYZ-1234".into(),
+        uri: "https://auth.example.org/device".into(),
+        uri_complete: None,
+        waiting: Default::default(),
+    })
+}
+
 // -- the talk table's question ---------------------------------------------
 
 /// The sample module named "Sample", its custom talk table `mg_typed` with
@@ -546,6 +565,14 @@ pub(crate) fn openers() -> Vec<Opener> {
             .enter_does("answered with the folder chosen, and closed", |h| {
                 matches!(answered(), Some(Some(Answer::Path(_)))) && !is_shown(h, QUESTION)
             }),
+        Opener::new("jobs.rs:window#1 Network", QUESTION, module, |h| ask(h, network()))
+            .job()
+            .enter_does("answered yes, and closed", |h| {
+                answered() == Some(Some(Answer::Yes)) && !is_shown(h, QUESTION)
+            }),
+        Opener::new("jobs.rs:window#1 SignIn", QUESTION, module, |h| ask(h, sign_in()))
+            .job()
+            .enter_does("opened the page, still waiting", |h| is_shown(h, QUESTION)),
         Opener::new(
             "talk_typed.rs:window#1",
             "Text in the Talk Table",
