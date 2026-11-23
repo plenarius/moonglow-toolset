@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "mg"
-version = "5.0.0"
+version = "5.0.0-layonara.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2985,6 +2985,7 @@ dependencies = [
  "mg-testkit",
  "serde_json",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3253,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "moonglow"
-version = "5.0.0"
+version = "5.0.0-layonara.1"
 dependencies = [
  "eframe",
  "egui",
