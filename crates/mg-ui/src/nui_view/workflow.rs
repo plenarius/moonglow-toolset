@@ -97,12 +97,16 @@ pub(super) fn new_bind_name<'a>(
 pub(super) fn create_bind(
     ui: &mut Ui,
     bindings: &mut std::collections::BTreeMap<String, Binding>,
+    button: bool,
+    asked: bool,
 ) -> Option<String> {
     let mut created = None;
     ui.push_id("create-bind", |ui| {
         let id = ui.make_persistent_id("create-bind-draft");
         let mut draft = ui.ctx().data_mut(|d| d.get_temp::<BindDraft>(id));
-        if ui.button("+ Create Bind").clicked() && draft.is_none() {
+        // (Its button, or the Bindings panel's header's plus: M4's U19.)
+        let pressed = button && ui.add(form::plus("Create Bind")).clicked();
+        if (pressed || asked) && draft.is_none() {
             draft = Some(BindDraft::new());
         }
         let mut finish = false;
@@ -111,7 +115,7 @@ pub(super) fn create_bind(
             let window = widgets::dialog(ui.ctx(), "New Bind", &mut open)
                 .collapsible(false)
                 .resizable(false);
-            window.show(ui.ctx(), |ui| {
+            let footed = window.show_foot(ui.ctx(), |ui| {
                 let name = widgets::field_label(ui, "Bind name");
                 let name_edit = ui
                     .add(mg_uikit::text_field(&mut draft.name).hint_text("e.g. is_open"))
@@ -133,26 +137,22 @@ pub(super) fn create_bind(
                 if let Some(error) = draft.error(bindings) {
                     ui.weak(error);
                 }
-                ui.horizontal(|ui| {
-                    let ok = draft.error(bindings).is_none();
-                    if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
-                        || (ok && widgets::enter(ui))
-                    {
-                        let name = draft.name.trim().to_owned();
-                        let value = if draft.rows {
-                            json!([draft.value.clone()])
-                        } else {
-                            draft.value.clone()
-                        };
-                        bindings.insert(name.clone(), Binding { value, ..Default::default() });
-                        created = Some(name);
-                        finish = true;
-                    }
-                    if widgets::cancel(ui) {
-                        finish = true;
-                    }
-                });
+                let ok = draft.error(bindings).is_none();
+                ((), widgets::Foot::new().main("Create", ok).cancel())
             });
+            if let Some(footed) = footed {
+                if footed.pressed.main() {
+                    let name = draft.name.trim().to_owned();
+                    let value =
+                        if draft.rows { json!([draft.value.clone()]) } else { draft.value.clone() };
+                    bindings.insert(name.clone(), Binding { value, ..Default::default() });
+                    created = Some(name);
+                    finish = true;
+                }
+                if footed.pressed.cancelled() {
+                    finish = true;
+                }
+            }
             finish |= !open;
         }
         ui.ctx().data_mut(|d| {
@@ -177,8 +177,8 @@ pub(super) fn ui(
     egui::ScrollArea::vertical().id_salt("nui-workflow").show(ui, |ui| {
         widgets::section_heading(ui, "Swap Layout Variants");
         ui.label(
-            "A Swap layout is added in Design; its variants are made and edited in Properties \
-             or Layers.",
+            "A Swap Layout is added in Design; its variants are made and edited in Properties \
+             or the Outliner.",
         );
         let (mut remove, mut rename) = (None, None);
         for name in s.variants.keys() {
@@ -195,8 +195,7 @@ pub(super) fn ui(
                     layouts::edit(state, Some(name.clone()));
                 }
                 // The handlers showing it, and its function's calls, follow.
-                mg_uikit::menu_button(ui, "Rename…", |ui| {
-                    mg_uikit::menu_rows(ui);
+                mg_uikit::form_menu_button(ui, "Rename…", |ui| {
                     let id = ui.make_persistent_id(("rename-variant", name));
                     let mut to: String =
                         ui.ctx().data_mut(|d| d.get_temp(id)).unwrap_or_else(|| name.clone());
@@ -301,7 +300,7 @@ pub(super) fn images(
             .and_then(|n| s.bindings.get(n))
             .is_some_and(|b| b.value.is_array());
         if row_array {
-            ui.weak("Choose individual row images in the list's Row data.");
+            ui.weak("Choose individual row images in the list's Row Data.");
         }
         if !node["image_region"].is_object() && ui.button("Add Crop Region").clicked() {
             let name = preview::string(&node[field], s, None);

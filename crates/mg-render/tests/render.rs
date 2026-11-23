@@ -1247,7 +1247,9 @@ fn a_solid_draw_leaves_the_picture_s_alpha() {
 fn depth_is_kept_for_drawing_after_the_scene() {
     let Some(gpu) = gpu() else { return };
     let format = wgpu::TextureFormat::Rgba8Unorm;
-    let (size, samples) = (64, 4);
+    // (The caller's own pipeline below draws into the targets with the
+    // samples the device gives them: one on OpenGL, `Gpu::samples`.)
+    let (size, samples) = (64, gpu.samples(4));
     let model = Arc::new(GpuModel::new(&gpu, Arc::new(quad())));
     let scene =
         Scene { instances: vec![Instance::new(model, Mat4::IDENTITY)], ..Default::default() };
@@ -1450,6 +1452,87 @@ fn a_line_shape_s_copies_draw_what_their_lines_would() {
     }
     // Drawn no more: nothing of it.
     assert!(shot(&base).data == bare.data);
+}
+
+/// The grid (`Scene::lines`) fades with the fog as the ground does, down
+/// to [`mg_render::GRID_LEAST_IN_FOG`] of itself past the fog's end (M5
+/// V3: its far lines stood bright out of the fog, as if hung in the sky);
+/// without fog it is drawn whole, and Sound Ranges' spheres (copies of a
+/// shape's lines) are drawn whole in the fog too.
+#[test]
+fn the_grid_fades_in_the_fog_down_to_its_least() {
+    let Some(gpu) = gpu() else { return };
+    let model = Arc::new(GpuModel::new(&gpu, Arc::new(quad())));
+    let ground = Instance::new(model, Mat4::from_scale(Vec3::new(300.0, 300.0, 1.0)));
+    let area = AreaLight { ambient: Vec3::splat(0.1), ..Default::default() };
+    let camera = Camera {
+        eye: Vec3::new(0.0, 0.0, 3.0),
+        target: Vec3::new(0.0, 40.0, 0.0),
+        fov_y: 0.8,
+        near: 0.1,
+        far: 1000.0,
+    };
+    let fog = mg_render::Fog { start: 10.0, end: 30.0, color: Vec3::new(0.2, 0.3, 0.6) };
+    // White lines across the view on the ground: before the fog (8 m),
+    // in it (20 m) and past its end (80 m).
+    let along = [8.0f32, 20.0, 80.0];
+    let across = |y: f32| [Vec3::new(-4.0, y, 0.0), Vec3::new(4.0, y, 0.0)];
+    let lines: Vec<mg_render::Line> = (along.iter())
+        .map(|&y| {
+            let [from, to] = across(y);
+            mg_render::Line { from, to, color: [1.0; 4] }
+        })
+        .collect();
+    let sphere = LineShape {
+        lines: Arc::new([[Vec3::new(-4.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0)]]),
+        copies: vec![LineCopy { offset: Vec3::new(0.0, 80.0, 0.0), scale: 1.0, color: [1.0; 4] }],
+    };
+    let (w, h) = (96, 256);
+    let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 1);
+    let clip = camera.projection(w as f32 / h as f32) * camera.view();
+    // How much of a white line at `p` is drawn over what is there without
+    // it (its opacity, the line covering whole pixels): the most found
+    // near where `p` falls, of the red channel (the fog's darkest).
+    let opacity = |with: &mg_image::Rgba, bare: &mg_image::Rgba, p: Vec3| {
+        let ndc = clip.project_point3(p);
+        let x = ((ndc.x + 1.0) / 2.0 * w as f32) as u32;
+        let y = ((1.0 - ndc.y) / 2.0 * h as f32) as i32;
+        (-2..=2)
+            .filter_map(|dy| {
+                let y = u32::try_from(y + dy).ok().filter(|y| *y < h)?;
+                let (a, b) = (f32::from(with.pixel(x, y)[0]), f32::from(bare.pixel(x, y)[0]));
+                (b < 235.0).then(|| (a - b) / (255.0 - b))
+            })
+            .fold(0.0f32, f32::max)
+    };
+    let least = mg_render::GRID_LEAST_IN_FOG;
+    for fogged in [true, false] {
+        let base = Scene {
+            instances: vec![ground.clone()],
+            area,
+            fog: fogged.then_some(fog),
+            ..Default::default()
+        };
+        let bare = r.render_image(&gpu, &NoAssets, &base, &camera, w, h);
+        let grid = Scene { lines: lines.clone(), ..base.clone() };
+        let with = r.render_image(&gpu, &NoAssets, &grid, &camera, w, h);
+        let name = if fogged { "grid-in-fog.png" } else { "grid-without-fog.png" };
+        save(&with, &mg_testkit::output_dir("render").join(name));
+        let seen: Vec<f32> = along.iter().map(|&y| opacity(&with, &bare, Vec3::Y * y)).collect();
+        eprintln!("fog {fogged}: {seen:?}");
+        if fogged {
+            assert!(seen[0] > 0.95, "before the fog, whole: {seen:?}");
+            assert!(seen[1] > least + 0.1 && seen[1] < 0.9, "in the fog, fading: {seen:?}");
+            assert!((seen[2] - least).abs() < 0.06, "past its end, its least: {seen:?}");
+        } else {
+            assert!(seen.iter().all(|&a| a > 0.95), "without fog, whole: {seen:?}");
+        }
+        // The spheres' line past the fog's end: whole.
+        let shapes = Scene { line_shapes: vec![sphere.clone()], ..base.clone() };
+        let with = r.render_image(&gpu, &NoAssets, &shapes, &camera, w, h);
+        let far = opacity(&with, &bare, Vec3::Y * 80.0);
+        assert!(far > 0.95, "a sphere's line, whole (fog {fogged}): {far}");
+    }
 }
 
 #[test]
@@ -5137,6 +5220,21 @@ void main ()
             };
             let wrong = pool.iter().filter(far).count();
             assert!(wrong <= 4, "{name}, {samples}x: {wrong} of {} water pixels", pool.len());
+            // The same into BGRA targets (a window's,
+            // `present::targets_format`), their copies BGRA too.
+            let bgra = wgpu::TextureFormat::Bgra8Unorm;
+            let mut r = Renderer::new(&gpu, bgra, samples);
+            r.game_shaders = true;
+            r.game_water = true;
+            let targets = Targets::new(&gpu, bgra, samples, 64, 64);
+            r.render_targets(&gpu, &assets, &scene(true), &camera, &targets);
+            assert_eq!(r.drawn.game, 3, "{name}, BGRA: {:?}", r.drawn);
+            let mut data = gpu.read_rgba(&targets.color).data;
+            data.as_chunks_mut::<4>().0.iter_mut().for_each(|t| t.swap(0, 2));
+            let apart = (data.as_chunks::<4>().0.iter().zip(img.data.as_chunks::<4>().0))
+                .filter(|(a, b)| (0..4).any(|i| a[i].abs_diff(b[i]) > 1))
+                .count();
+            assert_eq!(apart, 0, "{name}, {samples}x: BGRA's pixels apart from RGBA's");
         }
         // Without the targets' copies: Moonglow's own water.
         let targets =
@@ -6351,7 +6449,10 @@ fn high_shadows_darken_exactly_the_volume_s_footprint() {
     };
     let grey = |p: [u8; 4]| (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0;
     let dir = mg_testkit::output_dir("render");
-    for samples in [1, 4] {
+    // (Four where the device gives them: one on OpenGL, `Gpu::samples`.)
+    let mut counts = vec![1, gpu.samples(4)];
+    counts.dedup();
+    for samples in counts {
         let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, samples);
         let bare = r.render_image(&gpu, &NoAssets, &scene(None), &camera, w, h);
         r.shadow_volumes = true;
@@ -6705,6 +6806,69 @@ fn moonglow_s_own_shaders_are_written_in_hlsl_as_direct3d_12_writes_them() {
         .map(|c| format!("{}: {}", c.file.display(), c.message))
         .collect();
     assert!(failed.is_empty(), "FXC failed: {failed:#?}");
+}
+
+/// Moonglow's own shaders (each WGSL source the renderer makes, at one
+/// sample a pixel and four) written in GLSL as wgpu's OpenGL back end has
+/// naga write them (GLSL 4.30, its flags, a binding for each resource),
+/// every entry point: what naga can't write, OpenGL can't draw, and this
+/// shows without OpenGL. (A depth texture read with `textureLoad` was one:
+/// naga makes it a shadow sampler, which GLSL can't fetch a texel from;
+/// `framebuffer::DEPTH_READ`.) In `target/test-output/glsl/own/`.
+#[test]
+fn moonglow_s_own_shaders_are_written_in_glsl_as_opengl_writes_them() {
+    use naga::back::glsl;
+    let dir = mg_testkit::output_dir("glsl/own");
+    let (mut failures, mut written) = (Vec::new(), 0);
+    for (name, source) in mg_render::wgsl_sources() {
+        let module =
+            naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut binding_map = glsl::BindingMap::default();
+        for (k, b) in module.global_variables.iter().filter_map(|(_, g)| g.binding).enumerate() {
+            binding_map.insert(b, k as u8);
+        }
+        let options = glsl::Options {
+            version: glsl::Version::Desktop(430),
+            writer_flags: glsl::WriterFlags::ADJUST_COORDINATE_SPACE
+                | glsl::WriterFlags::FORCE_POINT_SIZE,
+            binding_map,
+            ..Default::default()
+        };
+        for ep in &module.entry_points {
+            let pipeline = glsl::PipelineOptions {
+                shader_stage: ep.stage,
+                entry_point: ep.name.clone(),
+                multiview: None,
+            };
+            let mut text = String::new();
+            let label = format!("{name}.{}", ep.name);
+            match glsl::Writer::new(
+                &mut text,
+                &module,
+                &info,
+                &options,
+                &pipeline,
+                Default::default(),
+            )
+            .and_then(|mut w| w.write())
+            {
+                Ok(_) => {
+                    std::fs::write(dir.join(format!("{label}.glsl")), text).unwrap();
+                    written += 1;
+                }
+                Err(e) => failures.push(format!("{label}: {e}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "not written in GLSL: {failures:#?}");
+    assert!(written >= 20, "{written} written");
+    eprintln!("{written} stages written in GLSL, in {}", dir.display());
 }
 
 /// The lit check (a lit, textured quad as a tile is drawn, by Moonglow's

@@ -87,10 +87,10 @@ fn as_target<R>(f: &mut Form<'_>, t: &lists::Target, with: impl FnOnce(&mut Form
 }
 
 /// Why target `t` takes no item: a placeable without an inventory
-/// (Basic › Has Inventory).
+/// (Basic › Has inventory).
 fn takes_none(t: &lists::Target, holder: Holder) -> Option<&'static str> {
     let none = holder == Holder::Placeable && t.at.integer("HasInventory").unwrap_or(0) == 0;
-    none.then_some("no inventory (Basic › Has Inventory)")
+    none.then_some("no inventory (Basic › Has inventory)")
 }
 
 /// The edits that add `added` to target `t`: at the end of its
@@ -187,18 +187,18 @@ pub(super) fn page(f: &mut Form<'_>, ui: &mut Ui, holder: Holder) {
                     ui.end_row();
                     for m in &merged {
                         let r = m.key;
-                        ui.horizontal(|ui| {
+                        super::row(ui, |ui| {
                             ui.label(name_of(r)).on_hover_text(r.to_string());
                             super::entry_mark(ui, m.having.len(), total);
                         });
                         let counts = holdings.held(r);
                         let first = counts[m.having[0]];
-                        ui.horizontal(|ui| {
+                        super::row(ui, |ui| {
                             if counts.iter().any(|c| *c != first && *c > 0) {
-                                ui.colored_label(ui.visuals().warn_fg_color, super::MIXED)
-                                    .on_hover_text(
-                                        "They hold other numbers of it: this is the first's",
-                                    );
+                                super::mixed_mark(
+                                    ui,
+                                    "They hold other numbers of it: this is the first's",
+                                );
                             }
                             ui.label(format!("×{first}"));
                         });
@@ -218,7 +218,7 @@ pub(super) fn page(f: &mut Form<'_>, ui: &mut Ui, holder: Holder) {
                                 ));
                             }
                         }
-                        ui.horizontal(|ui| {
+                        super::row(ui, |ui| {
                             if ui
                                 .small_button("Remove")
                                 .on_hover_text("Take every one of it from each")
@@ -410,8 +410,12 @@ fn equipment(
 ) {
     let name_of = |r: ResRef| names.get(&r).cloned().unwrap_or_else(|| r.to_string());
     let fits = chosen.map_or(0, |r| item_slots(f, r, None));
+    // (In a narrow room, the Properties panel's: the buttons on a row under
+    // the slot's item.)
+    let narrow = super::narrow(ui);
     mg_uikit::with_rows(ui, |ui| {
-        egui::Grid::new(("equipment-together", f.key)).num_columns(3).striped(true).show(ui, |ui| {
+        let grid = egui::Grid::new(("equipment-together", f.key, narrow));
+        grid.num_columns(if narrow { 2 } else { 3 }).striped(true).show(ui, |ui| {
             for (bit, slot) in SLOTS {
                 let worn: Vec<Option<ResRef>> = targets
                     .iter()
@@ -421,22 +425,25 @@ fn equipment(
                     })
                     .collect();
                 ui.label(slot);
-                ui.horizontal(|ui| {
+                super::row(ui, |ui| {
                     if worn.iter().any(|w| *w != worn[0]) {
                         let n = worn.iter().filter(|w| w.is_some()).count();
                         let tip = format!(
                             "{n} of the {} wear something here, not all the same",
                             worn.len()
                         );
-                        ui.colored_label(ui.visuals().warn_fg_color, super::MIXED)
-                            .on_hover_text(tip);
+                        super::mixed_mark(ui, tip);
                     }
                     match worn[0] {
                         Some(r) => ui.label(name_of(r)),
                         None => ui.weak("(none)"),
                     };
                 });
-                ui.horizontal(|ui| {
+                if narrow {
+                    ui.end_row();
+                    ui.label("");
+                }
+                super::row(ui, |ui| {
                     let can = chosen.is_some() && fits & bit != 0;
                     if ui
                         .add_enabled(can, egui::Button::new("Equip").small())
@@ -529,5 +536,23 @@ mod tests {
         assert_eq!(bags.len(), 2);
         assert_eq!(bags[1].0, t.path.clone().item("StoreList", 1));
         assert_eq!(bags[1].1.len(), 1);
+    }
+
+    /// A placeable without an inventory says why, naming the box as its
+    /// Basic page draws it (M5's W7: it said "Has Inventory").
+    #[test]
+    fn a_placeable_without_an_inventory_names_the_box_as_drawn() {
+        let key = ResKey::parse("area", ResType::GIT).unwrap();
+        let placeable = |has: u8| {
+            let mut s = Struct::new(0);
+            s.set("HasInventory", Value::Byte(has));
+            lists::Target::new(key, GffPath::root().item("Placeable List", 0), s)
+        };
+        assert_eq!(
+            takes_none(&placeable(0), Holder::Placeable),
+            Some("no inventory (Basic › Has inventory)")
+        );
+        assert_eq!(takes_none(&placeable(1), Holder::Placeable), None);
+        assert_eq!(takes_none(&placeable(0), Holder::Creature), None);
     }
 }

@@ -34,7 +34,7 @@ pub struct Manifest {
     /// What it does by itself, when something happens.
     pub events: Vec<EventDecl>,
     /// The values it keeps (API 0.4), which the user can set in the
-    /// Plugins window and it reads as `ctx.settings`.
+    /// Plugins tab and it reads as `ctx.settings`.
     pub settings: Vec<SettingDecl>,
     /// What it exports, imports, asks page by page and shows in a pane
     /// (API 0.6).
@@ -677,7 +677,7 @@ pub struct CommandDecl {
 
 impl CommandDecl {
     /// Its title with the submenus it is in before it (`Make › Crafting ›
-    /// Workbench…`): how the Command Palette and the keys name it.
+    /// Workbench…`): how Quick Open and the keys name it.
     pub fn path_title(&self) -> String {
         path_title(&self.menu, &self.title)
     }
@@ -996,7 +996,7 @@ impl EventDecl {
         self.targets.is_empty() || self.targets.iter().any(|t| t.takes(Target::Placed(kind)))
     }
 
-    /// When it acts, and what it may do, for people (the Plugins window,
+    /// When it acts, and what it may do, for people (the Plugins tab,
     /// `mg plugin list`): "before a save, reads each area it writes: may
     /// warn of it, or stop the save".
     pub fn said(&self) -> String {
@@ -1432,7 +1432,7 @@ severity = "error"
     }
 
     /// API 0.7: a command in a submenu, `menu`, nested at each › (or >),
-    /// in every menu it is in; the Command Palette names it by the whole
+    /// in every menu it is in; Quick Open names it by the whole
     /// path. A name left empty is refused, and so is `menu` in a manifest
     /// written for an earlier API.
     #[test]

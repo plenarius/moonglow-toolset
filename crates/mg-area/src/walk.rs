@@ -232,6 +232,12 @@ impl Ground {
         self.levels.get(index).copied().flatten()
     }
 
+    /// The ground level of the tile `p` is over ([`Ground::tile_level`]),
+    /// where `p` is in the area and its tile has a walkmesh.
+    pub fn level_at(&self, p: Vec2) -> Option<f32> {
+        self.tile_level(self.tile_at(p)?)
+    }
+
     /// The ground's height at `p` nearest to `near` (bridges and floors
     /// above others have several).
     pub fn height(&self, p: Vec2, near: f32) -> Option<f32> {
@@ -317,6 +323,8 @@ mod tests {
     /// position and Bearing), is where the original's faces are when they
     /// are drawn with the model ([`AreaObject::model_transform`]): it
     /// blocks as the model is drawn, tilted, turned, scaled and moved.
+    /// (The bake is the module workspace's: with the feature `edit`.)
+    #[cfg(feature = "edit")]
     #[test]
     fn a_baked_walkmesh_lies_where_the_model_is_drawn() {
         let pwk = "node trimesh box_wg\n  parent box_pwk\n  position 0.5 1 0\n  verts 3\n    \

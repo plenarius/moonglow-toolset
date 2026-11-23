@@ -285,7 +285,7 @@ impl Store<'_> {
 }
 
 /// The SHA-1 of no bytes: a resource of 0 bytes has it (its size of 0 is
-/// known, not missing: Layonara's manifest has one).
+/// known, not missing: a persistent world's manifest had one).
 pub const EMPTY: Sha1 = [
     0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90,
     0xaf, 0xd8, 0x07, 0x09,
@@ -416,7 +416,7 @@ pub fn write_file(
 pub struct Index {
     /// Hak names and their keys ([`Planned::key`]).
     pub haks: Vec<(String, Sha1)>,
-    /// Files of single resources (`layonara.tlk`) and their SHA-1s.
+    /// Files of single resources (`world.tlk`) and their SHA-1s.
     pub files: Vec<(String, Sha1)>,
 }
 
@@ -705,16 +705,16 @@ mod tests {
         let sha = mg_core::sha1::sha1(b"x");
         let other = mg_core::sha1::sha1(b"y");
         let i = Index {
-            haks: vec![("l64_parts".into(), sha), ("L64_VFX".into(), other)],
-            files: vec![("layonara.tlk".into(), other)],
+            haks: vec![("pw_parts".into(), sha), ("PW_VFX".into(), other)],
+            files: vec![("world.tlk".into(), other)],
         };
         assert_eq!(Index::parse(&i.to_text()), i);
         assert_eq!(Index::parse("nonsense\nhak a\nhak a b c\n"), Index::default());
         let before =
-            Index { haks: vec![("l64_vfx".into(), sha), ("old".into(), sha)], files: vec![] };
+            Index { haks: vec![("pw_vfx".into(), sha), ("old".into(), sha)], files: vec![] };
         let m = i.clone().merged(&before);
         assert_eq!(m.haks.len(), 3);
-        assert_eq!(m.haks[1], ("L64_VFX".into(), other));
+        assert_eq!(m.haks[1], ("PW_VFX".into(), other));
         assert_eq!(m.haks[2], ("old".into(), sha));
     }
 

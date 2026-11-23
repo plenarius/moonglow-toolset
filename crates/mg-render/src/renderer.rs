@@ -17,6 +17,7 @@ use crate::model::{SkinVertex, Vertex};
 use crate::particles::{ParticleBlend, ParticleVertex};
 use crate::reach::{Frustum, LightGrid, ReachCache};
 use crate::scene::{Camera, Instance, Scene};
+use crate::shadow;
 use crate::texture::GpuTexture;
 
 /// Lights per draw, as the game's default `max-lights`.
@@ -64,6 +65,15 @@ pub(crate) const LIT_WGSL: &str = concat!(include_str!("frame.wgsl"), include_st
 pub(crate) const PARTICLE_WGSL: &str =
     concat!(include_str!("frame.wgsl"), include_str!("particle.wgsl"));
 pub(crate) const LINE_WGSL: &str = concat!(include_str!("frame.wgsl"), include_str!("line.wgsl"));
+
+/// What is left of a grid line's opacity (`Scene::lines`) where the fog is
+/// thickest, at its end and past it (`line.wgsl`'s `grid_least`, held
+/// equal by a test): from its start the line fades as the ground does,
+/// down to this. Chosen from pictures of a Medieval City 2 area (8 to
+/// 150 m, day and night, the grid red and faint white): at 0.3 the far
+/// lines in the fog band are still there to count tiles by, no longer
+/// bright lines standing out of the fog as if hung in the sky.
+pub const GRID_LEAST_IN_FOG: f32 = 0.3;
 
 /// The frame's uniforms (`frame.wgsl`'s `Frame`).
 #[repr(C)]
@@ -1011,8 +1021,10 @@ fn blended_by(alpha: f32, opacity: f32, blending: Blending) -> bool {
 
 impl Renderer {
     /// A renderer drawing into `color_format` targets with `sample_count`
-    /// samples (1 = no MSAA).
+    /// samples (1 = no MSAA), as the device gives them ([`Gpu::samples`]:
+    /// one on OpenGL).
     pub fn new(gpu: &Gpu, color_format: wgpu::TextureFormat, sample_count: u32) -> Renderer {
+        let sample_count = gpu.samples(sample_count);
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lit"),
@@ -1316,47 +1328,55 @@ impl Renderer {
             immediate_size: 0,
         });
         // The lines and the copies of a shape's lines: one pipeline but for
-        // the vertex entry point and its buffers (where the ends are).
-        let line_pipeline_of = |label, entry, buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&line_layout),
-                vertex: wgpu::VertexState {
-                    module: &line_shader,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    buffers,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
-                fragment: Some(wgpu::FragmentState {
-                    module: &line_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let line_pipeline = line_pipeline_of("lines", "vs_main", &[Some(LineVertex::LAYOUT)]);
+        // the vertex entry point and its buffers (where the ends are), and
+        // the fragment's: the grid's fading with the fog, the copies'
+        // (Sound Ranges) not.
+        let line_pipeline_of =
+            |label, entry, fragment, buffers: &[Option<wgpu::VertexBufferLayout<'_>>]| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&line_layout),
+                    vertex: wgpu::VertexState {
+                        module: &line_shader,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::LineList,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: sample_count,
+                        ..Default::default()
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &line_shader,
+                        entry_point: Some(fragment),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color_format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+        let line_pipeline =
+            line_pipeline_of("lines", "vs_main", "fs_main", &[Some(LineVertex::LAYOUT)]);
         let line_copy_pipeline = line_pipeline_of(
             "line copies",
             "vs_copy",
+            "fs_plain",
             &[Some(SHAPE_LAYOUT), Some(LineCopyRaw::LAYOUT)],
         );
         let buffer = |label, size, usage| {
@@ -2349,11 +2369,9 @@ impl Renderer {
         self.game.begin(bytemuck::cast_slice(&lights));
 
         // Draws.
-        // The sky first, around the camera.
-        // Around the camera, at ground level (the game's horizon fade then
-        // covers what the camera sees of the horizon).
+        // The sky first, around the camera ([`sky_place`]).
         let around = |s: &crate::Instance| crate::Instance {
-            transform: Mat4::from_translation(camera.eye.with_z(0.0)) * s.transform,
+            transform: sky_place(camera) * s.transform,
             ..s.clone()
         };
         let sky = scene.sky.as_ref().map(around);
@@ -3970,10 +3988,14 @@ pub struct Targets {
     pub msaa_view: Option<wgpu::TextureView>,
     pub depth: wgpu::TextureView,
     pub size: (u32, u32),
+    /// The samples a pixel they were made with ([`Gpu::samples`]).
+    pub samples: u32,
     pub copies: crate::framebuffer::Copies,
 }
 
 impl Targets {
+    /// Targets of `width` by `height` pixels with `samples` samples a
+    /// pixel, as the device gives them ([`Gpu::samples`]: one on OpenGL).
     pub fn new(
         gpu: &Gpu,
         format: wgpu::TextureFormat,
@@ -3981,6 +4003,7 @@ impl Targets {
         width: u32,
         height: u32,
     ) -> Targets {
+        let samples = gpu.samples(samples);
         let (width, height) = (width.max(1), height.max(1));
         let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
         let make = |label, format, samples, usage| {
@@ -4011,7 +4034,7 @@ impl Targets {
         let depth = make("depth", DEPTH_FORMAT, samples, read).create_view(&Default::default());
         let color_view = color.create_view(&Default::default());
         let copies = crate::framebuffer::Copies::new(&gpu.device, format, (width, height));
-        Targets { color, color_view, msaa_view, depth, size: (width, height), copies }
+        Targets { color, color_view, msaa_view, depth, size: (width, height), samples, copies }
     }
 
     /// Where to draw: the multisampled view, else the colour view.
@@ -4025,10 +4048,75 @@ impl Targets {
     }
 }
 
+/// Where the skybox (and the game's horizon fade over it) is drawn for
+/// `camera`: around its eye, at ground level, as the client draws it
+/// (`grass_and_sky_look`, `sky_under_the_game_s_farthest_camera_look`),
+/// so its horizon fade covers what the camera sees of the horizon. The
+/// game's camera stands at most [`shadow::GAME_CAMERA_REACH`] from what it
+/// looks at (`CameraMaxDist`, 1 to 25 since 1.69; nwn.wiki, "1.69" and
+/// "1.74.8163"), over raised tiles as over the lowest: for every such
+/// camera the sky is where the client draws it. A view's camera farther
+/// off (an area seen whole is 150 m up and more) has the sky raised by
+/// what its eye stands higher over its target than the game's camera at
+/// its farthest would at the same pitch (as `shadow::camera_fade_point`
+/// takes its height), so it stands as high over the sky's ground as that
+/// camera does: the skybox (about 460 m to each side, 310 m up from its
+/// ground, the fade a bowl 390 m deep under it) is seen as the game's
+/// camera sees it, never from above its top, and the fade's bands, in the
+/// fog's color, stay as far under the horizon as in the game (from 150 m
+/// up they reached the sides of a wide view looking down).
+pub(crate) fn sky_place(camera: &Camera) -> Mat4 {
+    let along = camera.eye - camera.target;
+    let distance = along.length();
+    let up = along.normalize_or(Vec3::Z).z;
+    let raised = ((distance - shadow::GAME_CAMERA_REACH).max(0.0) * up).max(0.0);
+    Mat4::from_translation(camera.eye.with_z(raised))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LOST_RIPPLE_GRAY, procedure_picture, ripple_of};
     use glam::{Mat4, Vec3};
+
+    /// The sky is around the camera at ground level for every camera the
+    /// game can have (at most `GAME_CAMERA_REACH` from its target, over a
+    /// raised tile too, at any pitch), as the client draws it, and raised
+    /// with a view's camera farther off to stand as high under it as
+    /// under the game's at its farthest at the same pitch: an area seen
+    /// whole from 151 m showed the horizon fade's fog-colored band at the
+    /// sides of a 2559 by 800 window, and a large area's camera stood over
+    /// the skybox's top (310 m).
+    #[test]
+    fn the_sky_stands_under_the_camera_as_the_game_s() {
+        use super::shadow::GAME_CAMERA_REACH as REACH;
+        let camera = |target: Vec3, distance: f32, pitch: f32| {
+            crate::Camera::orbit(target, distance, -1.0, pitch.to_radians())
+        };
+        let at = |c: &crate::Camera| super::sky_place(c).transform_point3(Vec3::ZERO);
+        // The game's cameras: where the sky stood before M3 T15 (around
+        // the eye, at z 0), over a level-2 tile (tiles step 5 m) too.
+        for target in [Vec3::new(30.0, 40.0, 0.0), Vec3::new(30.0, 40.0, 10.0)] {
+            for (distance, pitch) in [(REACH, 30.0), (REACH, 89.0), (12.0, 45.0), (1.0, 10.0)] {
+                let c = camera(target, distance, pitch);
+                assert_eq!(at(&c), c.eye.with_z(0.0), "{target} {distance} m {pitch}°");
+            }
+        }
+        // Looking up from under its target: never lowered.
+        let under = camera(Vec3::new(5.0, 5.0, 3.0), 100.0, -20.0);
+        assert_eq!(at(&under), under.eye.with_z(0.0), "looking up");
+        // Far beyond the reach: raised, the eye as high over the sky's
+        // ground as the game's farthest camera's at that pitch.
+        for (distance, pitch) in [(151.0, 89.9), (500.0, 89.9), (150.0, 30.0)] {
+            let target = Vec3::new(55.0, 55.0, 10.0);
+            let c = camera(target, distance, pitch);
+            let sky = at(&c);
+            assert_eq!(sky.truncate(), c.eye.truncate(), "{distance} m");
+            let game = camera(target, REACH, pitch);
+            let over = c.eye.z - sky.z;
+            assert!((over - game.eye.z).abs() < 1e-3, "{distance} m {pitch}°: {over} over the sky");
+            assert!(sky.z > 50.0, "{distance} m {pitch}°: raised {}", sky.z);
+        }
+    }
 
     /// What the surfaces are kept by is numbered anew when they are
     /// forgotten (the resources changed): the instances' value sets,
@@ -4141,6 +4229,21 @@ mod tests {
         let (max_inv, falloff) = super::attenuation_params();
         assert!((max_inv - 0.4098).abs() < 1e-3, "{max_inv}");
         assert!((falloff - 136.31).abs() < 0.1, "{falloff}");
+    }
+
+    /// `line.wgsl`'s least opacity of the grid in the fog is the
+    /// renderer's [`super::GRID_LEAST_IN_FOG`].
+    #[test]
+    fn the_grid_s_least_in_the_fog_is_the_renderer_s() {
+        let module = naga::front::wgsl::parse_str(super::LINE_WGSL).unwrap();
+        let (_, c) = (module.constants.iter())
+            .find(|(_, c)| c.name.as_deref() == Some("grid_least"))
+            .expect("grid_least");
+        let naga::Expression::Literal(naga::Literal::F32(v)) = module.global_expressions[c.init]
+        else {
+            panic!("grid_least is no f32 literal");
+        };
+        assert_eq!(v, super::GRID_LEAST_IN_FOG);
     }
 
     /// Each of Moonglow's own shaders declares the frame's uniforms as the

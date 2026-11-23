@@ -203,11 +203,14 @@ pub(crate) const UNSEEN_AFTER: f64 = 2.0;
 
 /// After a frame: the model views not drawn for [`UNSEEN_AFTER`] let go
 /// of their targets; and those no open tab shows (a Model tab closed, a
-/// Properties window closed, the Preview window's of a blueprint no longer
-/// chosen) go whole, with their models on the GPU and the supermodels
-/// they read. (Kept, every blueprint chosen in the palette with the
-/// Preview window open added a view for the session.) One whose tab is
-/// behind another keeps its models and its camera.
+/// Properties window closed) go whole, with their models on the GPU and
+/// the supermodels they read. (Kept, every blueprint chosen in the palette
+/// with the Preview open added a view for the session.) One whose tab is
+/// behind another keeps its models and its camera, and so does the Right
+/// Dock's Preview's of the blueprint chosen in the palette while it stays
+/// chosen (its tab behind the Palette's, or a tab in front that brings no
+/// panels): its camera, animation, play and lights as left, its targets
+/// let go of as every unseen view's.
 pub(crate) fn let_go_of_unseen(app: &mut Moonglow, now: f64) {
     let Some(vp) = app.viewport.as_mut() else { return };
     let mut unseen = Vec::new();
@@ -218,39 +221,53 @@ pub(crate) fn let_go_of_unseen(app: &mut Moonglow, now: f64) {
         if view.targets.is_some() {
             view.let_go_of_targets(vp);
         }
-        // (Not drawn yet: opened this frame. A hak's: the hak editor's own
-        // to drop, `hak_view`.)
-        if view.last_frame.is_some() && !matches!(source, Source::Hak { .. }) {
+        // (Not drawn yet: opened this frame. A hak's too, unseen since: its
+        // Preview closed, folded or behind another tab, M4's U21 review.)
+        if view.last_frame.is_some() {
             unseen.push(source.clone());
         }
     }
     if unseen.is_empty() {
         return;
     }
-    // (A Properties window's page shows its object, the first of several;
-    // a tile's tab its tile's model, whichever that is.)
-    let mut tiles = false;
-    let shown: Vec<Source> = (app.dock.iter_all_tabs())
-        .filter_map(|(_, tab)| match tab {
-            crate::Tab::Blueprint(key) => Some(Source::Resource(*key)),
-            crate::Tab::Blueprints(keys) => keys.first().map(|key| Source::Resource(*key)),
-            crate::Tab::Instance { area, path } => {
-                Some(Source::Instance { area: *area, path: path.clone() })
-            }
-            crate::Tab::Instances { area, paths } => {
-                paths.first().map(|path| Source::Instance { area: *area, path: path.clone() })
-            }
-            crate::Tab::Tile { .. } => {
-                tiles = true;
-                None
-            }
-            tab => Source::of_tab(tab),
-        })
-        .collect();
+    let (mut shown, tiles) = shown_by_tabs(app);
+    // (The Preview's, kept while its blueprint is the palette's choice.)
+    shown.extend(app.palette.selected.map(Source::Resource));
     let a_tile_s = |s: &Source| tiles && matches!(s, Source::Resource(_)) && s.is_model();
     for source in unseen.into_iter().filter(|s| !shown.contains(s) && !a_tile_s(s)) {
         app.model_views.remove(&source);
     }
+}
+
+/// What the open tabs show in a model view (a Properties window's page
+/// shows its object, the first of several; a Model tab its model), and
+/// whether a tile's tab is open (it shows its tile's model, whichever that
+/// is). (A hak's resources are shown in its Preview panel since M4's U21,
+/// drawn before the editor area, not by its tab.)
+pub(crate) fn shown_by_tabs(app: &Moonglow) -> (Vec<Source>, bool) {
+    let mut tiles = false;
+    let shown = (app.dock.iter_all_tabs())
+        .filter_map(|(_, tab)| match tab {
+            crate::Tab::Tile { .. } => {
+                tiles = true;
+                None
+            }
+            // (A model open read-only is drawn in the model viewer: M5's W6.)
+            crate::Tab::Resource(k) if k.restype == ResType::MDL => Some(Source::Resource(*k)),
+            crate::Tab::ResourceCopy { key, layer } if key.restype == ResType::MDL => {
+                Some(Source::Copy { key: *key, layer: layer.clone() })
+            }
+            tab => Source::of_editor(tab).or_else(|| Source::of_tab(tab)),
+        })
+        .collect();
+    (shown, tiles)
+}
+
+/// Whether an open tab may show `source` in a model view this frame: one
+/// of [`shown_by_tabs`], or with a tile's tab open, a model.
+pub(crate) fn a_tab_may_show(app: &Moonglow, source: &Source) -> bool {
+    let (shown, tiles) = shown_by_tabs(app);
+    shown.contains(source) || (tiles && source.is_model())
 }
 
 /// What a model's view was read for: the load order
@@ -329,6 +346,24 @@ pub struct ModelView {
     /// ground that takes its shadow lies ([`ground`]); made when first
     /// drawn with the Shadow switch on.
     rest_box: Option<(Vec3, Vec3)>,
+    /// The width of its picture over its height, as last drawn (1 before).
+    aspect: f32,
+    /// Its camera is where [`ModelView::frame`] put it (not moved or zoomed
+    /// since): framed again when the picture's shape changes, so that a
+    /// tall, narrow view (the Preview panel's) shows the model whole.
+    framed: bool,
+    /// What [`ModelView::frame`] made of the model's points last, kept so
+    /// that a picture of another shape is framed anew by it alone, not by
+    /// the model's points read again (a Right Dock dragged wider fits it
+    /// every frame).
+    fit: Option<Fit>,
+    /// Where its picture was last drawn in the window (for the tests).
+    shown_at: Option<egui::Rect>,
+    /// Its pictures drawn, all told (once a pass at most), and how many
+    /// times a second place showed the picture drawn in the first (the
+    /// owner's ruling 19, "one shared preview"): for the tests.
+    renders: u64,
+    followed: u64,
 }
 
 /// What the viewer shows: a model or blueprint (from the module or the
@@ -357,6 +392,14 @@ pub enum Source {
         revision: u64,
         key: ResKey,
     },
+    /// An appearance of the Appearance Gallery (M4's U26): an object of
+    /// `restype` (a placeable's, creature's or door's blueprint type)
+    /// given row `row` of its table, a creature a plain body
+    /// (`appearance_gallery::object_of`), in the gallery's Preview alone.
+    Appearance {
+        restype: ResType,
+        row: u32,
+    },
 }
 
 impl Source {
@@ -374,8 +417,40 @@ impl Source {
         })
     }
 
+    /// What a Properties form's tab shows in its Preview panel (M4's U11):
+    /// its object (the first of several), a blueprint or a placed object
+    /// (`None`: the tab is no Properties form's).
+    pub(crate) fn of_editor(tab: &crate::Tab) -> Option<Source> {
+        Some(match tab {
+            crate::Tab::Blueprint(key) => Source::Resource(*key),
+            crate::Tab::Blueprints(keys) => Source::Resource(*keys.first()?),
+            crate::Tab::Instance { area, path } => {
+                Source::Instance { area: *area, path: path.clone() }
+            }
+            crate::Tab::Instances { area, paths } => {
+                Source::Instance { area: *area, path: paths.first()?.clone() }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Whether the viewer draws it: a model, or a creature's, an item's, a
+    /// placeable's or a door's blueprint or placed object (a store, a
+    /// sound, a trigger, a waypoint and an encounter have no model of
+    /// their own).
+    pub(crate) fn has_model(&self) -> bool {
+        match self {
+            // (An item a placed object holds is an item, whatever holds it.)
+            Source::Instance { path, .. } => {
+                crate::blueprint::instance_type(path).is_some_and(previewable)
+            }
+            Source::Appearance { .. } => true,
+            _ => self.key().is_some_and(|k| previewable(k.restype)),
+        }
+    }
+
     /// The tab whose viewer shows it.
-    fn tab(&self) -> crate::Tab {
+    pub(crate) fn tab(&self) -> crate::Tab {
         match self {
             Source::Resource(k) => crate::Tab::Model(*k),
             Source::Instance { area, path } => {
@@ -386,6 +461,7 @@ impl Source {
             }
             // (No tab of its own: shown in its editor.)
             Source::Hak { hak, .. } => crate::Tab::Hak(*hak),
+            Source::Appearance { .. } => crate::Tab::PlaceableGallery,
         }
     }
 }
@@ -397,6 +473,7 @@ impl std::fmt::Display for Source {
             Source::Instance { area, .. } => write!(f, "an object placed in {area}"),
             Source::Copy { key, layer } => write!(f, "{key} from {layer}"),
             Source::Hak { key, .. } => write!(f, "{key} of the hak"),
+            Source::Appearance { restype, row } => write!(f, "appearance {row} ({restype:?})"),
         }
     }
 }
@@ -408,7 +485,7 @@ impl Source {
             Source::Resource(k) | Source::Copy { key: k, .. } | Source::Hak { key: k, .. } => {
                 Some(*k)
             }
-            Source::Instance { .. } => None,
+            Source::Instance { .. } | Source::Appearance { .. } => None,
         }
     }
 
@@ -426,6 +503,7 @@ impl Source {
             Source::Instance { path, .. } => {
                 crate::blueprint::instance_type(path) == Some(ResType::UTI)
             }
+            Source::Appearance { .. } => false,
         }
     }
 
@@ -484,6 +562,9 @@ fn source_object(app: &Moonglow, source: &Source) -> Result<Option<(ResType, Str
                 .ok_or_else(|| format!("{source}: not an object's entry"))?;
             let object = path.get(&git.root).cloned().ok_or_else(|| format!("{source}: gone"))?;
             (restype, object)
+        }
+        Source::Appearance { restype, row } => {
+            return Ok(crate::appearance_gallery::object_of(*restype, *row));
         }
     }))
 }
@@ -577,6 +658,7 @@ pub fn export_files(app: &mut Moonglow, source: &Source) {
             Source::Instance { .. } => {
                 object.resref("TemplateResRef").map(|r| ResKey::new(r, *restype))
             }
+            Source::Appearance { .. } => None,
         };
         let in_module = |k: &ResKey| app.ws.as_ref().is_some_and(|w| w.module.contains(k));
         if let Some(key) = key.filter(|k| in_module(k) || game.resman.contains(k)) {
@@ -885,6 +967,17 @@ impl ModelView {
         (self.particles, self.dangly) = (None, None);
         self.part_particles.clear();
         self.chunk_models.clear();
+        // (Another model, framed anew where the camera is where Frame put
+        // it: a 2 m wagon changed to a 5 m table in its form was cut at
+        // the sides of a tall Preview. Moved by hand, it stays; a model's
+        // file read again keeps its camera, and a picture of another shape
+        // is framed by its points as they are now, not by the fit kept.)
+        if self.framed && !model {
+            self.frame();
+        }
+        if model {
+            self.fit = None;
+        }
     }
 
     fn open(app: &Moonglow, source: &Source) -> ModelView {
@@ -922,6 +1015,8 @@ impl ModelView {
             orbit: Orbit { target: Vec3::ZERO, yaw, pitch, distance: 5.0 },
             targets: None,
             shown_in: None,
+            renders: 0,
+            followed: 0,
             last_frame: None,
             particles: None,
             part_particles: HashMap::new(),
@@ -933,6 +1028,10 @@ impl ModelView {
             female: app.settings.armor_on_woman,
             read: model_read(app, source),
             rest_box: None,
+            aspect: 1.0,
+            framed: false,
+            fit: None,
+            shown_at: None,
         };
         view.frame();
         view
@@ -972,14 +1071,24 @@ impl ModelView {
     /// of the box around its pause). (The model is there exactly when the
     /// composed preview is: both come of one `compose`.)
     pub fn frame(&mut self) {
-        let Some(c) = &self.composed else { return };
-        let (low, high) = c.bounds_in(self.animation.as_deref(), self.time);
-        // (The box around it as it is stood.)
-        let stood = mg_render::box_corners(low, high).map(|p| self.stand.transform_point3(p));
-        let Some((min, max)) = mg_render::box_of(stood) else { return };
-        self.orbit.target = (min + max) * 0.5;
-        let radius = ((max - min).length() * 0.5).max(0.1);
-        self.orbit.distance = radius / 20f32.to_radians().sin() * 1.1;
+        let stood = self.reached();
+        let Some((min, max)) = mg_render::box_of(stood.iter().copied()) else { return };
+        let fit = Fit::of((min + max) * 0.5, &stood, self.orbit.pitch);
+        self.orbit.target = fit.target;
+        self.orbit.distance = fit.distance(self.aspect);
+        self.fit = Some(fit);
+        self.framed = true;
+    }
+
+    /// Framed anew for a picture of another shape, by what the last
+    /// [`ModelView::frame`] kept (else framed from the start).
+    fn refit(&mut self) {
+        match &self.fit {
+            Some(fit) => {
+                (self.orbit.target, self.orbit.distance) = (fit.target, fit.distance(self.aspect))
+            }
+            None => self.frame(),
+        }
     }
 
     fn camera(&self) -> Camera {
@@ -1006,6 +1115,110 @@ const BACKGROUND: [f32; 3] = [0.16, 0.18, 0.21];
 /// Shadow Opacity, of 1): the lighting schemes' 0.35 reads faintly on
 /// the viewer's dark background, so more.
 const GROUND_SHADOW_OPACITY: f32 = 0.6;
+
+/// What fitting a model's points in a view needs, made once from them
+/// ([`Fit::of`]) and kept: where the camera looks (`target`) and, for a
+/// picture of any shape, how far from it it stands ([`Fit::distance`]) to
+/// show the points whole, a little room round them. The camera sees 20°
+/// either way up and down, and across as much more or less as the picture
+/// is wider or narrower: what it sees is fitted across and up apart, so
+/// that a tall creature fills a tall view's height and a wide door a
+/// narrow view's width.
+///
+/// Fitted for every yaw at the pitch the view is framed at (M5's W8, the
+/// owner's rulings "preview turn: a" and "fit: b"): a turn about the up
+/// axis never carries a framed model out of the picture and its size holds
+/// while it turns. A tilt is not fitted: tilted steeply, a long model in a
+/// wide picture can reach past its edges (fitting every pitch too made a
+/// creature in the tall Preview about a quarter smaller). Each point is
+/// the ring it sweeps about the target's up line (its distance from that
+/// line and its height); the distance a ring's point needs, at each yaw,
+/// is the larger of two sums of terms linear in those two: convex in them,
+/// so the rings at the corners of the hull of those pairs alone are
+/// fitted. What the picture's shape changes (the across fit) is kept as a
+/// line for each ring's point; the up fit is the same for every shape.
+#[derive(Clone, Debug)]
+pub(crate) struct Fit {
+    pub(crate) target: Vec3,
+    /// The distance the up and down fit needs (and in front of the
+    /// nearest point), whatever the picture's shape.
+    up: f32,
+    /// For each ring's point, how far toward the camera it is and how far
+    /// across (with the room): it needs `toward + across / tan` of the
+    /// picture's across angle.
+    across: Vec<(f32, f32)>,
+}
+
+impl Fit {
+    /// The room round the model.
+    const ROOM: f32 = 1.08;
+    /// Points round each ring (5° apart: a ring's chord falls short of its
+    /// arc by under 0.4% of its radius, well within the room).
+    const RING: usize = 72;
+
+    /// The fit of `points` about `target`, seen from `pitch` (radians up
+    /// from the ground).
+    pub(crate) fn of(target: Vec3, points: &[Vec3], pitch: f32) -> Fit {
+        let up_tan = 20f32.to_radians().tan();
+        let (sp, cp) = pitch.sin_cos();
+        let rings = hull_of(points.iter().map(|p| {
+            let rel = *p - target;
+            (rel.truncate().length(), rel.z)
+        }));
+        let (mut up, mut across) = (0.1f32, Vec::with_capacity(rings.len() * Self::RING));
+        for (out, height) in rings {
+            for k in 0..Self::RING {
+                // (The ring's point at `beta` from the camera's side of the
+                // up line: across, `out * sin`; toward the camera and up
+                // the picture as the pitch turns it.)
+                let (sin, cos) = (k as f32 * std::f32::consts::TAU / Self::RING as f32).sin_cos();
+                let (ahead, x) = (out * cos, out * sin);
+                let toward = ahead * cp + height * sp;
+                let y = height * cp - ahead * sp;
+                up = up.max(toward + y.abs() * Self::ROOM / up_tan).max(toward + 0.1);
+                across.push((toward, x.abs() * Self::ROOM));
+            }
+        }
+        Fit { target, up, across }
+    }
+
+    /// How far from the target the camera stands for a picture `aspect`
+    /// wide to its height.
+    pub(crate) fn distance(&self, aspect: f32) -> f32 {
+        let across_tan = 20f32.to_radians().tan() * aspect.max(0.05);
+        self.across.iter().map(|(toward, x)| toward + x / across_tan).fold(self.up, f32::max)
+    }
+}
+
+/// The corners of the convex hull of `points` (all of them where fewer
+/// than three, or in a line).
+fn hull_of(points: impl Iterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
+    let mut p: Vec<(f32, f32)> = points.collect();
+    p.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    p.dedup();
+    if p.len() < 3 {
+        return p;
+    }
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut hull: Vec<(f32, f32)> = Vec::with_capacity(p.len() + 1);
+    for pass in [false, true] {
+        let start = hull.len();
+        let order: Box<dyn Iterator<Item = &(f32, f32)>> =
+            if pass { Box::new(p.iter().rev()) } else { Box::new(p.iter()) };
+        for &q in order {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    if hull.is_empty() { p } else { hull }
+}
 
 /// The ground the model viewer's model casts its shadow on (the Shadow
 /// switch): a square, unlit, of the viewer's background color, so that it
@@ -1087,18 +1300,113 @@ fn load_super(
     m
 }
 
+/// Where a model view is shown, which decides what goes with it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Shown {
+    /// The info line (the model's name, its nodes, meshes, parts and
+    /// supermodel) over its header row; else its host says it (the
+    /// Preview panel's tab bar, [`info`]) or has no room for it (a hak's
+    /// or a tile's page).
+    pub(crate) info: bool,
+    /// Pop Out in its header's More: shown in a tab or window of its own.
+    pub(crate) pop_out: bool,
+    /// Its camera as a session left it (a tab opened again).
+    pub(crate) restore: bool,
+    /// Paused where it is first made (a tileset's Preview, M4's U20: a
+    /// tile's water and emitters, and the game's programs that read the
+    /// clock, asked for a frame every step; its Play animates it, and the
+    /// choice is kept as long as the view is).
+    pub(crate) paused: bool,
+}
+
+/// The viewer as a model's tab: the info line over its header.
 pub(crate) fn ui(app: &mut Moonglow, ui: &mut egui::Ui, source: Source) {
-    show(app, ui, source, false);
+    show(app, ui, source, Shown { info: true, pop_out: false, restore: true, paused: false });
 }
 
-/// The viewer in an editor's page (`embedded`): its toolbar without the
-/// model's statistics (the page is narrower than a window), and with Pop
-/// Out among its buttons. Whether Pop Out was clicked.
+/// The viewer in an editor's page (a hak's resource, a tile): no info
+/// line (the page is narrower than a window), and Pop Out in its header's
+/// More. Whether Pop Out was clicked.
 pub(crate) fn embedded(app: &mut Moonglow, ui: &mut egui::Ui, source: Source) -> bool {
-    show(app, ui, source, true)
+    show(app, ui, source, Shown { info: false, pop_out: true, restore: false, paused: false })
 }
 
-fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -> bool {
+/// The viewer as `shown`, in the Preview panel. Whether Pop Out was
+/// clicked.
+pub(crate) fn panel(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, shown: Shown) -> bool {
+    show(app, ui, source, shown)
+}
+
+/// The name of a model view's header row (the kit's `EditorHeader`, the
+/// Creature board's Preview panel's `.panel-bar`), as a screen reader and
+/// the tests find it.
+pub const MODEL_HEADER: &str = "Model header";
+
+/// The info line of `source`'s view as last drawn: its model's name, its
+/// nodes and meshes, the blueprint's parts and the supermodel (the
+/// Creature board's "c_aribeth: 27 nodes, 18 meshes, supermodel a_fa");
+/// `None` where it has no view or no model.
+#[doc(hidden)]
+impl ModelView {
+    /// The pass it was last drawn in (for the tests: a view really drawn).
+    pub fn drawn_in(&self) -> Option<u64> {
+        self.shown_in
+    }
+
+    /// How many pictures it has drawn (at most one a pass).
+    pub fn renders(&self) -> u64 {
+        self.renders
+    }
+
+    /// How many times a second place in a pass showed its picture.
+    pub fn followed(&self) -> u64 {
+        self.followed
+    }
+
+    /// Where its picture was last drawn in the window.
+    pub fn shown_at(&self) -> Option<egui::Rect> {
+        self.shown_at
+    }
+
+    /// The points what it shows reaches as it stands now, as it is stood
+    /// (its meshes' boxes' corners, a skinned mesh's vertices): what Frame
+    /// fits in the picture (none without a composed preview).
+    pub fn reached(&self) -> Vec<Vec3> {
+        let Some(c) = &self.composed else { return Vec::new() };
+        let reached = c.reached_in(self.animation.as_deref(), self.time);
+        reached.iter().map(|p| self.stand.transform_point3(*p)).collect()
+    }
+}
+
+pub(crate) fn info(app: &Moonglow, source: &Source) -> Option<String> {
+    let view = app.model_views.get(source)?;
+    let model = view.model.as_ref().ok()?;
+    Some(info_line(model, view.composed.as_ref()))
+}
+
+fn info_line(model: &GpuModel, composed: Option<&Composed>) -> String {
+    let m = &model.model;
+    let mut line = format!("{}: {} nodes, {} meshes", m.name, m.nodes.len(), model.meshes.len());
+    if let Some(c) = composed.filter(|c| c.part_count() > 0) {
+        line.push_str(&format!(" + {} parts", c.part_count()));
+    }
+    if let Some(s) = &m.supermodel {
+        line.push_str(&format!(", supermodel {s}"));
+    }
+    line
+}
+
+/// What a view shown a second time in a pass says over the picture it
+/// shares with the first (the owner's ruling 19, "one shared preview").
+pub const SHOWN_ELSEWHERE: &str = "The same picture as the other preview of this model.";
+
+/// The name of that shared picture, for a screen reader and the tests.
+pub const SHARED_PICTURE: &str = "Preview shared with the other";
+
+/// The width of the header's Animation box (the Creature board's 104).
+const ANIMATION_BOX: f32 = 104.0;
+
+fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, shown: Shown) -> bool {
     let key = source.clone();
     if !app.model_views.contains_key(&key) {
         // The editors' working copies, which the preview reads.
@@ -1106,23 +1414,29 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
             let _ = ws.flush();
         }
         let mut view = ModelView::open(app, &source);
+        if shown.paused {
+            view.playing = false;
+        }
         // (Its camera as a session left it, a tab opened again.)
-        if !embedded
+        if shown.restore
             && let Some((orbit, _)) = app.open_tabs.take_view(&source.tab()).and_then(|v| v.orbit())
         {
             view.orbit = orbit;
+            view.framed = false;
         }
         app.model_views.insert(key.clone(), view);
     }
     let mut view = app.model_views.remove(&key).expect("just inserted");
-    // (Shown in another place in this pass already: the Preview window's
-    // blueprint and its Properties' page, a tile's view and its model's
-    // tab. A view has one camera and one set of targets: drawn here too,
-    // they were made twice a frame at two sizes, and both pictures showed
-    // the last.)
+    // (Shown in another place in this pass already: the Preview panel's
+    // blueprint and a floating window's own, a tile's view and its model's
+    // tab, a model open read-only and its model's tab. A view has one
+    // camera and one set of targets: drawn here too, they were made twice
+    // a frame at two sizes, and both pictures showed the last. The second
+    // place shows the picture the first drew, fitted, its drag and wheel
+    // turning the one camera: the owner's ruling 19, "one shared preview".)
     let pass = ui.ctx().cumulative_pass_nr();
     if view.shown_in == Some(pass) {
-        ui.weak("The preview is shown elsewhere in the window.");
+        follow(ui, &mut view);
         app.model_views.insert(key, view);
         return false;
     }
@@ -1131,7 +1445,11 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
     let model = match &view.model {
         Ok(m) => m.clone(),
         Err(e) => {
-            ui.colored_label(ui.visuals().error_fg_color, e);
+            // (In a margin: the Preview panel's body has none.)
+            let margin = egui::Margin { left: 8, right: 8, top: 6, bottom: 4 };
+            egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            });
             app.model_views.insert(key, view);
             return false;
         }
@@ -1142,102 +1460,158 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
     let anims = anim::animations_scaled(&model.model, &|n| {
         load_super(app, own.as_deref(), &view.supermodels, n)
     });
-    // Wrapping in a narrow window, so none of it is cut off.
-    let mut pop_out = false;
-    let mut export = false;
-    ui.horizontal_wrapped(|ui| {
-        if !embedded {
-            ui.label(format!(
-                "{}: {} nodes, {} meshes",
-                model.model.name,
-                model.model.nodes.len(),
-                model.meshes.len()
-            ));
-        }
-        if let Some(c) = view.composed.as_ref().filter(|c| c.part_count() > 0 && !embedded) {
-            ui.weak(format!("+ {} parts", c.part_count()))
-                .on_hover_text("Body parts, equipment, wings and tails from the blueprint");
-            if !c.missing.is_empty() {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("{} missing", c.missing.len()),
-                )
-                .on_hover_text(c.missing.join("\n"));
-            }
-        }
-        if let Some(s) = model.model.supermodel.as_ref().filter(|_| !embedded) {
-            ui.weak(format!("supermodel {s}"));
-        }
-        if !embedded {
-            ui.separator();
-        }
-        let current = view.animation.clone().unwrap_or_else(|| "(rest pose)".into());
+    if shown.info {
+        let line = egui::RichText::new(info_line(&model, view.composed.as_ref())).weak();
+        ui.add(egui::Label::new(line).truncate());
+    }
+    // One header row over the view (the Creature board's): the animation
+    // and how it plays at the left, how the view looks at the right; what
+    // has no room goes into More, never onto a second row.
+    let (pop_out, export) = {
+        use crate::icons::editor as icon;
+        use mg_uikit::header::{EditorHeader, Item, Joined};
         let options: Vec<Option<String>> = std::iter::once(None)
             .chain(anims.iter().map(|(name, ..)| Some(name.clone())))
             .collect();
-        let was = view.animation.clone();
-        crate::widgets::dropdown_labelled(("anim", &key), "Animation").selected_text(current).show(
-            ui,
-            &mut view.animation,
-            &options,
-            |a| a.clone().unwrap_or_else(|| "(rest pose)".into()),
-        );
-        if view.animation != was {
-            view.time = 0.0;
-        }
-        // (With Icons only, each icon alone, its name in its tip.)
-        let tools = crate::icons::Tools::of(&app.settings);
-        use crate::icons::editor as icon;
-        let button = |ui: &mut egui::Ui, g: crate::icons::Icon, name: &str, tip: &str| {
-            let r = ui.add(tools.word_widget(g, name));
-            tools.named(r, name, tip)
+        let animation = RefCell::new(view.animation.clone());
+        let combo = |ui: &mut egui::Ui, label: bool| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            // (Its words painted, not a widget of their own: the box is
+            // named Animation, and one node is.)
+            if label {
+                let color = mg_uikit::tokens(ui.ctx()).text_2;
+                let font = egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE);
+                let galley = ui.painter().layout_no_wrap("Animation".into(), font, color);
+                let size = egui::vec2(galley.size().x, mg_uikit::metrics::CONTROL_HEIGHT);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                let at = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+                ui.painter().galley(at, galley, color);
+            }
+            let mut now = animation.borrow().clone();
+            let current = now.clone().unwrap_or_else(|| "(rest pose)".into());
+            let r = crate::widgets::dropdown(("anim", &key))
+                .selected_text(current)
+                .width(ANIMATION_BOX)
+                .show(ui, &mut now, &options, |a| {
+                    a.clone().unwrap_or_else(|| "(rest pose)".into())
+                });
+            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("Animation"));
+            *animation.borrow_mut() = now;
         };
-        let (g, name) = match view.playing {
+        let label = {
+            let font = egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE);
+            ui.painter().layout_no_wrap("Animation".into(), font, egui::Color32::WHITE).size().x
+        };
+        let full = (label + 6.0 + ANIMATION_BOX).ceil();
+        // (What the blueprint names and the load order lacks.)
+        let missing = view.composed.as_ref().map(|c| c.missing.clone()).unwrap_or_default();
+        let words = format!("{} missing", missing.len());
+        let list = missing.join("\n");
+        let (words, list) = (&words, &list);
+        let note = move |ui: &mut egui::Ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, words.as_str())
+                .on_hover_text(list.as_str());
+        };
+        let mut lights = view.model_lights;
+        let mut shadow = app.settings.model_shadows();
+        let mut shaders = app.game_shaders();
+        let (shadow_was, shaders_were) = (shadow, shaders);
+        let c = &combo;
+        let mut h = EditorHeader::new(MODEL_HEADER).left(
+            Item::custom("Animation", full, move |ui| c(ui, true))
+                .compact(ANIMATION_BOX, move |ui| c(ui, false))
+                .more(full, move |ui| {
+                    ui.horizontal(|ui| c(ui, true));
+                }),
+        );
+        let (play, play_name) = match view.playing {
             true => (icon::PAUSE, "Pause"),
             false => (icon::PLAY, "Play"),
         };
-        if button(ui, g, name, "").clicked() {
-            view.playing = !view.playing;
-        }
-        if button(ui, icon::FRAME, "Frame", "Fit the model in the view").clicked() {
-            view.frame();
-        }
-        let tip = "Light the model with its own light nodes";
-        tools.checkbox_word(ui, &mut view.model_lights, icon::LIGHTS, "Lights", tip);
-        let mut shadow = app.settings.model_shadows();
-        let tip = "Cast the sun's shadow on an unseen ground under the model";
-        if tools.checkbox_word(ui, &mut shadow, crate::icons::SHADOWS, "Shadow", tip).changed() {
-            app.settings.model_shadows = Some(shadow);
-        }
-        let mut shaders = app.game_shaders();
-        if tools
-            .checkbox_word(
-                ui,
-                &mut shaders,
-                crate::icons::SHADERS,
-                "Shaders",
-                "Draw with the game's own shaders. Off, with Moonglow's own (every 3D view).",
-            )
-            .changed()
-        {
-            app.set_game_shaders(shaders);
-        }
-        if embedded && own.is_none() {
-            let tip = "Show it in a window of its own";
-            pop_out = button(ui, icon::POP_OUT, "Pop Out", tip).clicked();
+        let play_tip = match view.playing {
+            true => "Pause the animation",
+            false => "Play the animation",
+        };
+        h = h.left(Item::icon(play, play_name).tip(play_tip));
+        h = h.left(Item::icon(icon::FRAME, "Frame").tip("Fit the model in the view"));
+        let missing_width = (!missing.is_empty()).then(|| {
+            let font = egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE);
+            let w = ui.painter().layout_no_wrap(words.clone(), font, egui::Color32::WHITE).size().x;
+            w.ceil() + 2.0
+        });
+        if let Some(width) = missing_width {
+            h = h.right(Item::custom("Missing", width, note).more(width, note));
         }
         // (Not of an overridden copy: the files it would gather are those
         // the game reads, not the copy's layer's. Its Save As… is there.)
         let copy = matches!(source, Source::Copy { .. } | Source::Hak { .. });
-        export = !copy
-            && button(
-                ui,
-                icon::EXPORT,
-                "Export Files…",
-                "Write the models, textures and materials it is drawn with into a folder",
-            )
-            .clicked();
-    });
+        // (Not of a hak's own model, which no tab shows.)
+        let pop = shown.pop_out && own.is_none();
+        // Where the row is short, what the view looks like goes into More
+        // first, Export Files… then the switches, and the animation and how
+        // it plays stay on the row (the coordinator's ruling at U11's
+        // review): the kit yields the left group first.
+        let into_more = {
+            use mg_uikit::header::{HEADER_GAP, HEADER_PADDING, JOIN_SEAM};
+            use mg_uikit::metrics::ICON_BUTTON;
+            let room = ui.available_width() - 2.0 * HEADER_PADDING;
+            let left = ANIMATION_BOX + 2.0 * ICON_BUTTON + 2.0 * HEADER_GAP;
+            let look = 3.0 * ICON_BUTTON + 2.0 * JOIN_SEAM;
+            let more = ICON_BUTTON + HEADER_GAP;
+            let missing = missing_width.map_or(0.0, |w| w + HEADER_GAP);
+            let export = if copy { 0.0 } else { ICON_BUTTON + HEADER_GAP };
+            let need = |export: f32, look: f32, more: f32| {
+                left + HEADER_GAP + missing + look + export + more
+            };
+            let all = need(export, look, if pop { more } else { 0.0 });
+            let without_export = need(0.0, look, more);
+            match (all > room, without_export > room) {
+                (false, _) => (false, false),
+                (true, false) => (true, false),
+                (true, true) => (true, true),
+            }
+        };
+        let parts = vec![
+            Joined::toggle(icon::LIGHTS, "Lights", &mut lights)
+                .tip("Light the model with its own light nodes"),
+            Joined::toggle(crate::icons::SHADOWS, "Shadow", &mut shadow)
+                .tip("Cast the sun's shadow on an unseen ground under the model"),
+            Joined::toggle(crate::icons::SHADERS, "Shaders", &mut shaders)
+                .tip("Draw with the game's own shaders, or with Moonglow's own when off"),
+        ];
+        let look = Item::joined("Look", parts);
+        h = h.right(if into_more.1 { look.in_more() } else { look });
+        if !copy {
+            let tip = "Write the models, textures and materials it is drawn with into a folder";
+            let export = Item::icon(icon::EXPORT, "Export Files…").tip(tip);
+            h = h.right(if into_more.0 { export.in_more() } else { export });
+        }
+        if pop {
+            let tip = "Show it in a tab or window of its own";
+            h = h.right(Item::icon(icon::POP_OUT, "Pop Out").tip(tip).in_more());
+        }
+        let out = h.show(ui);
+        let was = view.animation.clone();
+        view.animation = animation.into_inner();
+        if view.animation != was {
+            view.time = 0.0;
+        }
+        if out.clicked(play_name) {
+            view.playing = !view.playing;
+        }
+        if out.clicked("Frame") {
+            view.frame();
+        }
+        view.model_lights = lights;
+        if shadow != shadow_was {
+            app.settings.model_shadows = Some(shadow);
+        }
+        if shaders != shaders_were {
+            app.set_game_shaders(shaders);
+        }
+        (out.clicked("Pop Out"), !copy && out.clicked("Export Files…"))
+    };
     if export {
         export_files(app, &source);
     }
@@ -1251,6 +1625,15 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
     let ppp = ui.ctx().pixels_per_point();
     let (w, h) = ((size.x * ppp).round() as u32, (size.y * ppp).round() as u32);
     let (w, h) = (w.clamp(16, 8192), h.clamp(16, 8192));
+    // (A picture of another shape: framed anew while the camera is where
+    // Frame put it.)
+    let aspect = w as f32 / h as f32;
+    if (aspect - view.aspect).abs() > 0.01 {
+        view.aspect = aspect;
+        if view.framed {
+            view.refit();
+        }
+    }
 
     // Animation time.
     let now = ui.input(|i| i.time);
@@ -1422,7 +1805,49 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
         egui::Image::new(egui::load::SizedTexture::new(*id, size))
             .sense(egui::Sense::click_and_drag()),
     );
+    view.renders += 1;
+    view.shown_at = Some(response.rect);
+    steer(ui, &mut view, &response);
+    app.model_views.insert(key, view);
+    pop_out
+}
 
+/// A second place's view of a source drawn already in this pass (the
+/// owner's ruling 19, "one shared preview"): the picture the first drew,
+/// fitted to the room (its shape the first's), under a line
+/// that says so; its drag and wheel turn, move and zoom the one camera
+/// (seen in both places from the next frame). Nothing is drawn again, no
+/// target is made or sized, the camera is not framed for this shape.
+fn follow(ui: &mut egui::Ui, view: &mut ModelView) {
+    view.followed += 1;
+    // (No picture to share, no model or no GPU: nothing said over an empty
+    // room; the first place says why.)
+    let Some((_, id)) = view.targets.as_ref().filter(|_| view.model.is_ok()) else { return };
+    let id = *id;
+    ui.weak(SHOWN_ELSEWHERE);
+    let room = ui.available_rect_before_wrap();
+    if room.width() < 8.0 || room.height() < 8.0 {
+        return;
+    }
+    let aspect = view.aspect.max(0.01);
+    let size = match room.width() / room.height() > aspect {
+        true => egui::vec2(room.height() * aspect, room.height()),
+        false => egui::vec2(room.width(), room.width() / aspect),
+    };
+    let shown = egui::Rect::from_center_size(room.center(), size);
+    egui::Image::new(egui::load::SizedTexture::new(id, size)).paint_at(ui, shown);
+    let response = ui.allocate_rect(room, egui::Sense::click_and_drag());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, SHARED_PICTURE));
+    steer(ui, view, &response);
+}
+
+/// A view's camera turned by a drag, moved by a right or middle drag, and
+/// zoomed by the wheel over `response` (its picture), as the area view's;
+/// moved, a frame asked for (the picture was drawn this pass already, and
+/// the second place's drag would show only at the next event).
+fn steer(ui: &egui::Ui, view: &mut ModelView, response: &egui::Response) {
+    let was = view.orbit;
     // Orbit, pan, zoom.
     let o = &mut view.orbit;
     if response.dragged_by(egui::PointerButton::Primary) {
@@ -1445,6 +1870,8 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
     }
     // The wheel as the area view's: Shift or Ctrl zooms finer, a pinch
     // zooms, a sideways scroll pans.
+    let mut moved = response.dragged_by(egui::PointerButton::Secondary)
+        || response.dragged_by(egui::PointerButton::Middle);
     if response.hovered() {
         let wheel = Wheel::read(ui);
         if wheel.zoom != 0.0 {
@@ -1453,9 +1880,16 @@ fn show(app: &mut Moonglow, ui: &mut egui::Ui, source: Source, embedded: bool) -
         if wheel.sideways != 0.0 {
             pan(o, egui::vec2(wheel.sideways, 0.0));
         }
+        moved |= wheel.zoom != 0.0 || wheel.sideways != 0.0;
     }
-    app.model_views.insert(key, view);
-    pop_out
+    // (Moved or zoomed by hand: kept where it is as the picture's shape
+    // changes. Turned, it is still framed.)
+    if moved {
+        view.framed = false;
+    }
+    if view.orbit != was {
+        ui.ctx().request_repaint();
+    }
 }
 
 /// Pictures of blueprints, models, creatures' looks and tiles as they look
@@ -1470,6 +1904,9 @@ pub struct Thumbnails {
     /// Asked for this frame and not made (or made before the module last
     /// changed), in the order asked.
     wanted: Vec<Kept>,
+    /// The pictures asked for this frame, made or not, counted: every one
+    /// ([`Thumbnails::shown_now`], for the tests of what asks).
+    shown_now: usize,
     /// The frames, counted, and the module's revision in this one.
     frame: u64,
     revision: Option<u64>,
@@ -1585,6 +2022,7 @@ impl Thumbnails {
         self.revision = revision;
         self.female = female;
         self.wanted.clear();
+        self.shown_now = 0;
     }
 
     /// What pictures `item` (an item's fields: as it would be with another
@@ -1629,6 +2067,7 @@ impl Thumbnails {
     /// changed since).
     pub(crate) fn show(&mut self, keys: impl IntoIterator<Item = Pictured>) {
         for key in keys {
+            self.shown_now += 1;
             let kept = self.kept_as(key);
             match self.made.get_mut(&kept) {
                 Some(made) => {
@@ -1686,6 +2125,21 @@ impl Thumbnails {
     /// How many pictures asked for this frame are still to make.
     pub fn waiting(&self) -> usize {
         self.wanted.len()
+    }
+
+    /// How many pictures were asked for in the frame drawn last, made or
+    /// not, each time one was: for the tests of what asks for them (only
+    /// those in sight and a row ahead, never a whole palette).
+    #[doc(hidden)]
+    pub fn shown_now(&self) -> usize {
+        self.shown_now
+    }
+
+    /// How many pictures were asked for and are made or still to make:
+    /// for the tests of what asks for them.
+    #[doc(hidden)]
+    pub fn asked(&self) -> usize {
+        self.made.len() + self.wanted.len()
     }
 
     /// How many pictures are being read apart, or wait to be drawn for
@@ -2511,6 +2965,13 @@ fn render_picture(app: &mut Moonglow, scene: &Scene, camera: &Camera, apart: boo
     if apart && (drawn.textures_pending > 0 || drawn.game_pending > 0) {
         return Err(Waiting);
     }
+    // (Nothing of it drawn: its meshes wholly see-through, as an invisible
+    // creature's are (Null Human's, alpha 0, which the renderer leaves
+    // out), and no particles. No picture, as one that failed: the kind's
+    // icon and "No picture" in a gallery, not an empty tile; U30's #12.)
+    if drawn.meshes == 0 && drawn.game == 0 && scene.particles.is_empty() {
+        return Ok(None);
+    }
     let id = vp.render_state.renderer.write().register_native_texture(
         &vp.gpu.device,
         &view,
@@ -2728,5 +3189,81 @@ mod tests {
             assert!(drawn[0].iter().any(|&b| b > 0), "{key}: a picture");
             assert!(drawn[0] == drawn[1], "{key}: the same with the Shadow switch on");
         }
+    }
+
+    /// A long plank's points (6 m along x, 0.3 by 0.4 m), every vertex of
+    /// a mesh of `n` along it, about its middle.
+    fn plank(n: usize) -> Vec<Vec3> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1).max(1) as f32;
+                let corner = i % 4;
+                let y = if corner & 1 == 0 { -0.15 } else { 0.15 };
+                let z = if corner & 2 == 0 { 0.0 } else { 0.4 };
+                Vec3::new(-3.0 + 6.0 * t, y, z)
+            })
+            .collect()
+    }
+
+    /// M5's W8 (the owner's rulings "preview turn: a" and "fit: b"): the
+    /// fit holds every point inside the picture at every yaw at the pitch
+    /// it is made for, in a tall picture and a wide one, and comes near the
+    /// picture's edge at some yaw (no larger than it needs); it is the fit
+    /// of the hull's corners alone (the same for the points inside them).
+    #[test]
+    fn the_fit_holds_the_points_at_every_turn() {
+        let points = plank(400);
+        let target = Vec3::new(0.0, 0.0, 0.2);
+        let corners: Vec<Vec3> = [-3.0f32, 3.0]
+            .iter()
+            .flat_map(|x| {
+                [(-0.15f32, 0.0f32), (0.15, 0.0), (-0.15, 0.4), (0.15, 0.4)]
+                    .map(|(y, z)| Vec3::new(*x, y, z))
+            })
+            .collect();
+        for pitch in [-0.8f32, 0.0, 0.35, 20f32.to_radians(), 1.2] {
+            let fit = Fit::of(target, &points, pitch);
+            for aspect in [319.0 / 864.0, 906.0 / 631.0, 1.0] {
+                let d = fit.distance(aspect);
+                let corners_d = Fit::of(target, &corners, pitch).distance(aspect);
+                assert!(
+                    (d - corners_d).abs() < 1e-3,
+                    "{pitch} {aspect}: {d} by every point, {corners_d} by the corners"
+                );
+                let mut most = 0f32;
+                for y in 0..144 {
+                    let yaw = y as f32 * 2.5f32.to_radians() + 0.01;
+                    let camera = Orbit { target, yaw, pitch, distance: d }.camera();
+                    for c in &corners {
+                        let at = mg_area::pick::project(&camera, aspect, *c).expect("in front");
+                        let inside = (0.0..=1.0).contains(&at.x) && (0.0..=1.0).contains(&at.y);
+                        assert!(inside, "{aspect}: yaw {yaw}, pitch {pitch}: {c} at {at}");
+                        most = most.max((2.0 * at.x - 1.0).abs().max((2.0 * at.y - 1.0).abs()));
+                    }
+                }
+                assert!(most > 0.9, "{pitch} {aspect}: larger than it needs, nearest {most}");
+            }
+        }
+    }
+
+    /// What framing costs (M5's W8, review D's 1.7 ms for 50,000 points
+    /// fitted every frame of a dock's drag): made once from the points,
+    /// then a picture of another shape fitted from what was kept. By hand:
+    /// `cargo test -p mg-ui --release --lib -- fit_costs --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn fit_costs() {
+        let points = plank(50_000);
+        let target = Vec3::new(0.0, 0.0, 0.2);
+        let started = std::time::Instant::now();
+        let fit = Fit::of(target, &points, 0.35);
+        let made = started.elapsed();
+        let started = std::time::Instant::now();
+        let mut sum = 0.0;
+        for i in 0..10_000 {
+            sum += fit.distance(0.3 + i as f32 * 1e-4);
+        }
+        let shaped = started.elapsed() / 10_000;
+        println!("made from 50,000 points: {made:?}; a shape fitted from it: {shaped:?} ({sum})");
     }
 }

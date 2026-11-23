@@ -26,6 +26,43 @@ fn conversation_lines_show_their_talk_table_text() {
     h.get_by_label_contains("From the talk table (string 12): Paladin");
 }
 
+/// A line whose text is the talk table's (its own text empty, a strref
+/// set) counts the letters and words shown, the talk table's string, not
+/// "0 letters, 0 words" (the proposal's finding 13.2, fixed in M4's U14):
+/// a talk table of our own, no game data.
+#[test]
+fn a_talk_table_line_counts_the_text_shown() {
+    let dir = mg_testkit::scratch_dir("ui-dialog-tlk-count");
+    let path = sample_module(&dir);
+    let mut g = mg_module::dialog::new_dialog();
+    mg_module::dialog::add_node(&mut g, mg_module::dialog::Parent::Root, "");
+    let entries = g.root.list_mut("EntryList").unwrap();
+    entries[0].set("Text", mg_gff::Value::LocString(LocString::from_strref(mg_core::StrRef(1))));
+    let mut m = Module::open(&path).unwrap();
+    let key = ResKey::parse("tlkcount", ResType::DLG).unwrap();
+    m.set_gff(key, &g).unwrap();
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    let mut tlk = mg_tlk::Tlk::new(mg_core::Language::ENGLISH);
+    tlk.entries.push(mg_tlk::TlkEntry::text("Bad Strref"));
+    tlk.entries.push(mg_tlk::TlkEntry::text("Well met, traveler. Rest here."));
+    let rm = mg_resman::ResMan::new();
+    app.game = Some(std::sync::Arc::new(mg_rules::GameData::new(rm, tlk)));
+    app.open_module(&path);
+    app.actions.push(mg_ui::Action::OpenTab(Tab::Dialog(key)));
+    let mut h = harness(app, 1600.0, 900.0);
+    settle(&mut h);
+    h.get_by_label_contains("Well met, traveler").click();
+    settle(&mut h);
+    h.get_by_label_contains("From the talk table (string 1): Well met, traveler. Rest here.");
+    let count = h.get_by_label_contains("letters,").accesskit_node().value().unwrap_or_default();
+    let count = match count.is_empty() {
+        true => h.get_by_label_contains("letters,").accesskit_node().label().unwrap_or_default(),
+        false => count,
+    };
+    assert!(count.starts_with("Line: 30 letters, 5 words."), "{count}");
+}
+
 #[test]
 fn conversation_editor_builds_and_links() {
     let dir = mg_testkit::scratch_dir("ui-dialog");
@@ -48,8 +85,7 @@ fn conversation_editor_builds_and_links() {
         n.accesskit_node().role() == egui::accesskit::Role::MultilineTextInput
     };
     let add_line = |h: &mut Harness<'_, Moonglow>, text: &str| {
-        h.get_by_label("Add").click();
-        h.run();
+        dialog_click(h, "Add");
         h.get_all_by_role(egui::accesskit::Role::MultilineTextInput).find(is_text).unwrap().click();
         h.run();
         h.get_all_by_role(egui::accesskit::Role::MultilineTextInput)
@@ -61,7 +97,10 @@ fn conversation_editor_builds_and_links() {
         h.run();
     };
     let click = |h: &mut Harness<'_, Moonglow>, label: &str| {
-        h.get_by_label(label).click();
+        match HEADER_NAMES.contains(&label) {
+            true => dialog_click(h, label),
+            false => h.get_by_label(label).click(),
+        }
         h.run();
     };
     add_line(&mut h, "Hello there.");
@@ -110,54 +149,20 @@ fn conversation_editor_builds_and_links() {
     assert_eq!(texts(&doc(&mut h)).len(), 5);
 }
 
-/// The conversation editor's lower pane stays as tall as it is dragged
-/// to: taller than what it shows (it went back to its content when that
-/// was less), and shorter (its pages scroll).
-#[test]
-fn the_conversation_editor_s_lower_pane_keeps_its_size() {
-    use mg_module::dialog::{Parent, add_node, new_dialog};
-    let dir = mg_testkit::scratch_dir("ui-dialog-pane");
-    let path = sample_module(&dir);
-    let key = ResKey::parse("talk", ResType::DLG).unwrap();
-    let mut g = new_dialog();
-    add_node(&mut g, Parent::Root, "Hello there.");
-    let mut m = Module::open(&path).unwrap();
-    m.set_gff(key, &g).unwrap();
-    m.save().unwrap();
-    let mut app = app_with(Vec::new());
-    app.open_module(&path);
-    app.actions.push(mg_ui::Action::OpenTab(Tab::Dialog(key)));
-    let mut h = harness(app, 1200.0, 900.0);
-    h.run_steps(3);
-    // (The pane's top edge: just above its page tabs.)
-    let edge = |h: &Harness<'_, Moonglow>| h.get_by_label("Data").rect().top() - 5.0;
-    let drag = |h: &mut Harness<'_, Moonglow>, by: f32| {
-        let from = egui::pos2(h.get_by_label("Data").rect().center().x + 200.0, edge(h));
-        h.hover_at(from);
-        press(h, from, true, egui::Modifiers::NONE);
-        for k in 1..=5 {
-            h.hover_at(from + egui::vec2(0.0, by * k as f32 / 5.0));
-        }
-        press(h, from + egui::vec2(0.0, by), false, egui::Modifiers::NONE);
-        h.run_steps(3);
-    };
-    h.get_by_label_contains("Hello there.").click();
-    h.run_steps(3);
-    let before = edge(&h);
-    drag(&mut h, -120.0);
-    let taller = edge(&h);
-    assert!(taller < before - 100.0, "dragged taller: {before} → {taller}");
-    // Root chosen: less to show, and the pane stays as it is.
-    h.get_by_label("Root").click();
-    h.run_steps(4);
-    assert!((edge(&h) - taller).abs() < 2.0, "{taller} → {}", edge(&h));
-    // A line again, and the pane dragged shorter than what it shows.
-    h.get_by_label_contains("Hello there.").click();
-    h.run_steps(3);
-    drag(&mut h, 250.0);
-    let shorter = edge(&h);
-    assert!(shorter > taller + 240.0, "dragged shorter: {taller} → {shorter}");
-}
+/// The conversation header's controls (M4's U14): a click on one of
+/// these names in a test goes through [`dialog_click`] (in More where the
+/// window is narrow).
+const HEADER_NAMES: [&str; 9] = [
+    "Add",
+    "Copy",
+    "Cut",
+    "Paste",
+    "Paste As Link",
+    "Delete",
+    "Expand All",
+    "Collapse All",
+    "Test",
+];
 
 /// A script parameter typed in the conversation editor is saved in the
 /// game's codepage, the one it is shown in: "é" as the byte 0xE9, shown
@@ -180,23 +185,31 @@ fn conversation_script_parameters_are_saved_in_the_game_s_codepage() {
     h.run_steps(3);
     h.get_by_label_contains("Hello there.").click();
     h.run_steps(3);
-    h.get_by_label("Actions Taken").click();
+    in_section(&h, "Actions Taken", "Add Parameter").click();
     h.run_steps(3);
-    h.get_by_label("Add Parameter").click();
-    h.run_steps(3);
+    // (The fields of the Actions Taken section, M4's U14: its sections are
+    // on one scroll.)
     let fields = |h: &Harness<'_, Moonglow>| -> Vec<egui::Rect> {
-        h.get_all_by_role(egui::accesskit::Role::TextInput).map(|n| n.rect()).collect()
+        let script = in_section(h, "Actions Taken", "Add Set").rect().bottom();
+        let other = h.get_by_label("Other Actions").rect().top();
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .map(|n| n.rect())
+            .filter(|r| r.top() > script && r.bottom() < other)
+            .collect()
     };
-    // The new parameter's name and value: the last two fields.
+    // The new parameter's name and value: the section's last two fields.
     let at = fields(&h);
     let (name, value) = (at[at.len() - 2], at[at.len() - 1]);
     for (rect, text) in [(name, "who"), (value, "café")] {
         h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
             .find(|n| n.rect() == rect)
             .unwrap()
             .click();
         h.run();
         h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
             .find(|n| n.rect() == rect)
             .unwrap()
             .type_text(text);
@@ -212,6 +225,7 @@ fn conversation_script_parameters_are_saved_in_the_game_s_codepage() {
     // Shown back as typed.
     let shown: Vec<String> = h
         .get_all_by_role(egui::accesskit::Role::TextInput)
+        .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
         .filter_map(|n| n.accesskit_node().value())
         .collect();
     assert!(shown.iter().any(|v| v == "café"), "{shown:?}");
@@ -237,20 +251,28 @@ fn the_conversation_editor_s_text_has_its_own_size() {
     app.actions.push(mg_ui::Action::OpenTab(Tab::Dialog(key)));
     let mut h = window_harness(app);
     h.run();
-    let heights = |h: &Harness<'_, Moonglow>| {
-        let line = h.get_by_label_contains("Hello there.").rect().height();
-        (
-            line,
-            h.get_by_label("Conversation toolbar").get_by_label("Expand All").rect().height(),
-            h.get_by_label("File").rect().height(),
-        )
-    };
-    let (line, button, menu) = heights(&h);
-    h.state_mut().settings.dialog_font_size = Some(24);
+    h.get_by_label_contains("Hello there.").click();
     h.run_steps(3);
-    let (large, large_button, same_menu) = heights(&h);
+    // (Its line, a button of its Data, M4's U14's panel, and its header's
+    // Expand All, which keeps the kit's size: the header is chrome, as
+    // the Top Bar is.)
+    // (And a section's heading of Data: panel content, larger with its
+    // labels, the coordinator's ruling at U14's review.)
+    let heights = |h: &mut Harness<'_, Moonglow>| {
+        let line = h.get_by_label_contains("Hello there.").rect().height();
+        let token = h.get_by_label("Token…").rect().height();
+        let heading = h.get_by_label("Text Appears When…").rect().height();
+        let expand = dialog_tool(h, "Expand All").rect().height();
+        ((line, token, heading), expand, h.get_by_label("File").rect().height())
+    };
+    let ((line, button, heading), header, menu) = heights(&mut h);
+    h.state_mut().settings.dialog_font_size = Some(24);
+    settle(&mut h);
+    let ((large, large_button, large_heading), same_header, same_menu) = heights(&mut h);
     assert!(large > line * 1.5, "{line} to {large}");
     assert!(large_button > button * 1.5, "{button} to {large_button}");
+    assert!(large_heading > heading * 1.4, "the heading {heading} to {large_heading}");
+    assert_eq!(same_header, header, "the header as it was");
     assert_eq!(same_menu, menu, "the window's own text is as it was");
 }
 
@@ -282,11 +304,11 @@ fn conversation_search_bookmarks_and_test() {
     // Search finds the line and selects it in the tree. Ctrl+F, with the
     // pointer over the editor, opens the Search pane; F3 finds.
     assert!(h.query_by_label("Find What").is_none());
-    let over = h.get_by_label("Test").rect().center();
+    let over = h.get_all_by_label_contains("Hello there.").next().unwrap().rect().center();
     h.hover_at(over);
     h.run();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
-    h.run();
+    h.run_steps(3);
     h.get_by_label("Find What");
     h.state_mut().dialog_views.get_mut(&key).unwrap().search.find = "traveller".into();
     h.run();
@@ -328,13 +350,13 @@ fn conversation_search_bookmarks_and_test() {
 
     // Test mode: the greeting said, the reply chosen, the answer said;
     // back a turn.
-    click(&mut h, "Test");
+    dialog_click(&mut h, "Test");
     h.get_by_label("NPC: Hello there.");
     click(&mut h, "1. Who are you?");
     h.get_by_label("NPC: A traveller.");
     h.get_by_label("[END DIALOGUE]");
     assert_eq!(h.state().dialog_views[&key].test.as_ref().unwrap().len(), 2);
-    click(&mut h, "<-- Back");
+    click(&mut h, "< Back");
     assert!(h.state().dialog_views[&key].test.as_ref().unwrap().is_empty());
     click(&mut h, "Done");
     assert!(h.state().dialog_views[&key].test.is_none());
@@ -367,9 +389,9 @@ fn a_conversation_s_search_lays_out_the_results_in_sight() {
     app.actions.push(mg_ui::Action::OpenTab(Tab::Dialog(key)));
     let mut h = window_harness(app);
     h.run();
+    h.state_mut().show_conversation_search(key);
     {
         let view = h.state_mut().dialog_views.get_mut(&key).unwrap();
-        view.bottom = mg_ui::dialog_view::Bottom::Search;
         view.search.find = "road".into();
         view.search.all_files = true;
     }
@@ -558,14 +580,14 @@ fn conversation_lines_show_their_scripts_and_play_as_the_game_plays_them() {
     h.run();
     // The lines name their scripts and journal updates.
     h.get_by_label("if c_seen");
-    h.get_by_label("do a_hello  journal q_intro 10");
-    h.get_by_label("Scripts").click();
-    h.run();
+    // (Each mark its own label: M5's W4 draws a mark whole or not at all.)
+    h.get_by_label("do a_hello");
+    h.get_by_label("journal q_intro 10");
+    dialog_click(&mut h, "Scripts");
     assert!(h.state().settings.dialog_hide_scripts);
     assert!(h.query_by_label("if c_seen").is_none());
     // Played through: the first greeting whose condition passes.
-    h.get_by_label("Test").click();
-    h.run();
+    dialog_click(&mut h, "Test");
     h.get_by_label("NPC: Back again?");
     h.get_by_label("if c_seen: TRUE").click();
     h.run();
@@ -613,8 +635,7 @@ fn conversations_export_and_import() {
     // column for it, to be translated into.
     mg_ui::set_edit_language(mg_core::Language::FRENCH);
     for format in ["Twine (Twee)…", "CSV…"] {
-        h.get_by_label("Export").click();
-        h.run();
+        dialog_click(&mut h, "Export");
         h.get_by_label(format).click();
         h.run();
     }
@@ -626,8 +647,7 @@ fn conversations_export_and_import() {
         .replace("start,,\r\n", "start,,Halte-là !\r\n");
     std::fs::write(&csv, edited).unwrap();
     h.state_mut().dialogs = Box::new(NoDialogs { open: vec![csv], ..Default::default() });
-    h.get_by_label("Import Lines…").click();
-    h.run();
+    dialog_click(&mut h, "Import Lines…");
     let line = |h: &mut Harness<'_, Moonglow>, k: ResKey| {
         let g = h.state_mut().ws.as_mut().unwrap().doc(&k).unwrap().clone();
         text(&nodes(&g, Kind::Entry)[0])
@@ -729,7 +749,10 @@ fn conversation_options_popup_link_directions_drag_and_backup() {
             .collect()
     };
     let click = |h: &mut Harness<'_, Moonglow>, label: &str| {
-        h.get_all_by_label(label).last().unwrap().click();
+        match HEADER_NAMES.contains(&label) {
+            true => dialog_click(h, label),
+            false => h.get_all_by_label(label).last().unwrap().click(),
+        }
         h.run();
     };
     // The popup's text field (its text is also a text run).
@@ -851,6 +874,8 @@ fn dialog_from_tree(name: &str, g: &Gff) -> (Harness<'static, Moonglow>, ResKey)
     app.open_module(&path);
     let mut h = harness(app, 1200.0, 800.0);
     h.run();
+    // (The builder unfolds the Left Dock, folded at this width.)
+    unfold_left_dock(&mut h);
     h.get_by_label_contains("Conversations").click();
     h.run();
     h.get_by_label("talk").click();
@@ -860,15 +885,6 @@ fn dialog_from_tree(name: &str, g: &Gff) -> (Harness<'static, Moonglow>, ResKey)
     h.run();
     assert!(h.state().dock.find_tab(&Tab::Dialog(key)).is_some());
     (h, key)
-}
-
-/// A conversation's lines as its outline: kind, text and whether a link.
-fn dialog_lines(h: &mut Harness<'_, Moonglow>, key: ResKey) -> Vec<String> {
-    let g = h.state_mut().ws.as_mut().unwrap().doc(&key).unwrap().clone();
-    mg_module::dialog::outline(&g)
-        .iter()
-        .map(|l| l.split('|').take(3).collect::<Vec<_>>().join("|"))
-        .collect()
 }
 
 /// A greeting with a nested branch, a second greeting with a link to the
@@ -923,7 +939,10 @@ fn paste_as_link_goes_to_the_line_copied_after_a_delete() {
         h.run();
     };
     let click = |h: &mut Harness<'_, Moonglow>, label: &str| {
-        h.get_all_by_label(label).next().unwrap().click();
+        match HEADER_NAMES.contains(&label) {
+            true => dialog_click(h, label),
+            false => h.get_all_by_label(label).next().unwrap().click(),
+        }
         h.run();
         h.run();
     };
@@ -966,7 +985,7 @@ fn paste_as_link_goes_to_the_line_copied_after_a_delete() {
     select(&mut h, hello, 2);
     click(&mut h, "Cut");
     select(&mut h, Parent::Root, 1);
-    let button = h.get_all_by_label("Paste As Link").next().unwrap();
+    let button = dialog_tool(&mut h, "Paste As Link");
     assert!(button.accesskit_node().is_disabled(), "the line cut is no line to link to");
 }
 
@@ -983,8 +1002,7 @@ fn input_text_adds_under_its_line_after_a_delete_behind_it() {
     let other = Row { parent: Parent::Root, pos: 1 };
     h.state_mut().dialog_views.get_mut(&key).unwrap().selected = Some(other);
     h.run();
-    h.get_all_by_label("Add").next().unwrap().click();
-    h.run();
+    dialog_click(&mut h, "Add");
     h.get_by_label("Enter what the player says next:");
     // The first greeting deleted behind the popup: "Other." is entry 0.
     let delete_first = |h: &mut Harness<'_, Moonglow>| {
@@ -1016,8 +1034,7 @@ fn input_text_adds_under_its_line_after_a_delete_behind_it() {
     h.state_mut().dialog_views.get_mut(&key).unwrap().selected =
         Some(Row { parent: Parent::Node(Kind::Entry, 0), pos: 0 });
     h.run();
-    h.get_all_by_label("Add").next().unwrap().click();
-    h.run();
+    dialog_click(&mut h, "Add");
     h.get_by_label("Enter what the NPC says next:");
     delete_first(&mut h);
     h.run();
@@ -1184,16 +1201,16 @@ fn delete_line(h: &mut Harness<'_, Moonglow>, key: ResKey, label: &str, nth: usi
             if matches!(by, DeleteBy::Key) {
                 h.key_press(egui::Key::Delete);
             } else {
-                let button = h.get_all_by_label("Delete").next().unwrap();
-                button.click();
+                dialog_click(h, "Delete");
             }
         }
         DeleteBy::Menu => {
             h.get_all_by_label(label).nth(nth).unwrap().click_secondary();
             h.run();
-            let delete = h.get_all_by_label("Delete").collect::<Vec<_>>();
-            assert_eq!(delete.len(), 2, "the menu's Delete and the toolbar's");
-            delete[1].click();
+            // (The menu's, the last drawn: the header's, where it is on the
+            // row and not in its More, before it.)
+            let delete = h.get_all_by_label("Delete").last().expect("the menu's Delete");
+            delete.click();
         }
     }
     h.run();
@@ -1342,8 +1359,6 @@ fn a_conversation_s_list_reached_with_tab_keeps_the_arrows() {
     h.run();
     let line = selected(&h);
     assert!(line.is_some());
-    h.get_by_label("Other Actions").click();
-    h.run_steps(2);
     let combo = egui::accesskit::Role::ComboBox;
     let shows = |h: &Harness<'_, Moonglow>, v: &str| {
         h.query_all_by_role(combo).any(|n| n.accesskit_node().value().as_deref() == Some(v))
@@ -1354,10 +1369,12 @@ fn a_conversation_s_list_reached_with_tab_keeps_the_arrows() {
             .map(|n| n.is_focused())
     };
     assert_eq!(animation(&h), Some(false), "Play Animation, not in focus");
-    // From the page's button, Tab from widget to widget until the list's.
-    h.get_by_label("Other Actions").focus();
+    // From Actions Taken's Script Wizard…, the section before Other
+    // Actions on the Data panel's scroll (M4's U14), Tab from widget to
+    // widget until the list's.
+    in_section(&h, "Actions Taken", "Script Wizard…").focus();
     h.run_steps(2);
-    for _ in 0..20 {
+    for _ in 0..30 {
         if animation(&h) == Some(true) {
             break;
         }
@@ -1500,7 +1517,7 @@ fn the_conversation_tree_s_keys_leave_text_fields_alone() {
     // The Find What field.
     h.get_all_by_label("So, Who are you?").next().unwrap().click();
     h.run();
-    let over = h.get_by_label("Test").rect().center();
+    let over = h.get_all_by_label("So, Who are you?").next().unwrap().rect().center();
     h.hover_at(over);
     h.run();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
@@ -1959,11 +1976,11 @@ fn folding_over_the_selection_selects_the_line_folded() {
     h.run();
     assert!(h.state().dialog_views[&key].collapsed.contains(&(Kind::Entry, 2)));
     assert_eq!(selected(&h), Some(Row { parent: Parent::Node(Kind::Entry, 0), pos: 1 }));
-    h.get_by_label("Conversation toolbar").get_by_label("Expand All").click();
+    dialog_click(&mut h, "Expand All");
     h.run();
     h.get_by_label("[OWNER] - A traveller.").click();
     h.run();
-    h.get_by_label("Conversation toolbar").get_by_label("Collapse All").click();
+    dialog_click(&mut h, "Collapse All");
     h.run();
     h.run();
     assert_eq!(selected(&h), hello);
@@ -2005,10 +2022,15 @@ fn bookmarks_and_folded_lines_follow_their_lines_across_a_delete() {
     // (Who has nothing under it now: the conversation ends there.)
     h.get_by_label("Who are you? [END DIALOGUE]");
     assert!(h.query_by_label("Who are you?").is_none(), "the link still hidden");
-    h.get_by_label("Bookmarks").click();
-    h.run();
-    h.get_by_label("Entry 1: Go away.");
-    h.get_by_label("Reply 1: Bye.");
+    // (Its bookmarks in the Outliner, M4's U15: their rows follow them;
+    // its window too narrow for the pane, folded to its strip: unfolded.)
+    settle(&mut h);
+    crate::conversation_outliner::unfold_window_outliner(&mut h);
+    let rows = |h: &Harness<'_, Moonglow>| {
+        let rows = crate::conversation_outliner::outliner_rows(h);
+        rows.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&h), ["Entry 1: Go away.", "Reply 1: Bye."]);
     assert!(h.query_by_label_contains("Farewell").is_none());
     // Undone: as they were, in their order; redone: as after the delete.
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
@@ -2017,7 +2039,8 @@ fn bookmarks_and_folded_lines_follow_their_lines_across_a_delete() {
     assert_eq!(dialog_lines(&mut h, key), BRANCHING);
     assert_eq!(marks(&h), [(e, 2), (r, 1), (r, 2)]);
     assert_eq!(folds(&h), [(e, 2)].into());
-    h.get_by_label("Reply 1: Farewell.");
+    settle(&mut h);
+    assert_eq!(rows(&h), ["Entry 2: Go away.", "Reply 1: Farewell.", "Reply 2: Bye."]);
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Y);
     h.run();
     h.run();
@@ -2042,6 +2065,8 @@ fn a_letter_typed_in_a_tree_leaves_the_area_camera() {
     else {
         return;
     };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     let target = |h: &Harness<'_, Moonglow>| h.state().area_views[&area].orbit.unwrap().target;
     // W held a few frames, as typed: its key, then its letter.
     let hold = |h: &mut Harness<'_, Moonglow>, key: egui::Key, text: &str| {
@@ -2160,18 +2185,17 @@ fn a_line_s_actions_taken_page_holds_still() {
         h.run_steps(6);
         h.get_by_label_contains("Hello there, traveller").click();
         h.run_steps(3);
-        h.get_by_label("Actions Taken").click();
-        h.run_steps(3);
         for w in (6000..=13000).step_by(431) {
             for ht in (5000..=9500).step_by(377) {
                 let size = egui::vec2(w as f32 / 10.0, ht as f32 / 10.0);
                 h.set_size(size);
                 h.run_steps(10);
-                // Switched to the page: it settles (its repaints end) and
-                // stays where it settled.
-                h.get_by_label("Text Appears When…").click();
+                // Switched to the line from Root: it settles (its repaints
+                // end) and stays where it settled. (Its sections on one
+                // scroll since M4's U14: no page to switch to.)
+                h.get_by_label("Root").click();
                 h.run_steps(3);
-                h.get_by_label("Actions Taken").click();
+                h.get_by_label_contains("Hello there, traveller").click();
                 let settled = (0..3).any(|_| h.try_run().is_ok());
                 let mut at = Vec::new();
                 for _ in 0..6 {
@@ -2244,7 +2268,7 @@ fn select_token_and_conversation_test_resize_from_the_corner_dragged() {
     cancel.expect("Select Token's Cancel").click();
     settle(&mut h);
     assert!(h.query_by_label("Select Token").is_none());
-    h.get_by_label("Test").click();
+    dialog_click(&mut h, "Test");
     settle(&mut h);
     let title = format!("Conversation Test: {key}");
     drag(&mut h, &title, egui::vec2(80.0, 100.0));
@@ -2329,6 +2353,7 @@ fn action(h: &mut Harness<'_, Moonglow>, key: &ResKey, i: u32) -> (String, Vec<(
 /// The text fields' values, as shown.
 fn shown_fields(h: &Harness<'_, Moonglow>) -> Vec<String> {
     h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
         .filter_map(|n| n.accesskit_node().value())
         .collect()
 }
@@ -2345,15 +2370,22 @@ fn parameter_sets_are_saved_and_added_to_another_line() {
     h.get_by_label_contains("Hello there.").click();
     settle(&mut h);
     // Nothing saved yet: the menu says so.
-    h.get_by_label("Add Set").click();
+    let when = "Text Appears When…";
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     assert!(h.query_by_label("No parameter sets saved yet").is_some());
     h.key_press(egui::Key::Escape);
     settle(&mut h);
+    set_commands(&mut h, when);
     h.get_by_label("Save Set…").click();
     settle(&mut h);
     let before = h.state_mut().ws.as_mut().unwrap().doc(&key).unwrap().clone();
-    h.get_all_by_role(egui::accesskit::Role::TextInput).last().unwrap().type_text("Skill check");
+    // (The name's field, beside its label.)
+    let y = h.get_by_label("Set name").rect().center().y;
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| (n.rect().center().y - y).abs() < 8.0)
+        .expect("the set's name's field")
+        .type_text("Skill check");
     h.run();
     assert!(h.query_by_label("A set of that name is replaced.").is_none(), "none kept yet");
     // (A set of the name kept: said, as the variable sets' row says it.
@@ -2375,7 +2407,7 @@ fn parameter_sets_are_saved_and_added_to_another_line() {
     // Added to "Go away."'s condition.
     h.get_by_label_contains("Go away.").click();
     settle(&mut h);
-    h.get_by_label("Add Set").click();
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     h.get_by_label("Skill check").hover();
     settle(&mut h);
@@ -2406,11 +2438,15 @@ fn parameter_sets_are_saved_and_added_to_another_line() {
     // stays, and the set's step takes back only what the set did.
     let mine = h
         .get_all_by_role(egui::accesskit::Role::TextInput)
+        .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
         .find(|n| n.accesskit_node().value().as_deref() == Some("7"))
         .unwrap()
         .rect();
     for typing in [false, true] {
-        let field = h.get_all_by_role(egui::accesskit::Role::TextInput).find(|n| n.rect() == mine);
+        let field = h
+            .get_all_by_role(egui::accesskit::Role::TextInput)
+            .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .find(|n| n.rect() == mine);
         match typing {
             false => field.unwrap().click(),
             true => field.unwrap().type_text("5"),
@@ -2422,7 +2458,7 @@ fn parameter_sets_are_saved_and_added_to_another_line() {
     }
     assert!(h.ctx.text_edit_focused(), "the value is being typed");
     assert!(shown_fields(&h).iter().any(|v| v == "75"));
-    h.get_by_label("Add Set").click();
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     h.get_by_label("Skill check").click();
     settle(&mut h);
@@ -2452,11 +2488,13 @@ fn parameter_sets_are_kept_in_files_of_ones_choosing() {
     let (mut h, key, _) = parameter_sets_harness("ui-dialog-param-files");
     h.get_by_label_contains("Hello there.").click();
     settle(&mut h);
-    h.get_by_label("Actions Taken").click();
-    settle(&mut h);
+    let taken = "Actions Taken";
     // Nothing yet: nothing to save.
+    set_commands(&mut h, taken);
     assert!(h.get_by_label("Save Set…").accesskit_node().is_disabled());
     assert!(h.get_by_label("Save to File…").accesskit_node().is_disabled());
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
     let scratch = mg_testkit::scratch_dir("ui-dialog-param-files-elsewhere");
     let gold = scratch.join("gold.params.json");
     let gold_set = ParamSet {
@@ -2477,7 +2515,7 @@ fn parameter_sets_are_kept_in_files_of_ones_choosing() {
         open_many: vec![vec![gold.clone(), broken, more]],
         ..Default::default()
     });
-    h.get_by_label("Add Set").click();
+    in_section(&h, taken, "Add Set").click();
     settle(&mut h);
     h.get_by_label("Add from File…").click();
     settle(&mut h);
@@ -2500,15 +2538,25 @@ fn parameter_sets_are_kept_in_files_of_ones_choosing() {
     // ending).
     let out = scratch.join("given");
     h.state_mut().dialogs = Box::new(NoDialogs { save: vec![out], ..Default::default() });
+    set_commands(&mut h, taken);
     h.get_by_label("Save to File…").click();
     settle(&mut h);
     let back = param_sets::load_file(&scratch.join("given.params.json")).unwrap();
     assert_eq!(back.script, Some(ResRef::from_str("ttc_a_givegold").unwrap()));
     assert_eq!(back.parameters.len(), 3);
-    // The other tab is the condition's own.
-    h.get_by_label("Text Appears When…").click();
-    settle(&mut h);
-    assert!(!shown_fields(&h).iter().any(|v| v == "GOLD"));
+    // The condition's are its own.
+    assert!(!condition(&mut h, &key, 0).1.iter().any(|(n, _)| n == "GOLD"));
+}
+
+/// The menu of the parameter sets' commands of the section `heading`
+/// (Save Set…, Copy Set, Paste Set, Save to File…: the board's `…`),
+/// opened.
+fn set_commands(h: &mut Harness<'_, Moonglow>, heading: &str) {
+    // (Scrolled into sight first: Data's sections are on one scroll.)
+    in_section(h, heading, mg_ui::dialog_view::SET_COMMANDS).scroll_to_me();
+    settle(h);
+    in_section(h, heading, mg_ui::dialog_view::SET_COMMANDS).click();
+    settle(h);
 }
 
 /// What was copied to the clipboard in the frame just run.
@@ -2521,7 +2569,8 @@ fn copied(h: &Harness<'_, Moonglow>) -> Option<String> {
 
 /// Paste Set pressed, which asks for the clipboard, and the clipboard's
 /// `text` given as the backend gives it: as the next frame's Paste.
-fn paste_set(h: &mut Harness<'_, Moonglow>, text: &str) {
+fn paste_set(h: &mut Harness<'_, Moonglow>, heading: &str, text: &str) {
+    set_commands(h, heading);
     h.get_by_label("Paste Set").click();
     h.step();
     let asked = (h.output().viewport_output.get(&egui::ViewportId::ROOT))
@@ -2546,6 +2595,8 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     let (mut h, key, sets) = parameter_sets_harness("ui-dialog-param-copy");
     h.get_by_label_contains("Hello there.").click();
     settle(&mut h);
+    let when = "Text Appears When…";
+    set_commands(&mut h, when);
     h.get_by_label("Copy Set").click();
     h.step();
     let text = copied(&h).expect("the set copied");
@@ -2562,7 +2613,7 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     assert!(param_sets::list(Some(&sets)).is_empty(), "no set saved");
     // The line copied too (the editor's Copy): Paste Set's paste is the
     // set's, not the lines'.
-    h.get_by_label("Copy").click();
+    dialog_click(&mut h, "Copy");
     settle(&mut h);
     assert!(h.state().dialog_clip.is_some());
     let lines = |h: &mut Harness<'_, Moonglow>| {
@@ -2573,7 +2624,7 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     // Pasted on "Go away."'s condition.
     h.get_by_label_contains("Go away.").click();
     settle(&mut h);
-    paste_set(&mut h, &text);
+    paste_set(&mut h, when, &text);
     let expect =
         pairs(&[("DC", "1"), ("MINE", "7"), ("CHECK", "12"), ("FEEDBACK", "1"), ("SHOW_DC", "1")]);
     assert_eq!(condition(&mut h, &key, 1), ("ttc_c_skillcheck".into(), expect));
@@ -2587,7 +2638,7 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     assert_eq!(condition(&mut h, &key, 1), was);
     // Text that isn't a set (what Moonglow puts there for copied lines):
     // said so, nothing changed.
-    paste_set(&mut h, "Moonglow Toolset: conversation lines");
+    paste_set(&mut h, when, "Moonglow Toolset: conversation lines");
     assert_eq!(condition(&mut h, &key, 1), was);
     assert_eq!(lines(&mut h), before, "no lines pasted");
     let log: Vec<String> = h.state().log.entries.iter().map(|(_, m)| m.clone()).collect();
@@ -2598,6 +2649,7 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     // A paste that doesn't come (nothing on the clipboard) isn't waited
     // for past a click: a later paste isn't Paste Set's.
     h.state_mut().dialog_clip = None;
+    set_commands(&mut h, when);
     h.get_by_label("Paste Set").click();
     h.step();
     h.get_by_label_contains("Go away.").click();
@@ -2612,12 +2664,17 @@ fn parameter_sets_are_copied_and_pasted_without_saving_one() {
     settle(&mut h);
     h.get_by_label_contains("Farewell.").click();
     settle(&mut h);
-    h.get_by_label("Actions Taken").click();
-    settle(&mut h);
+    let taken = "Actions Taken";
+    set_commands(&mut h, taken);
     assert!(h.get_by_label("Copy Set").accesskit_node().is_disabled(), "nothing to copy");
-    paste_set(&mut h, &text);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    paste_set(&mut h, taken, &text);
     assert_eq!(action(&mut h, &other, 0), ("ttc_c_skillcheck".into(), skill));
+    set_commands(&mut h, taken);
     assert!(!h.get_by_label("Copy Set").accesskit_node().is_disabled());
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
     h.state_mut().actions.push(mg_ui::Action::Undo);
     settle(&mut h);
     assert_eq!(action(&mut h, &other, 0), (String::new(), Vec::new()));
@@ -2638,7 +2695,8 @@ fn parameter_sets_are_managed() {
     std::fs::write(sets.join("Broken.params.json"), "{ \"parameters\": [").unwrap();
     h.get_by_label_contains("Go away.").click();
     settle(&mut h);
-    h.get_by_label("Add Set").click();
+    let when = "Text Appears When…";
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     for label in ["Check", "Gold", "Add from File…", "Manage Sets…", "Open Sets Folder"] {
         assert!(h.query_by_label(label).is_some(), "{label}");
@@ -2691,11 +2749,11 @@ fn parameter_sets_are_managed() {
     assert!(h.query_by_label("Parameter Sets").is_none(), "closed");
     let view = &h.state().dialog_views[&key];
     assert!(view.param_sets.is_none() && view.selected.is_some(), "the line still selected");
-    assert!(h.query_by_label("Add Set").is_some());
+    assert!(h.query_all_by_label("Add Set").next().is_some());
     // Open Sets Folder makes the folder where it isn't.
     let fresh = sets.with_file_name("fresh");
     h.state_mut().param_set_dir = Some(fresh.clone());
-    h.get_by_label("Add Set").click();
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     assert!(h.query_by_label("No parameter sets saved yet").is_some());
     h.get_by_label("Open Sets Folder").click();
@@ -2705,9 +2763,12 @@ fn parameter_sets_are_managed() {
     // and the menu says why.
     h.state_mut().param_set_dir = None;
     settle(&mut h);
+    set_commands(&mut h, when);
     assert!(h.get_by_label("Save Set…").accesskit_node().is_disabled());
     assert!(!h.get_by_label("Save to File…").accesskit_node().is_disabled());
-    h.get_by_label("Add Set").click();
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    in_section(&h, when, "Add Set").click();
     settle(&mut h);
     assert!(h.query_by_label("Moonglow has no data folder to keep sets in").is_some());
 }

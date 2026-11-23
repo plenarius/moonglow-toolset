@@ -1,6 +1,7 @@
 //! The script editor and compiling.
 
 use crate::common::*;
+use mg_ui::search_results::Hit;
 
 fn script_cursor(h: &Harness<'_, Moonglow>, key: ResKey) -> Option<(usize, usize)> {
     let state = egui::text_edit::TextEditState::load(&h.ctx, egui::Id::new(("script", key)))?;
@@ -314,16 +315,23 @@ fn script_wizard_writes_compiles_and_sets_scripts() {
     };
     let type_in_wizard = |h: &mut Harness<'_, Moonglow>, text: &str| {
         let w = h.get_all_by_label("Script Wizard").find(window).unwrap();
-        let field = w.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("a field");
+        let field = w
+            .get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .expect("a field");
         field.click();
         h.run();
         let w = h.get_all_by_label("Script Wizard").find(window).unwrap();
-        w.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text(text);
+        w.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .unwrap()
+            .type_text(text);
         h.run();
     };
 
-    // A condition: female, carrying key_1.
-    h.get_by_label("Script Wizard…").click();
+    // A condition: female, carrying key_1. (Each of the line's two
+    // scripts has its own Script Wizard…, M4's U14.)
+    in_section(&h, "Text Appears When…", "Script Wizard…").click();
     h.run();
     h.run();
     for label in ["Gender", "Item In Inventory", "Next >", "Female", "Next >"] {
@@ -350,9 +358,7 @@ fn script_wizard_writes_compiles_and_sets_scripts() {
     assert_eq!(start.resref("Active").unwrap().as_str(), Some("sc_001"));
 
     // An action: 50 gold.
-    h.get_by_label("Actions Taken").click();
-    h.run();
-    h.get_by_label("Script Wizard…").click();
+    in_section(&h, "Actions Taken", "Script Wizard…").click();
     h.run();
     h.run();
     for label in ["Give rewards", "Next >"] {
@@ -492,7 +498,7 @@ fn the_keys_the_menu_s_and_the_toolbar_s_undo_in_a_script_are_the_script_s() {
     h.run();
     assert_eq!(script(&h), edited, "and Redo gives it again");
     assert_eq!(undoable(&h).as_deref(), Some("Earlier"));
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     assert_eq!(edit_row(&h, "Undo"), "Undo Ctrl+Z", "not the module's step");
     h.get_by_label("Undo Ctrl+Z").click();
@@ -500,7 +506,7 @@ fn the_keys_the_menu_s_and_the_toolbar_s_undo_in_a_script_are_the_script_s() {
     assert_eq!(script(&h), text, "the new line is taken back");
     assert_eq!(undoable(&h).as_deref(), Some("Earlier"), "not the module's Undo");
     assert!(script_has_keys(&h, key), "the keys back in the editor");
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     let redo = edit_row(&h, "Redo");
     h.get_by_label(&redo).click();
@@ -523,11 +529,13 @@ fn the_keys_the_menu_s_and_the_toolbar_s_undo_in_a_script_are_the_script_s() {
     assert_eq!(undoable(&h).as_deref(), Some("Earlier"));
     // With the keys elsewhere (a click in the module tree) and the
     // pointer over the script, the module's, as the Save key is: the
-    // menu names the module's step.
+    // menu names the module's step. (The builder unfolds the Left Dock,
+    // folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.get_by_label("Areas (1)").click();
     h.run_steps(2);
     assert!(!script_has_keys(&h, key));
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     assert_eq!(edit_row(&h, "Undo"), "Undo Earlier Ctrl+Z", "the module's step named");
     h.key_press(egui::Key::Escape);
@@ -568,14 +576,14 @@ fn replace_all_and_replace_are_steps_of_the_script_s_undo() {
         |h: &Harness<'_, Moonglow>| h.state().ws.as_ref().unwrap().can_undo().map(str::to_owned);
     let script = |h: &Harness<'_, Moonglow>| h.state().script_text(key).unwrap();
     let menu_undo = |h: &mut Harness<'_, Moonglow>| {
-        h.get_by_label("Edit").click();
+        menu(h, "Edit").click();
         h.run_steps(2);
         assert_eq!(edit_row(h, "Undo"), "Undo Ctrl+Z", "the script's step, not the module's");
         h.get_by_label("Undo Ctrl+Z").click();
         h.run_steps(3);
     };
     // Replace… from the toolbar, the text never clicked in.
-    h.get_by_label("Replace…").click();
+    script_click(&mut h, "Replace…");
     h.run_steps(3);
     assert!(!script_has_keys(&h, key));
     let search = &mut h.state_mut().script_tools.search;
@@ -613,7 +621,7 @@ fn the_menu_s_undo_in_a_script_in_a_window_of_its_own_is_the_script_s() {
     // of its own, cursor and all: one Undo still takes it back, not
     // only the cursor.)
     h.run_steps(8);
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     h.get_by_label(&edit_row(&h, "Undo")).click();
     h.run_steps(2);
@@ -648,7 +656,7 @@ fn a_rebound_undo_key_is_the_script_s_in_its_editor() {
     assert_eq!(script(&h), edited, "and given again");
     assert_eq!(undoable(&h).as_deref(), Some("Earlier"));
     // The menu names the new key, and its Undo is the script's still.
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     assert_eq!(edit_row(&h, "Undo"), "Undo Ctrl+Alt+U");
 }
@@ -663,7 +671,7 @@ fn a_menu_closed_unused_gives_the_keys_back_to_the_script() {
         |h: &Harness<'_, Moonglow>| h.state().ws.as_ref().unwrap().can_undo().map(str::to_owned);
     let script = |h: &Harness<'_, Moonglow>| h.state().script_text(key).unwrap();
     // Closed by Escape.
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     assert!(!script_has_keys(&h, key), "the click on the menu took the keys");
     h.key_press(egui::Key::Escape);
@@ -683,7 +691,9 @@ fn a_menu_closed_unused_gives_the_keys_back_to_the_script() {
     h.run_steps(2);
     assert_eq!(script(&h), edited);
     // Closed by a click outside the editor (the module tree): nowhere.
-    h.get_by_label("Edit").click();
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    menu(&h, "Edit").click();
     h.run_steps(2);
     h.get_by_label("Areas (1)").click();
     h.run_steps(2);
@@ -793,7 +803,7 @@ fn a_polish_script_reads_saves_and_compiles_in_its_codepage() {
 }
 
 #[test]
-fn build_on_save_opens_the_results_when_something_is_wrong() {
+fn build_on_save_opens_problems_when_something_is_wrong() {
     let Some(root) = mg_testkit::nwn_root() else {
         eprintln!("skipped: no game install");
         return;
@@ -810,8 +820,13 @@ fn build_on_save_opens_the_results_when_something_is_wrong() {
     h.run();
     h.state_mut().actions.push(mg_ui::Action::Save);
     h.run();
-    let build = h.state().build.clone().expect("the Build Module window, with the problem");
-    assert!(build.results.iter().any(|f| f.text.starts_with("Error:")), "{:?}", build.results);
+    // (Problems, M4's U28: its results there, brought to the front with
+    // the Bottom Dock open; no window.)
+    assert!(h.state().build.is_none(), "no window opened");
+    let results = build_results(&h);
+    assert!(results.iter().any(|r| r.starts_with("Error: mg_bad.nss")), "{results:?}");
+    assert_eq!(h.state().bottom_dock_shows(), Some(mg_ui::Panel::Problems));
+    h.get_by_label_contains("Error: mg_bad.nss");
     assert!(h.state().log.entries.iter().any(|(_, m)| m == "Finished Building Module"));
 }
 
@@ -909,7 +924,7 @@ fn tab_indents_as_the_script_does() {
 
     // Converted from the Edit menu: one step to undo.
     let mut h = open(two);
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     h.get_by_label("Convert Indentation to Tabs").click();
     h.run_steps(3);
@@ -929,7 +944,7 @@ fn tab_indents_as_the_script_does() {
     // Taken back with the editor's Undo, Tab indents as before it (two
     // spaces), not as converted.
     let mut h = open(two);
-    h.get_by_label("Edit").click();
+    menu(&h, "Edit").click();
     h.run_steps(2);
     h.get_by_label("Convert Indentation to Tabs").click();
     h.run_steps(3);
@@ -1090,7 +1105,7 @@ fn the_module_s_save_says_a_script_was_not_compiled() {
     h.state_mut().actions.push(mg_ui::Action::Save);
     h.run();
     assert!(h.state().script_tools.messages.is_empty());
-    h.state_mut().script_tools.info = mg_ui::script_tools::InfoTab::Help;
+    h.state_mut().script_tools.info = mg_ui::script_tools::InfoTab::Bookmarks;
     h.state_mut().script_tools.jump = Some((key, 0));
     h.run();
     h.event(egui::Event::Text("a".into()));
@@ -1106,37 +1121,78 @@ fn the_module_s_save_says_a_script_was_not_compiled() {
     h.get_by_label_contains("saved, not compiled");
 }
 
-/// Help shows a function's documentation as the source has it: the
-/// comment lines with their `//` and their columns, then the declaration
+/// Help shows a function's declaration, a parameter to a line, and its
+/// documentation as prose with a row for each parameter (the Script
+/// board's, M4's U12), what is laid out in columns kept as written
 /// (Jasperre's report: lists in nwscript.nss's comments lost their
-/// alignment, the `//` and each line's indentation stripped).
+/// alignment); a click on the name in Reference chooses it, in either
+/// mode, Reference's tab bar left as it was.
 #[test]
-fn help_shows_documentation_as_the_source_has_it() {
-    let dir = mg_testkit::scratch_dir("ui-script-help");
+fn help_shows_documentation_as_prose_with_its_columns_kept() {
+    for mode in MODES {
+        help_as_prose(mode);
+    }
+}
+
+fn help_as_prose(mode: Mode) {
+    let dir = mg_testkit::scratch_dir(&mode.dir("ui-script-help"));
     let path = sample_module(&dir);
     let key = ResKey::parse("hello", ResType::NSS).unwrap();
-    let text = "// Adds.\r\n// - nA:    the first\r\n//           (any)\r\nint Add(int nA) { return nA; }\r\nvoid main() { Add(1); }\r\n";
+    let text = "// Adds.\r\n// 0-10   :  Low.\r\n// 11-89  :  Middle.\r\n// - nA:    the first\r\n//           (any)\r\n// - nB: the second number, which is added to the first one and given back with it as the sum\r\n// * Returns the sum.\r\nint Add(int nA, int nB) { return nA; }\r\nvoid main() { Add(1, 2); }\r\n";
     let mut m = Module::open(&path).unwrap();
     m.set(key, text.as_bytes().to_vec());
     m.save().unwrap();
-    let mut app = app_with(Vec::new());
+    let mut app = app_in(mode, Vec::new());
     app.open_module(&path);
     app.actions.push(mg_ui::Action::OpenTab(Tab::Script(key)));
     let mut h = harness(app, 1200.0, 800.0);
-    h.run();
-    h.get_by_label("Add").click();
-    h.run();
-    assert_eq!(h.state().script_tools.info, mg_ui::script_tools::InfoTab::Help);
-    let shown = h.get_by_label_contains("// - nA:").accesskit_node().value().unwrap_or_default();
+    settle(&mut h);
+    reference_row(&h, "Add").click();
+    settle(&mut h);
+    assert_eq!(h.state().script_tools.help.as_ref().map(|s| s.name.as_str()), Some("Add"));
+    // As Tabs, under 1400 Reference and Help share one tab bar: the click
+    // leaves Reference in front (a double click puts the name in), and
+    // Help's tab shows it.
+    if mode.tabs() {
+        assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::Reference));
+        h.get_by_label(mg_ui::RIGHT_DOCK).get_by_label("Help").click();
+        settle(&mut h);
+        assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::Help));
+    }
+    let value = |h: &Harness<'_, Moonglow>, part: &str| {
+        let node = h.get_by_label_contains(part);
+        node.accesskit_node().value().unwrap_or_default().to_string()
+    };
     assert_eq!(
-        shown, "// Adds.\n// - nA:    the first\n//           (any)\nint Add(int nA)",
-        "as written, then the declaration"
+        value(&h, "int Add("),
+        "int Add(\n    int nA,\n    int nB)",
+        "a parameter to a line"
     );
+    assert_eq!(value(&h, "Adds."), "Adds.");
+    assert_eq!(value(&h, "0-10"), "0-10   :  Low.\n11-89  :  Middle.", "its columns kept");
+    // A row for the parameter: its name, and what it says beside it.
+    let name = h.get_by_label("nA").rect();
+    let said = h.get_by_label("the first (any)").rect();
+    assert!(
+        said.left() > name.right() && (said.top() - name.top()).abs() < 2.0,
+        "{name:?} {said:?}"
+    );
+    assert_eq!(value(&h, "Returns"), "Returns the sum.");
+    // A parameter's long words wrapped within Help, not cut at its edge.
+    let help = h.get_by_label("Help's text").rect();
+    let long = h.get_by_label_contains("the second number").rect();
+    assert!(long.right() <= help.right() + 0.5, "{mode:?}: {long:?} past {help:?}");
+    assert!(long.height() > 20.0, "{mode:?}: on more than one line: {long:?}");
+    // (Help's header names it, where it has one: in the window's pane.)
+    if !mode.tabs() {
+        h.get_by_label("Help, Add");
+    }
 }
 
 /// A `/* … */` comment directly above a function is its documentation in
-/// Help, as written, as BioWare's includes put theirs between `//::` lines
-/// (Jasperre's report); above the definition, where the prototype has none.
+/// Help, as BioWare's includes put theirs after a `//::` line (Jasperre's
+/// report), each its own paragraph (M4's U12: prose, the markers gone);
+/// above the definition, where the prototype has none.
 #[test]
 fn help_takes_a_block_comment_as_documentation() {
     let dir = mg_testkit::scratch_dir("ui-script-help-block");
@@ -1152,14 +1208,18 @@ fn help_takes_a_block_comment_as_documentation() {
     app.actions.push(mg_ui::Action::OpenTab(Tab::Script(key)));
     let mut h = harness(app, 1200.0, 800.0);
     h.run();
-    h.get_by_label("Hidden").click();
+    reference_row(&h, "Hidden").click();
     h.run();
-    let shown =
-        h.get_by_label_contains("Returns TRUE").accesskit_node().value().unwrap_or_default();
-    assert_eq!(
-        shown,
-        "//:: Hidden\n/*\n    Returns TRUE if oSelf is hidden\n*/\nint Hidden(object oSelf)"
-    );
+    let value = |h: &Harness<'_, Moonglow>, part: &str| {
+        let node = h.get_by_label_contains(part);
+        node.accesskit_node().value().unwrap_or_default().to_string()
+    };
+    assert_eq!(value(&h, "int Hidden("), "int Hidden(\n    object oSelf)");
+    assert_eq!(value(&h, "Returns TRUE"), "Returns TRUE if oSelf is hidden", "its prose");
+    let name = h
+        .query_all_by_value("Hidden")
+        .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Label);
+    assert_eq!(name.count(), 1, "the name over it, its own paragraph");
 }
 
 #[test]
@@ -1226,7 +1286,10 @@ fn the_external_script_editor_s_saves_come_back() {
     };
     let dir = mg_testkit::scratch_dir("ui-external-editor");
     let path = sample_module(&dir);
-    let key = ResKey::parse("hello", ResType::NSS).unwrap();
+    // (A script of its own: the copies for the external editor are in the
+    // process's one scratch folder by the script's name, and other tests
+    // open `hello` there at the same time.)
+    let key = ResKey::parse("saves_back", ResType::NSS).unwrap();
     let mut m = Module::open(&path).unwrap();
     m.set(key, b"void main() {}\n".to_vec());
     m.save().unwrap();
@@ -1236,15 +1299,15 @@ fn the_external_script_editor_s_saves_come_back() {
     app.actions.push(mg_ui::Action::OpenTab(Tab::Script(key)));
     let mut h = window_harness(app);
     h.run_steps(3);
-    h.get_by_label("External Editor").click();
+    script_click(&mut h, "External Editor");
     h.run_steps(3);
     // The editor's file: the script; an edit saved there comes back.
     // (In the run's own folder, of a name no one can guess: not the
     // system's temporary folder's `moonglow-PID`, which another user of
     // the machine could make first. The last pass's item 24.)
     let guessable = std::env::temp_dir().join(format!("moonglow-{}", std::process::id()));
-    assert!(!guessable.join("hello.nss").exists());
-    let file = mg_module::build::own_scratch_dir().unwrap().join("edit").join("hello.nss");
+    assert!(!guessable.join("saves_back.nss").exists());
+    let file = mg_module::build::own_scratch_dir().unwrap().join("edit").join("saves_back.nss");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "void main() {}\n");
     std::fs::write(&file, "void main() { int n; }\n").unwrap();
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
@@ -1360,7 +1423,7 @@ fn print_opens_a_highlighted_page_of_the_script() {
     app.actions.push(mg_ui::Action::OpenTab(Tab::Script(key)));
     let mut h = window_harness(app);
     h.run();
-    h.get_by_label("Print…").click();
+    script_click(&mut h, "Print…");
     h.run();
     let page = std::fs::read_to_string(dir.join("print").join("hello.html")).unwrap();
     assert!(page.contains(" &lt; ") && page.contains("window.print()"), "{page}");
@@ -1463,7 +1526,7 @@ fn the_script_editor_s_openers_go_to_the_external_editor_too() {
     };
     assert_eq!(said(&h, "hello"), 0, "a tab opened by itself: Moonglow's editor alone");
     // Open Script.
-    h.get_by_label("Open…").click();
+    script_click(&mut h, "Open…");
     h.run_steps(3);
     let at = h.get_by_label("other_one").rect().center();
     double_click_now(&mut h, at);
@@ -1478,12 +1541,15 @@ fn the_script_editor_s_openers_go_to_the_external_editor_too() {
     assert!(h.state().dock.find_tab(&Tab::Script(nss("fresh"))).is_some());
     assert_eq!(said(&h, "fresh"), 1, "{:?}", h.state().log.entries);
     // Save As, from the script in front.
-    h.get_by_label("Save As…").click();
+    script_click(&mut h, "Save As…");
     h.run_steps(2);
     let window =
         |n: &egui_kittest::Node<'_>| n.accesskit_node().role() == egui::accesskit::Role::Window;
     let w = h.get_all_by_label("Save Script As").find(window).expect("the window");
-    w.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text("fresh_copy");
+    w.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .type_text("fresh_copy");
     h.run_steps(1);
     let w = h.get_all_by_label("Save Script As").find(window).unwrap();
     w.get_by_label("Save").click();
@@ -1577,14 +1643,9 @@ fn script_navigation_definition_references_rename_and_live_errors() {
     assert!(h.state().dock.find_tab(&Tab::Script(inc)).is_some(), "the include opens");
 
     // References: its definition and its use.
-    h.state_mut().show_references(&d);
-    let results: Vec<String> = h
-        .state()
-        .script_tools
-        .search
-        .results
-        .iter()
-        .map(|(k, l, _)| format!("{}:{l}", k.resref))
+    h.state_mut().show_references(&d, None);
+    let results: Vec<String> = (h.state().search_results.hits.iter())
+        .map(|Hit::Line { script, line, .. }| format!("{}:{line}", script.resref))
         .collect();
     assert_eq!(results, ["inc_util:1", "main_a:3"]);
 
@@ -1605,9 +1666,9 @@ fn script_navigation_definition_references_rename_and_live_errors() {
     // Errors as you type: checked once typing pauses, the line shown.
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(main)));
     h.run_steps(3);
-    // (Where the text begins: the error's line is kept for it, there or
-    // not, so the text does not move as one comes and goes; Jasperre's
-    // report.)
+    // (Where the text begins: it does not move as an error comes and
+    // goes, Jasperre's report; since M4's U13 the error is the Status
+    // Bar's message and a wavy underline, no row of its own.)
     let editor = egui::Id::new(("script", main));
     let top =
         |h: &Harness<'_, Moonglow>| h.ctx.read_response(editor).expect("the editor").rect.top();
@@ -1622,15 +1683,16 @@ fn script_navigation_definition_references_rename_and_live_errors() {
     h.run_steps(2);
     let error = h.state().script_error_for_test(main);
     assert_eq!(error.as_ref().map(|e| e.0), Some(Some(3)), "{error:?}");
-    let said = h.get_by_label_contains("line 4:").rect().expand2(egui::vec2(24.0, 4.0));
-    assert!(icon_drawn(&h, mg_uikit::Icon::Error, said), "marked with an error icon");
+    // (Its wavy underline, M4's U13: no row of its own under the header.)
+    let error_color = mg_uikit::tokens(&h.ctx).error;
+    assert_eq!(waves(&h, error_color).len(), 1, "a wavy underline on its line");
     assert_eq!(top(&h), before, "the text stays where it was");
     // Options › Script Editor: no checking as you type.
     h.state_mut().settings.no_live_check = true;
     h.run_steps(2);
-    assert!(h.query_by_label_contains("line 4:").is_none());
-    assert!(h.state().script_error_for_test(main).is_none(), "nor its underline");
-    assert!(top(&h) < before, "and no line kept for one");
+    assert!(waves(&h, error_color).is_empty(), "no underline");
+    assert!(h.state().script_error_for_test(main).is_none(), "nor its error");
+    assert_eq!(top(&h), before, "and the text where it was");
 }
 
 /// A script's laid-out text (a galley a line) is kept while its tab is
@@ -1690,7 +1752,7 @@ fn search_results_keep_ten_thousand_lines_and_draw_those_in_sight() {
     h.run_steps(3);
     h.get_by_label("Find All").click();
     h.run_steps(3);
-    assert_eq!(h.state().script_tools.search.results.len(), 10_000);
+    assert_eq!(h.state().search_results.hits.len(), 10_000);
     let said = "\"word\": 12500 lines found: the first 10000 are in Search Results";
     assert!(h.state().log.entries.iter().any(|(_, m)| m == said), "{:?}", h.state().log.entries);
     h.state_mut().script_tools.search.open = false;
@@ -1770,9 +1832,9 @@ fn rename_symbol_s_places_are_the_module_s_after_an_editor_is_canceled() {
     h.run_steps(4);
     assert!(h.state().dock.find_tab(&Tab::Script(inc)).is_none(), "closed");
     let d = h.state_mut().declaration_at(main, TWICE_IN_MAIN).expect("Twice");
-    h.state_mut().show_references(&d);
-    let results: Vec<String> = (h.state().script_tools.search.results.iter())
-        .map(|(k, l, text)| format!("{}:{l} {text}", k.resref))
+    h.state_mut().show_references(&d, None);
+    let results: Vec<String> = (h.state().search_results.hits.iter())
+        .map(|Hit::Line { script, line, text }| format!("{}:{line} {text}", script.resref))
         .collect();
     assert_eq!(
         results,
@@ -2233,7 +2295,7 @@ fn open_script_s_arrows_choose_among_those_listed() {
     h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Setup", vec![edit])));
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(hello)));
     h.run_steps(4);
-    h.get_by_label("Open…").click();
+    script_click(&mut h, "Open…");
     h.run_steps(3);
     h.get_by_label("All Resources").click();
     h.run_steps(2);
@@ -2270,7 +2332,7 @@ fn open_script_s_escape_clears_the_name_then_closes() {
     h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Setup", vec![edit])));
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(hello)));
     h.run_steps(4);
-    h.get_by_label("Open…").click();
+    script_click(&mut h, "Open…");
     h.run_steps(3);
     let filter = |h: &Harness<'_, Moonglow>| {
         h.state().script_tools.open_script.as_ref().map(|w| w.filter.clone())
@@ -2314,7 +2376,7 @@ fn a_script_editor_opens_other_scripts() {
     h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Setup", edits)));
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(hello)));
     h.run_steps(4);
-    h.get_by_label("Open…").click();
+    script_click(&mut h, "Open…");
     h.run_steps(3);
     // The module's two, as it opens.
     h.get_by_label("2 scripts");
@@ -2335,7 +2397,7 @@ fn a_script_editor_opens_other_scripts() {
     h.state_mut().dock.remove_tab(tab);
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(hello)));
     h.run_steps(3);
-    h.get_by_label("Open…").click();
+    script_click(&mut h, "Open…");
     h.run_steps(3);
     h.get_by_label("Module Resources Only").click();
     h.run_steps(2);
@@ -2384,7 +2446,7 @@ fn open_script_opens_the_scripts_selected_together() {
         w.selected.iter().map(|k| k.resref.to_string()).collect()
     };
     let window = |h: &mut Harness<'_, Moonglow>| {
-        h.get_by_label("Open…").click();
+        script_click(h, "Open…");
         h.run_steps(3);
         // (Past the double-click time of the click before.)
         h.run_steps(30);
@@ -2453,10 +2515,11 @@ fn open_script_opens_the_scripts_selected_together() {
     assert_eq!(selected(&h), all);
     // While a name is typed in its field, they are the field's: Ctrl+A
     // selects its text, not the scripts.
-    (h.get_all_by_role(egui::accesskit::Role::TextInput))
-        .find(|n| n.accesskit_node().placeholder() == Some("Find by name"))
-        .expect("the name field")
-        .click();
+    (h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .filter(|n| n.accesskit_node().label().as_deref() != Some("Quick Open")))
+    .find(|n| n.accesskit_node().placeholder() == Some("Find by name"))
+    .expect("the name field")
+    .click();
     h.run_steps(2);
     h.event(egui::Event::Text("s".into()));
     h.run_steps(2);
@@ -2528,27 +2591,6 @@ fn a_new_line_in_a_script_is_as_far_in_as_the_last() {
     h.run_steps(3);
     let now = h.state().script_text(key).unwrap();
     assert_eq!(now, "void main()\n{\n    int n;\n    x\n}\n");
-}
-
-/// A double click at `at`: two clicks, a frame each.
-/// A double click on a widget: both clicks in one frame (the harness gives
-/// each event it queues a frame of its own, a quarter of a second by
-/// default, longer than egui's double-click time), a second past any
-/// click before at 60 frames a second (else the three are a triple click).
-fn double_click_now(h: &mut Harness<'_, Moonglow>, at: egui::Pos2) {
-    h.hover_at(at);
-    h.run_steps(60);
-    let button = egui::PointerButton::Primary;
-    for pressed in [true, false, true, false] {
-        let modifiers = egui::Modifiers::NONE;
-        h.input_mut().events.push(egui::Event::PointerButton {
-            pos: at,
-            button,
-            pressed,
-            modifiers,
-        });
-    }
-    h.run_steps(2);
 }
 
 /// Where a script editor shows the row that begins with `start` (the
@@ -2721,4 +2763,129 @@ fn the_script_editor_has_no_frame_with_the_keys() {
             .collect();
         assert!(framed.is_empty(), "no frame round the code ({light}): {framed:?}");
     }
+}
+
+/// The script editor's lines and gutter as Script.png draws them (M5's
+/// W3, the owner's ruling 21: "match the board"): its lines 18 points
+/// apart at the 13-point text (24 at Options' 17), the line numbers 12
+/// points after the editor's edge and 10 before the text's field, the
+/// text 8 points into it; a click on a line's lower part takes that line;
+/// a line gone to far down (Go to Line, a result's or a bookmark's jump)
+/// is shown whole; and the window comes to rest with the cursor's line
+/// marked.
+#[test]
+fn the_script_editor_has_the_board_s_line_pitch_and_gutter() {
+    let dir = mg_testkit::scratch_dir("ui-script-pitch");
+    let path = sample_module(&dir);
+    let key = ResKey::parse("long", ResType::NSS).unwrap();
+    let text: String = (0..3000).map(|n| format!("int nLine{n} = {n}; // line {n}\n")).collect();
+    let mut m = Module::open(&path).unwrap();
+    m.set(key, text.clone().into_bytes());
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    app.actions.push(mg_ui::Action::OpenTab(Tab::Script(key)));
+    let mut h = window_harness(app);
+    h.run();
+    h.state_mut().script_tools.jump = Some((key, 0));
+    settle(&mut h);
+    let (a, b) = (script_row(&h, "int nLine0 ").unwrap(), script_row(&h, "int nLine1 ").unwrap());
+    assert_eq!((a.height(), b.top() - a.top()), (18.0, 18.0), "{a:?} {b:?}");
+    // The gutter and the text's field: their room as the board's.
+    let field = h.get_by_role(egui::accesskit::Role::MultilineTextInput).rect();
+    assert_eq!(a.left() - field.left(), 8.0, "the text in its field");
+    let (drawn, band) = Moonglow::script_gutter_for_test(&h.ctx, key).expect("a gutter");
+    // The cursor's line (line 0) marked: its band on its row.
+    assert_eq!(band, Some(a.y_range()), "the current line's band");
+    let char_width = a.width() / "int nLine0 = 0; // line 0".chars().count() as f32;
+    let gutter = 12.0 + 4.0 * char_width + 10.0;
+    assert!((drawn.span() - gutter).abs() < 0.5, "the gutter {drawn:?}, the board's {gutter}");
+    assert_eq!(field.left(), drawn.max, "the field right after the gutter");
+    // The numbers painted on their rows, right-aligned 10 points before
+    // the gutter's end; a bookmark's icon in the 12 points before them.
+    h.state_mut().scripts_mut_bookmark_for_test(key, mg_ui::script_tools::line_start(&text, 3));
+    h.run();
+    h.run();
+    let texts = painted_texts(&h);
+    for n in 0..12 {
+        let row = egui::Rangef::new(a.top() + n as f32 * 18.0, a.top() + (n + 1) as f32 * 18.0);
+        let number = (n + 1).to_string();
+        let at = texts.iter().find(|(t, r)| {
+            *t == number && drawn.contains(r.center().x) && row.contains(r.center().y)
+        });
+        let (_, r) = at.unwrap_or_else(|| panic!("line {number}'s number not on its row"));
+        assert!((r.right() - (drawn.max - 10.0)).abs() < 0.5, "{number} right-aligned: {r:?}");
+    }
+    // (The mark in the first 10 points, 2 clear before the numbers' column:
+    // its ink, which fills about 70% of its square, 3 or more clear.)
+    let pad =
+        egui::Rect::from_x_y_ranges(drawn.min..=drawn.min + 10.0, a.top() + 54.0..=a.top() + 72.0);
+    assert!(painted_inside(&h, pad), "the bookmark's icon before line 4's number");
+    let room = egui::Rect::from_x_y_ranges(drawn.min..=drawn.min + 12.0, pad.y_range());
+    let icon = painted_extent(&h, room).expect("the icon");
+    let column = drawn.min + 12.0;
+    assert!(column - icon.right() >= 3.0, "the icon clear of the numbers: {icon:?}");
+    let above = pad.translate(egui::vec2(0.0, -18.0));
+    assert!(!painted_inside(&h, above), "none before line 3's");
+    // For a screen reader: the gutter by what it shows, the field by the
+    // cursor's line (never one string of every number).
+    let gutter = h.get_by_label("Line numbers 1 to 3001");
+    assert_eq!(gutter.rect().x_range(), drawn, "the gutter named");
+    let said = |h: &Harness<'_, Moonglow>| {
+        let field = h.get_by_role(egui::accesskit::Role::MultilineTextInput);
+        field.accesskit_node().description()
+    };
+    assert_eq!(said(&h).as_deref(), Some("Line 1 of 3001"));
+    // A click on line 5's lower part (2 points above its foot, at the
+    // board's pitch from line 0) takes line 5.
+    let low = egui::pos2(a.left() + 30.0, a.top() + 5.0 * 18.0 + 16.0);
+    click_pos(&h, low);
+    h.run();
+    let start = mg_ui::script_tools::line_start(&text, 5);
+    let (at, _) = script_cursor(&h, key).unwrap();
+    assert!((start..start + 20).contains(&at), "line 5 taken: {at}, its start {start}");
+    // Page Down: the cursor as many lines on as are in sight less one, the
+    // text up by as many of the board's rows, the cursor's line in sight.
+    // (Line 30's row: "int nLine5 " also begins another run in the window.)
+    let before = script_row(&h, "int nLine30 ").unwrap();
+    h.key_press(egui::Key::PageDown);
+    settle(&mut h);
+    let (at, _) = script_cursor(&h, key).unwrap();
+    let line = text[..at].matches('\n').count();
+    let n = line - 5;
+    assert!(n >= 10, "a page of lines: {n}");
+    let after = script_row(&h, "int nLine30 ").map_or(f32::NAN, |r| r.top());
+    let moved = before.top() - after;
+    assert!((moved - n as f32 * 18.0).abs() < 0.5, "{n} lines, scrolled {moved}");
+    assert!(script_row_in_sight(&h, &format!("int nLine{line} ")), "line {line} in sight");
+    // A line far down gone to: shown whole.
+    h.state_mut().script_tools.jump = Some((key, mg_ui::script_tools::line_start(&text, 2750)));
+    h.run();
+    h.run();
+    assert!(script_row_in_sight(&h, "int nLine2750 "));
+    settle(&mut h);
+    let row = script_row(&h, "int nLine2750 ").unwrap();
+    let band = Moonglow::script_gutter_for_test(&h.ctx, key).and_then(|(_, b)| b);
+    assert_eq!(band, Some(row.y_range()), "the band follows the cursor");
+    assert_eq!(said(&h).as_deref(), Some("Line 2751 of 3001"), "and the field says it");
+    // With text selected, no band.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+    settle(&mut h);
+    assert_ne!(script_cursor(&h, key).map(|(a, b)| a == b), Some(true), "a selection");
+    let band = Moonglow::script_gutter_for_test(&h.ctx, key).and_then(|(_, b)| b);
+    assert_eq!(band, None, "no band over a selection");
+    h.key_press(egui::Key::ArrowRight);
+    settle(&mut h);
+    // Options › Script Editor's size: the pitch in the board's ratio.
+    h.state_mut().settings.script_style.font_size = 17;
+    h.run();
+    h.run();
+    let (a, b) =
+        (script_row(&h, "int nLine2750 ").unwrap(), script_row(&h, "int nLine2751 ").unwrap());
+    assert_eq!((a.height(), b.top() - a.top()), (24.0, 24.0), "{a:?} {b:?}");
+    // At rest: a frame's run ends asking for no more, and draws the lines
+    // where they were.
+    rest(&mut h);
+    assert!(h.try_run().is_ok(), "the editor keeps asking for frames");
+    assert_eq!(script_row(&h, "int nLine2750 "), Some(a), "moved at rest");
 }

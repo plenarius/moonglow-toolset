@@ -3072,11 +3072,11 @@ keeper_variable = "tdod_store"
     fn a_mod_reads_its_nwsync_server_beside_it() {
         let dir = mg_testkit::scratch_dir("mg-pf-nwsync-mod");
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("Layonara_8-1.mod");
+        let path = dir.join("krezk.mod");
         crate::Module::new().save_as(&ModuleLocation::Archive(path.clone())).unwrap();
         let sha = "0123456789abcdef0123456789abcdef01234567";
         std::fs::write(
-            dir.join("Layonara_8-1.moonglow.toml"),
+            dir.join("krezk.moonglow.toml"),
             format!(
                 "[nwsync]\nsource = \"https://nwsync.example.org\"\nmanifest = \"{sha}\"\n\
                  keep = 2\ncache = \"/big/nwsync\"\nupload = \"rsync {{part}} x:/y\"\n"
@@ -3091,8 +3091,8 @@ keeper_variable = "tdod_store"
         assert_eq!((s.cache, p.nwsync_keep), (None, Some(2)));
         assert!(p.nwsync_upload.is_none());
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
-        assert!(p.warnings[0].starts_with("Layonara_8-1.moonglow.toml:5: cache is read from"));
-        assert!(p.warnings[1].starts_with("Layonara_8-1.moonglow.toml:6: upload is not read"));
+        assert!(p.warnings[0].starts_with("krezk.moonglow.toml:5: cache is read from"));
+        assert!(p.warnings[1].starts_with("krezk.moonglow.toml:6: upload is not read"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

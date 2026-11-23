@@ -9,13 +9,21 @@ fn filtering_the_tree_opens_its_groups() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     // Scripts start closed.
     assert!(h.query_by_label("hello").is_none());
     // The tree's filter, the first text field.
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().click();
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .click();
     h.run();
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text("hel");
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .type_text("hel");
     h.run();
     h.get_by_label("hello");
 }
@@ -37,6 +45,8 @@ fn the_tree_s_filter_finds_every_word_and_takes_find_s_keys() {
     app.settings.key_bindings.insert("find".into(), vec!["Ctrl+Shift+F".into()]);
     app.open_module(&path);
     let mut h = harness(app, 1200.0, 800.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     h.get_by_label_contains("Scripts (").click();
     h.run_steps(2);
@@ -63,6 +73,8 @@ fn a_tree_row_s_menu_opens_it_in_its_editor() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     let script = ResKey::parse("hello", ResType::NSS).unwrap();
     assert!(h.state().dock.find_tab(&Tab::Script(script)).is_none());
@@ -90,13 +102,20 @@ fn resources_open_in_their_editors() {
     // Tab titles are drawn without accessible labels; check the dock and the
     // editor's content.
     assert!(h.state().dock.find_tab(&Tab::Script(script)).is_some());
-    apart(&h, "Compile");
+    // (The script's header's: on its row, or in its More in a window this
+    // narrow, which is closed again.)
+    script_tool(&mut h, "Compile");
+    if h.query_by_label(SCRIPT_MORE).is_some() {
+        h.key_press(egui::Key::Escape);
+        h.run();
+    }
     let area = ResKey::parse("start", ResType::ARE).unwrap();
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::for_resource(area).unwrap()));
     h.run();
-    // The area viewer, with its object filters.
+    // The area viewer, with its object filters (the header's Show popover:
+    // compact in a window this narrow).
     assert!(h.state().dock.find_tab(&Tab::Area(area.resref)).is_some());
-    area_tool(&h, "Show Placeables");
+    h.get_by_label(AREA_HEADER).get_by_label("Show");
 }
 
 /// The log is among Next Pane's panes (the module tree and the palettes'
@@ -135,7 +154,7 @@ fn the_log_by_the_keyboard() {
     // (From the middle's: the palettes' where their pane is, then the
     // log's.)
     key(&mut h, egui::Key::F6);
-    if h.state().dock.find_tab(&Tab::Palette).is_some() {
+    if palette_shown(h.state()) {
         key(&mut h, egui::Key::F6);
     }
     picture(&mut h, &dir, "log-keys.png");
@@ -182,6 +201,8 @@ fn the_module_tree_by_the_keyboard() {
     app.settings.no_last_area = true;
     app.open_module(&path);
     let mut h = harness(app, 1200.0, 800.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     let start = ResKey::parse("start", ResType::ARE).unwrap();
     let key = |h: &mut Harness<'_, Moonglow>, key: egui::Key| {
@@ -244,7 +265,7 @@ fn the_module_tree_by_the_keyboard() {
     key(&mut h, egui::Key::S);
     assert_eq!(at(&h), Some(TreeAt::Resource(start)), "the area named start, after Areas");
     // F2 and Delete at the cursor ask, as the row's menu does.
-    h.get_by_label("start").hover();
+    tree_row(&h, "start").hover();
     key(&mut h, egui::Key::F2);
     assert!(h.state().rename.is_some(), "Rename… of the cursor's resource");
     h.state_mut().rename = None;
@@ -308,11 +329,13 @@ fn the_module_tree_by_the_keyboard() {
 #[test]
 fn the_module_tree_s_groups_open_and_close_together() {
     let Some((mut h, area)) = area_harness("fold-tree") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run_steps(2);
     let listed = |h: &Harness<'_, Moonglow>| h.query_all_by_label(&area.to_string()).count();
     let before = listed(&h);
     assert!(before >= 1, "Areas is open to begin with");
-    h.get_all_by_label("Collapse All").next().unwrap().click();
+    module_tool(&h, "Collapse All").click();
     h.run_steps(4);
     assert_eq!(listed(&h), before - 1, "the area's row is gone from the tree");
     // (Each group's row says whether it is open, for a screen reader.)
@@ -321,7 +344,7 @@ fn the_module_tree_s_groups_open_and_close_together() {
         row.accesskit_node().data().is_expanded()
     };
     assert_eq!(areas_open(&h), Some(false), "Areas said closed");
-    h.get_all_by_label("Expand All").next().unwrap().click();
+    module_tool(&h, "Expand All").click();
     h.run_steps(4);
     assert_eq!(listed(&h), before, "and back");
     assert_eq!(areas_open(&h), Some(true), "Areas said open");
@@ -488,6 +511,9 @@ fn deleting_says_what_names_it_and_takes_those_chosen_together() {
 fn the_module_tree_lists_what_is_placed_in_an_area() {
     use mg_area::ObjectKind;
     let Some((mut h, area)) = area_harness("tree-contents") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     assert!(h.query_by_label("Waypoints (2)").is_none());
     h.get_by_label_contains("Placed Objects in ").click();
     h.run_steps(3);
@@ -572,10 +598,16 @@ fn the_module_tree_lists_what_is_placed_in_an_area() {
     h.run_steps(4);
     // (A waypoint shows its tag; its name is found too.)
     assert_eq!(h.query_all_by_label("NW_WAYPOINT001").count(), 2);
-    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+    let filter = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap();
     filter.click();
     h.run_steps(2);
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text("ferry");
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .type_text("ferry");
     h.run_steps(4);
     h.get_by_label("Waypoints (1 of 2)");
     assert_eq!(h.query_all_by_label("NW_WAYPOINT001").count(), 1);
@@ -602,14 +634,16 @@ fn areas_are_listed_by_name_when_asked() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     // By ResRef, as Aurora lists them.
-    h.get_by_label("area467");
+    tree_row(&h, "area467");
     assert!(h.query_by_label("The Docks").is_none());
     h.state_mut().settings.area_names = true;
     h.run();
     assert!(h.query_by_label("area467").is_none());
-    let y = |h: &Harness<'_, Moonglow>, label: &str| h.get_by_label(label).rect().top();
+    let y = |h: &Harness<'_, Moonglow>, label: &str| tree_row(h, label).rect().top();
     assert!(y(&h, "Apple Inn") < y(&h, "The Docks"), "in the names' order");
     // The area without a name keeps its ResRef.
     h.get_by_label("start");
@@ -628,12 +662,20 @@ fn areas_are_listed_by_name_when_asked() {
     h.run();
     assert!(y(&h, "A Quay") < y(&h, "Apple Inn"));
     // The filter finds the name.
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().click();
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .click();
     h.run();
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text("apple");
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .type_text("apple");
     h.run();
-    h.get_by_label("Apple Inn");
-    assert!(h.query_by_label("A Quay").is_none());
+    tree_row(&h, "Apple Inn");
+    // (The area's tab, open, keeps its name: the tree's rows are looked
+    // in.)
+    assert!(h.get_by_label("Module Tree Rows").query_by_label("A Quay").is_none());
 }
 
 /// The tree's filter finds a name whatever the case of its letters, those
@@ -652,19 +694,91 @@ fn the_tree_s_filter_ignores_the_case_of_any_letter() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     h.state_mut().settings.area_names = true;
     h.run();
-    h.get_by_label("Übelwald");
+    tree_row(&h, "Übelwald");
     for typed in ["Übel", "ÜBEL", "übel"] {
-        h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().click();
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .unwrap()
+            .click();
         h.run();
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text(typed);
+        h.get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .unwrap()
+            .type_text(typed);
         h.run();
-        assert!(h.query_by_label("Übelwald").is_some(), "{typed}");
+        assert!(h.get_by_label("Module Tree Rows").query_by_label("Übelwald").is_some(), "{typed}");
         assert!(h.query_by_label("start").is_none(), "{typed}");
     }
+}
+
+/// Tags beside names (Options › General): a placed object's row says its
+/// name and its tag (dimmed after the name since M5's W1, as the
+/// Outliner's, the row cut to the dock), a waypoint's too (by its tag
+/// alone otherwise, as Aurora lists them), and waypoints are then in their
+/// names' order, which a letter typed goes by.
+#[test]
+fn the_module_tree_shows_placed_objects_tags_when_asked() {
+    let Some((mut h, area)) = area_harness("tree-tags") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
+    // (The second named first in the alphabet: their tags are alike.)
+    let named = |i: usize, name: &str| mg_edit::Edit::SetField {
+        key: ResKey::new(area, ResType::GIT),
+        path: mg_edit::GffPath::root().item("WaypointList", i),
+        label: "LocalizedName".into(),
+        value: Some(mg_gff::Value::LocString(LocString::from_text(
+            Language::ENGLISH,
+            Gender::Male,
+            name,
+        ))),
+    };
+    let edits = vec![named(0, "Zed Gate"), named(1, "Alder Post")];
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Names", edits)));
+    h.run_steps(2);
+    h.get_by_label_contains("Placed Objects in ").click();
+    h.run_steps(3);
+    h.get_by_label("Waypoints (2)").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Zed Gate (NW_WAYPOINT001)").is_none());
+    h.state_mut().settings.tree_tags = true;
+    h.run_steps(2);
+    let y = |h: &Harness<'_, Moonglow>, l: &str| h.get_by_label(l).rect().center().y;
+    let (zed, alder) = (y(&h, "Zed Gate (NW_WAYPOINT001)"), y(&h, "Alder Post (NW_WAYPOINT001)"));
+    assert!(alder < zed, "by name: {alder} {zed}");
+    // A letter typed goes to the row that begins with it.
+    // (From the kind's row, the keys the tree's.)
+    h.get_by_label("Waypoints (2)").click();
+    h.run_steps(2);
+    h.get_by_label("Waypoints (2)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(3);
+    h.event(egui::Event::Text("z".into()));
+    h.run_steps(3);
+    let waypoint = |i| Some(mg_ui::TreeAt::Object(area, mg_area::ObjectKind::Waypoint, i));
+    assert_eq!(h.state().tree_cursor, waypoint(0), "Zed Gate, as its row shows");
+    // The tag dimmed after the name, the row cut to the dock (M5's W1): a
+    // tag far longer than the dock takes no room past its edge (with the
+    // tag in the row's words, the row ran on past it).
+    let tag = "A_WAYPOINT_TAG_FAR_LONGER_THAN_THE_LEFT_DOCK_IS";
+    let edit = mg_edit::Edit::SetField {
+        key: ResKey::new(area, ResType::GIT),
+        path: mg_edit::GffPath::root().item("WaypointList", 0),
+        label: "Tag".into(),
+        value: Some(mg_gff::Value::String(tag.as_bytes().to_vec())),
+    };
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Tag", vec![edit])));
+    h.run_steps(3);
+    let row = h.get_by_label(&format!("Zed Gate ({tag})")).rect();
+    let dock = left_dock_rect(&h);
+    assert!(row.right() <= dock.right() + 1.0, "the row past the dock: {row:?} {dock:?}");
 }
 
 /// List areas and blueprints by name: a blueprint is listed by its name
@@ -681,6 +795,7 @@ fn blueprints_are_listed_by_name_when_asked() {
     let mut guard = Gff::new(*b"UTC ");
     guard.root.set("FirstName", text("Hent"));
     guard.root.set("LastName", text("Fynolds"));
+    guard.root.set("Tag", mg_gff::Value::String(b"GUARD_HENT".to_vec()));
     m.set(ResKey::parse("creature007", ResType::UTC).unwrap(), guard.to_bytes().unwrap());
     m.set(ResKey::parse("nameless", ResType::UTC).unwrap(), Gff::new(*b"UTC ").to_bytes().unwrap());
     let mut chest = Gff::new(*b"UTP ");
@@ -690,11 +805,19 @@ fn blueprints_are_listed_by_name_when_asked() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     // Open the groups (the filter opens every group with a match).
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().click();
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .click();
     h.run();
-    h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap().type_text("e");
+    h.get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap()
+        .type_text("e");
     h.run();
     h.get_by_label("creature007.utc");
     h.state_mut().settings.area_names = true;
@@ -709,6 +832,234 @@ fn blueprints_are_listed_by_name_when_asked() {
     h.run();
     h.get_by_label("Hent Fynolds (creature007)");
     h.get_by_label("Old Chest (plc001)");
+    // Tags beside names, after what each is listed by; one without a tag
+    // as it was.
+    h.state_mut().settings.tree_tags = true;
+    h.run();
+    h.get_by_label("Hent Fynolds (creature007) (GUARD_HENT)");
+    h.get_by_label("Old Chest (plc001)");
+    (h.state_mut().settings.area_names, h.state_mut().settings.name_resrefs) = (false, false);
+    h.run();
+    h.get_by_label("creature007.utc (GUARD_HENT)");
+}
+
+/// The tree's sample module with three creatures (M5's W1): `creature007`
+/// named Hent Fynolds and tagged GUARD_HENT, `nameless` with neither, and
+/// `longtag` with a tag far longer than the Left Dock is wide.
+fn creatures_module(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = sample_module(dir);
+    let mut m = mg_module::Module::open(&path).unwrap();
+    let text = |t: &str| {
+        mg_gff::Value::LocString(LocString::from_text(Language::ENGLISH, Gender::Male, t))
+    };
+    let mut guard = Gff::new(*b"UTC ");
+    guard.root.set("FirstName", text("Hent"));
+    guard.root.set("LastName", text("Fynolds"));
+    guard.root.set("Tag", mg_gff::Value::String(b"GUARD_HENT".to_vec()));
+    m.set(ResKey::parse("creature007", ResType::UTC).unwrap(), guard.to_bytes().unwrap());
+    m.set(ResKey::parse("nameless", ResType::UTC).unwrap(), Gff::new(*b"UTC ").to_bytes().unwrap());
+    let mut long = Gff::new(*b"UTC ");
+    long.root.set("Tag", mg_gff::Value::String(LONG_TAG.as_bytes().to_vec()));
+    m.set(ResKey::parse("longtag", ResType::UTC).unwrap(), long.to_bytes().unwrap());
+    m.save().unwrap();
+    path
+}
+
+/// [`creatures_module`]'s long tag.
+const LONG_TAG: &str = "A_TAG_FAR_LONGER_THAN_THE_LEFT_DOCK_AT_ITS_LEAST";
+
+/// The texts the last frame painted within `rect` (the words drawn, not
+/// the accessible names nor the rows' words as kept).
+fn painted_in(h: &Harness<'_, Moonglow>, rect: egui::Rect) -> Vec<String> {
+    fn texts(shape: &egui::Shape, rect: egui::Rect, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) if rect.contains(t.visual_bounding_rect().center()) => {
+                out.push(t.galley.text().to_string());
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| texts(s, rect, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| texts(&c.shape, rect, &mut out));
+    out
+}
+
+/// The texts the last frame painted within `rect`, each with its color
+/// and where it was drawn.
+fn painted_colored(
+    h: &Harness<'_, Moonglow>,
+    rect: egui::Rect,
+) -> Vec<(String, egui::Color32, egui::Rect)> {
+    fn texts(
+        shape: &egui::Shape,
+        rect: egui::Rect,
+        out: &mut Vec<(String, egui::Color32, egui::Rect)>,
+    ) {
+        match shape {
+            egui::Shape::Text(t) if rect.contains(t.visual_bounding_rect().center()) => {
+                let color = t.override_text_color.unwrap_or(t.fallback_color);
+                out.push((t.galley.text().to_string(), color, t.visual_bounding_rect()));
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| texts(s, rect, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| texts(&c.shape, rect, &mut out));
+    out
+}
+
+/// The module tree's Filter emptied, then `text` typed into it.
+fn filter_anew(h: &mut Harness<'_, Moonglow>, text: &str) {
+    h.get(egui_kittest::kittest::by().predicate(tree_filter)).click();
+    settle(h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get(egui_kittest::kittest::by().predicate(tree_filter)).type_text(text);
+    settle(h);
+}
+
+/// What the module tree's row of the creature `name` says: its words,
+/// what is dimmed after them, its accessible name and its tip.
+fn creature_row(h: &Harness<'_, Moonglow>, name: &str) -> [String; 4] {
+    let key = ResKey::parse(name, ResType::UTC).unwrap();
+    h.state().tree_row_words(key).expect("the row's words")
+}
+
+/// Show file extensions in the module tree (M5's W1, the owner's ruling
+/// 7: an option, off): a blueprint listed by its ResRef alone unless
+/// asked, its accessible name and tip its file's name with its extension
+/// as before, and the Filter finding it by its extension and by its whole
+/// file name either way; the rows' words made once when first drawn, not
+/// for a frame (made again when the option changes).
+#[test]
+fn blueprints_are_listed_without_extensions_unless_asked() {
+    let dir = mg_testkit::scratch_dir("ui-tree-extensions");
+    let path = creatures_module(&dir);
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    unfold_left_dock(&mut h);
+    settle(&mut h);
+    assert!(!h.state().settings.tree_extensions, "off unless asked");
+    // ".utc" finds the creatures (not the script), shown without it.
+    filter_anew(&mut h, ".utc");
+    tree_row(&h, "creature007.utc");
+    tree_row(&h, "nameless.utc");
+    assert!(h.get_by_label("Module Tree Rows").query_by_label("hello").is_none());
+    let [words, dimmed, label, tip] = creature_row(&h, "creature007");
+    assert_eq!((words.as_str(), dimmed.as_str()), ("creature007", ""));
+    // (Painted so, not only kept so: the accessible name keeps it.)
+    let painted = painted_in(&h, tree_row(&h, "creature007.utc").rect());
+    assert_eq!(painted, ["creature007"], "the row painted");
+    assert_eq!((label.as_str(), tip.as_str()), ("creature007.utc", "creature007.utc"));
+    // Its whole file name finds it alone.
+    filter_anew(&mut h, "creature007.utc");
+    tree_row(&h, "creature007.utc");
+    assert!(h.get_by_label("Module Tree Rows").query_by_label("nameless.utc").is_none());
+    // At rest, the pointer over the rows: nothing made again.
+    let made = h.state().tree_words_made();
+    assert!(made > 0, "made with the lists");
+    let row = tree_row(&h, "creature007.utc").rect().center();
+    for dy in [0.0, 30.0, 60.0] {
+        h.hover_at(row + egui::vec2(0.0, dy));
+        settle(&mut h);
+    }
+    assert_eq!(h.state().tree_words_made(), made, "not made again for a frame");
+    // Asked for: with its extension, and found as before.
+    h.state_mut().settings.tree_extensions = true;
+    settle(&mut h);
+    assert!(h.state().tree_words_made() > made, "made again for the option");
+    assert_eq!(creature_row(&h, "creature007")[0], "creature007.utc");
+    let painted = painted_in(&h, tree_row(&h, "creature007.utc").rect());
+    assert_eq!(painted, ["creature007.utc"], "the row painted with it");
+    filter_anew(&mut h, ".utc");
+    tree_row(&h, "nameless.utc");
+    assert_eq!(creature_row(&h, "nameless")[0], "nameless.utc");
+}
+
+/// The rows' words are made when first wanted, not for every resource
+/// with the groups' lists (M5's W1): the lists are made again at every
+/// edit, and making the words of a module of 25,000 resources took 12 to
+/// 16 ms, a frame over the budget at every edit. Of 3,000 creatures
+/// listed, an option changed makes again about the rows in sight.
+#[test]
+fn the_rows_words_are_made_for_the_rows_in_sight() {
+    let dir = mg_testkit::scratch_dir("ui-tree-words-in-sight");
+    let path = sample_module(&dir);
+    let mut m = mg_module::Module::open(&path).unwrap();
+    let blank = Gff::new(*b"UTC ").to_bytes().unwrap();
+    for i in 0..3000 {
+        m.set(ResKey::parse(&format!("crowd{i:04}"), ResType::UTC).unwrap(), blank.clone());
+    }
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    unfold_left_dock(&mut h);
+    settle(&mut h);
+    filter_anew(&mut h, ".utc");
+    tree_row(&h, "crowd0000.utc");
+    let made = h.state().tree_words_made();
+    assert!(made > 0, "the rows in sight made");
+    h.state_mut().settings.tree_extensions = true;
+    settle(&mut h);
+    tree_row(&h, "crowd0000.utc");
+    let again = h.state().tree_words_made() - made;
+    assert!(again > 0 && again < 300, "{again} rows' words made again of 3,000");
+}
+
+/// Tags beside names (M5's W1, the owner's ruling 8: dimmed): a
+/// blueprint's tag dimmed after its words, not in them, which the Filter
+/// finds still and its accessible name and tip say; its row cut to the
+/// Left Dock at its least width, taking no room past its edge, so the
+/// tree never scrolls sideways for a long tag (it did, the tag in the
+/// row's text), the whole in its tip.
+#[test]
+fn the_module_tree_dims_tags_and_keeps_its_rows_in_the_dock() {
+    let dir = mg_testkit::scratch_dir("ui-tree-dimmed-tags");
+    let path = creatures_module(&dir);
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    unfold_left_dock(&mut h);
+    h.state_mut().settings.tree_tags = true;
+    left_dock_width(&mut h, 190.0);
+    settle(&mut h);
+    assert!(left_dock_rect(&h).width() < 200.0, "{:?}", left_dock_rect(&h));
+    // Found by a word of its tag alone.
+    filter_anew(&mut h, "far_longer");
+    let said = format!("longtag.utc ({LONG_TAG})");
+    tree_row(&h, &said);
+    assert!(
+        h.get_by_label("Module Tree Rows").query_by_label("creature007.utc (GUARD_HENT)").is_none()
+    );
+    let [words, dimmed, _, tip] = creature_row(&h, "longtag");
+    assert_eq!((words.as_str(), dimmed.as_str()), ("longtag", LONG_TAG), "the tag dimmed apart");
+    assert_eq!(tip, format!("longtag.utc\nTag: {LONG_TAG}"));
+    // The row takes no room past the dock's edge (with its tag in its
+    // words it took 480 points, and the tree scrolled sideways to them).
+    let (row, dock) = (tree_row(&h, &said).rect(), left_dock_rect(&h));
+    assert!(row.right() <= dock.right() + 1.0, "the row past the dock: {row:?} {dock:?}");
+    // Painted so (review D of M5's fix rounds had not looked): the tag
+    // after the words, dimmed, and cut inside the row.
+    let painted = painted_colored(&h, row);
+    let [(name, strong, _), (tag, weak, at)] = &painted[..] else { panic!("{painted:?}") };
+    assert_eq!((name.as_str(), tag.as_str()), ("longtag", LONG_TAG));
+    assert!(weak != strong && *weak == mg_uikit::tokens(&h.ctx).text_3, "dimmed: {painted:?}");
+    assert!(at.right() <= row.right(), "the tag cut inside the row: {at:?} {row:?}");
+    // Named, its ResRef and tag dimmed after its name together.
+    h.state_mut().settings.area_names = true;
+    h.state_mut().settings.name_resrefs = true;
+    filter_anew(&mut h, "guard");
+    tree_row(&h, "Hent Fynolds (creature007) (GUARD_HENT)");
+    let [words, dimmed, ..] = creature_row(&h, "creature007");
+    assert_eq!((words.as_str(), dimmed.as_str()), ("Hent Fynolds", "creature007 · GUARD_HENT"));
+    let row = tree_row(&h, "Hent Fynolds (creature007) (GUARD_HENT)").rect();
+    let painted = painted_colored(&h, row);
+    let [(name, strong, _), (second, weak, _)] = &painted[..] else { panic!("{painted:?}") };
+    assert_eq!((name.as_str(), second.as_str()), ("Hent Fynolds", "creature007 · GUARD_HENT"));
+    assert!(weak != strong && *weak == mg_uikit::tokens(&h.ctx).text_3, "dimmed: {painted:?}");
 }
 
 /// The module tree leaves the middle its room: a very long name is cut
@@ -735,28 +1086,27 @@ fn the_module_tree_never_takes_the_window() {
     // The area's view and the palettes are on screen, with room, and the
     // tree takes at most two fifths of the window.
     let s = h.state();
-    let pane = |tab: &Tab| {
-        let path = s.dock.find_tab(tab).expect("open");
-        let at = |p: &egui_dock::NodePath| p.surface == path.surface && p.node == path.node;
-        s.dock.iter_leaves().find(|(p, _)| at(p)).unwrap().1.rect
-    };
-    let (view, palette) = (pane(&Tab::Area(area)), pane(&Tab::Palette));
-    assert!(view.left() <= 1100.0 * 0.4 + 20.0, "the tree ends by {}", view.left());
+    let view = (s.dock.iter_leaves())
+        .find(|(_, l)| l.tabs.contains(&Tab::Area(area)))
+        .map(|(_, l)| l.rect)
+        .expect("the area's pane");
+    let palette = right_dock_rect(&h);
+    let window = AREA_HARNESS_WIDTH;
+    assert!(view.left() <= window * 0.4 + 20.0, "the tree ends by {}", view.left());
     assert!(view.width() > 150.0, "the area's view: {view:?}");
-    assert!(palette.width() > 150.0 && palette.right() <= 1100.0, "the palettes: {palette:?}");
-    // A split dragged all the way over (or remembered so) is brought back:
-    // neither side is left with nothing.
-    for (_, node) in h.state_mut().dock.iter_all_nodes_mut() {
-        if let egui_dock::Node::Horizontal(split) = node {
-            split.fraction = 0.999;
-        }
-    }
+    assert!(palette.width() > 150.0 && palette.right() <= window, "the palettes: {palette:?}");
+    assert!(view.right() <= palette.left(), "the view beside the palettes: {view:?} {palette:?}");
+    // The Right Dock dragged (or remembered) wider than the window is held
+    // to two fifths of it: the area's view keeps its room.
+    right_dock_width(&mut h, 5000.0);
     h.run_steps(3);
-    let s = h.state();
-    let path = s.dock.find_tab(&Tab::Palette).unwrap();
-    let at = |p: &egui_dock::NodePath| p.surface == path.surface && p.node == path.node;
-    let palette = s.dock.iter_leaves().find(|(p, _)| at(p)).unwrap().1.rect;
-    assert!(palette.width() > 60.0, "the palettes keep some room: {palette:?}");
+    let palette = right_dock_rect(&h);
+    assert!(palette.width() <= window * 0.4 + 2.0, "the palettes: {palette:?}");
+    let view = (h.state().dock.iter_leaves())
+        .find(|(_, l)| l.tabs.contains(&Tab::Area(area)))
+        .map(|(_, l)| l.rect)
+        .unwrap();
+    assert!(view.width() > 150.0, "the area's view keeps some room: {view:?}");
 }
 
 /// The Delete key on a row of the module tree asks as its menu's Delete…
@@ -764,9 +1114,11 @@ fn the_module_tree_never_takes_the_window() {
 #[test]
 fn delete_on_a_tree_row_asks_first() {
     let Some((mut h, key)) = plugin_harness("ui-tree-delete-key", false) else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     // The guard's row (its type opened out), under the pointer.
-    h.get_all_by_label("Expand All").next().unwrap().click();
+    module_tool(&h, "Expand All").click();
     h.run_steps(3);
     let found = h.query_all_by_label_contains("guard").count();
     assert!(found > 0, "the guard's row");
@@ -790,6 +1142,8 @@ fn delete_on_a_tree_row_asks_first() {
 #[test]
 fn the_module_tree_goes_to_the_area_of_the_tab_chosen() {
     let Some((mut h, area)) = area_harness("tree-reveal") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     // The area opened is the one marked (a double click, View Area).
     assert_eq!(h.state().tree_area, Some(area));
     h.state_mut().tree_area = None;
@@ -824,6 +1178,8 @@ fn every_kind_of_tab_chosen_moves_the_module_tree() {
     else {
         return;
     };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     let script = |n: u32| ResKey::parse(&format!("script_{n:02}"), ResType::NSS).unwrap();
     let area_key = ResKey::new(area, ResType::ARE);
     let marked = |h: &Harness<'_, Moonglow>| h.state().tree_marked;
@@ -886,6 +1242,8 @@ fn every_kind_of_tab_chosen_moves_the_module_tree() {
 fn a_tree_object_s_menu_opens_its_variables_listed_by_name() {
     use mg_gff::{Struct, Value};
     let Some((mut h, area)) = area_harness("tree-variables") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     let git = ResKey::new(area, ResType::GIT);
     let var = |name: &str, value: i32| {
         let mut s = Struct::new(0);
@@ -923,6 +1281,11 @@ fn a_tree_object_s_menu_opens_its_variables_listed_by_name() {
 fn the_module_tree_shows_the_object_selected_in_the_area() {
     use mg_area::ObjectKind;
     let Some((mut h, area)) = area_harness("tree-shows-selected") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
+    // (The tree follows the selection where the Outliner is not shown.)
+    outliner_away(&mut h);
     h.state_mut().settings.tree_keeps_areas_closed = true;
     h.run_steps(3);
     assert!(h.query_by_label("Waypoints (2)").is_none());
@@ -953,7 +1316,7 @@ fn the_module_tree_shows_the_object_selected_in_the_area() {
     // With Options › General's choice as it is at first, as Aurora: the
     // area closed again, a selection opens it out and goes to the object.
     // (The arrow on the area's row, before its name.)
-    let row = h.get_by_label("field").rect();
+    let row = tree_row(&h, "field").rect();
     let arrow = h.get_by_label("Placed Objects in field");
     let r = arrow.rect();
     assert!(r.right() <= row.left() && (r.center().y - row.center().y).abs() < 4.0, "{r:?}");
@@ -981,6 +1344,9 @@ fn the_module_tree_shows_the_object_selected_in_the_area() {
 fn the_module_tree_sorts_objects_and_stays_still_under_a_click() {
     use mg_area::ObjectKind;
     let Some((mut h, area)) = area_harness("tree-sorted") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     // Forty waypoints, tagged WP_39 to WP_00 in the area's order, each
     // named alike.
     let git = ResKey::new(area, ResType::GIT);
@@ -1019,7 +1385,8 @@ fn the_module_tree_sorts_objects_and_stays_still_under_a_click() {
     h.run_steps(6);
     assert_eq!(h.state().area_views[&area].selection, [(ObjectKind::Waypoint, 36)]);
     assert_eq!(h.get_by_label("WP_03").rect(), row, "the tree stays still");
-    // A double click there: its Properties.
+    // A double click there: its Properties, in the Right Dock's panel
+    // (the coordinator's ruling at U6's review, as the view's: no window).
     h.run_steps(30);
     for _ in 0..2 {
         press(&h, at, true, egui::Modifiers::NONE);
@@ -1028,9 +1395,10 @@ fn the_module_tree_sorts_objects_and_stays_still_under_a_click() {
         h.step();
     }
     h.run_steps(4);
+    assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::Properties), "its Properties");
     let path = mg_edit::GffPath::root().item("WaypointList", 36);
-    let tab = h.state().dock.find_tab(&Tab::Instance { area, path });
-    h.state_mut().dock.remove_tab(tab.expect("its Properties"));
+    assert!(h.state().dock.find_tab(&Tab::Instance { area, path }).is_none(), "no window");
+    assert_eq!(h.get_by_label("WP_03").rect(), row, "the tree stays still");
     h.run_steps(3);
     // Another selected in the area, its row in view: the tree stays still.
     let row = h.get_by_label("WP_01").rect();
@@ -1047,11 +1415,24 @@ fn the_module_tree_sorts_objects_and_stays_still_under_a_click() {
         .filter_map(|n| n.accesskit_node().label().map(|l| l.to_string()))
         .collect();
     assert_eq!(marked, ["WP_01"]);
-    // One far down: its row is brought into view.
+    // One far down, with the Outliner shown (the area in front): the tree
+    // stays where it is, the row marked though out of view (the owner's
+    // ruling of 2026-11-14: the Outliner follows the selection).
     assert!(h.query_by_label("WP_39").is_none(), "out of view");
+    let still = h.get_by_label("WP_01").rect();
     h.state_mut().area_views.get_mut(&area).unwrap().selection = vec![(ObjectKind::Waypoint, 0)];
     h.run_steps(8);
-    assert!(h.query_by_label("WP_39").is_some(), "scrolled to");
+    assert!(h.query_by_label("WP_39").is_none(), "not scrolled to");
+    assert_eq!(h.get_by_label("WP_01").rect(), still, "the tree as it was");
+    assert_eq!(h.state().tree_object, Some((area, ObjectKind::Waypoint, 0)), "marked");
+    // Without the Outliner (another tab in front): brought into view.
+    outliner_away(&mut h);
+    h.state_mut().area_views.get_mut(&area).unwrap().selection = vec![(ObjectKind::Waypoint, 1)];
+    let started = std::time::Instant::now();
+    while h.query_by_label("WP_38").is_none() {
+        assert!(started.elapsed().as_secs() < 10, "never: scrolled to");
+        h.step();
+    }
     assert!(!h.state().tree_object_pending);
 }
 
@@ -1080,6 +1461,8 @@ fn the_module_tree_s_letters_typed_quickly() {
         .with_size(egui::vec2(1200.0, 800.0))
         .with_step_dt(0.25)
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     if h.query_by_label("sewer").is_none() {
         h.get_by_label_contains("Scripts (").click();
@@ -1149,6 +1532,8 @@ fn the_module_tree_s_keys_at_placed_objects() {
         .with_size(egui::vec2(1200.0, 800.0))
         .with_step_dt(0.25)
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     let start = ResRef::from_str("start").unwrap();
     let at = |h: &Harness<'_, Moonglow>| h.state().tree_cursor;
@@ -1241,6 +1626,8 @@ fn several_resources_are_chosen_in_the_tree_and_exported_together() {
     app.settings.no_last_area = true;
     app.open_module(&path);
     let mut h = harness(app, 1200.0, 800.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     h.get_by_label_contains("Scripts (").click();
     h.run_steps(3);
@@ -1316,6 +1703,8 @@ fn the_module_tree_follows_module_properties_tabs_of_several_and_the_filter() {
     app.settings.no_last_area = true;
     app.open_module(&path);
     let mut h = harness(app, 1100.0, 760.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run_steps(3);
     let open = |h: &mut Harness<'_, Moonglow>, tab: Tab| {
         h.state_mut().actions.push(mg_ui::Action::OpenTab(tab));
@@ -1351,8 +1740,7 @@ fn the_module_tree_follows_module_properties_tabs_of_several_and_the_filter() {
     ];
     h.state_mut().actions.push(mg_ui::Action::CloseTabs(tabs));
     h.run_steps(3);
-    let hint = "Filter name, resref";
-    type_into_hint(&mut h, hint, "script_0");
+    type_into_tree_filter(&mut h, "script_0");
     h.run_steps(3);
     assert!(h.query_by_label("script_50").is_none(), "hidden by the Filter");
     open(&mut h, Tab::Script(script(50)));
@@ -1382,9 +1770,15 @@ fn the_module_tree_follows_module_properties_tabs_of_several_and_the_filter() {
 fn placed_objects_are_chosen_together_and_found_in_areas_not_opened_out() {
     use mg_area::ObjectKind;
     let Some((mut h, area)) = area_harness("tree-objects-several") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     assert!(h.query_by_label("NW_WAYPOINT001").is_none(), "not opened out");
     // The Filter: what is placed there, without opening the area out.
-    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+    let filter = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap();
     filter.click();
     h.run_steps(2);
     filter_type(&mut h, "nw_waypoint001");
@@ -1440,6 +1834,8 @@ fn placed_objects_are_chosen_together_and_found_in_areas_not_opened_out() {
 #[test]
 fn a_placed_object_copied_with_its_area_closed_keeps_its_height() {
     let Some((mut h, area)) = area_harness("tree-copy-closed") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     let git = ResKey::new(area, ResType::GIT);
     let ws = h.state_mut().ws.as_mut().unwrap();
     let z = ws.doc(&git).unwrap().root.list("WaypointList").unwrap()[0].float("ZPosition").unwrap();
@@ -1479,6 +1875,8 @@ fn a_placed_object_copied_with_its_area_closed_keeps_its_height() {
 #[test]
 fn empty_groups_are_hidden_when_asked() {
     let Some((mut h, _area)) = area_harness("tree-hide-empty") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.get_by_label_contains("Placed Objects in ").click();
     h.run_steps(3);
     let empty = |h: &Harness<'_, Moonglow>| -> Vec<String> {
@@ -1508,6 +1906,9 @@ fn empty_groups_are_hidden_when_asked() {
 fn adjust_location_from_a_placed_object_s_row() {
     use mg_area::ObjectKind::Waypoint;
     let Some((mut h, area)) = area_harness("tree-adjust-location") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     h.state_mut().area_views.get_mut(&area).unwrap().selection.clear();
     h.get_by_label_contains("Placed Objects in ").click();
     h.run_steps(3);
@@ -1532,6 +1933,9 @@ fn adjust_location_from_a_placed_object_s_row() {
 #[test]
 fn a_placed_object_is_exported_as_a_blueprint() {
     let Some((mut h, area)) = area_harness("tree-export-object") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     let erf = mg_testkit::scratch_dir("ui-tree-export-object").join("waypoint.erf");
     let _ = std::fs::remove_file(&erf);
     h.state_mut().dialogs = Box::new(NoDialogs { save: vec![erf.clone()], ..Default::default() });
@@ -1574,9 +1978,11 @@ fn an_area_its_list_leaves_out_is_marked_and_listed_from_its_menu() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     assert_eq!(h.get_all_by_label("(not in the area list)").count(), 1);
-    h.get_by_label("lost").click_secondary();
+    tree_row(&h, "lost").click_secondary();
     h.run();
     h.get_by_label("Add to the Module's Area List").click();
     h.run();
@@ -1590,6 +1996,41 @@ fn an_area_its_list_leaves_out_is_marked_and_listed_from_its_menu() {
     assert_eq!(h.get_all_by_label("(not in the area list)").count(), 1);
 }
 
+/// An area's mark after its name keeps its room in a row cut to the Left
+/// Dock at its least width (M5's W1): a name far longer than the dock is
+/// cut the shorter, keeping half the row's room, and the mark stands inside
+/// the dock after it, itself cut with an ellipsis.
+#[test]
+fn an_area_s_mark_keeps_its_room_beside_a_long_name() {
+    let dir = mg_testkit::scratch_dir("ui-tree-area-mark-room");
+    let path = sample_module(&dir);
+    let mut m = Module::open(&path).unwrap();
+    let mut are = Gff::new(*b"ARE ");
+    let name = "An Area Left Out Of The List With A Name Far Longer Than The Dock";
+    are.root.set(
+        "Name",
+        mg_gff::Value::LocString(LocString::from_text(Language::ENGLISH, Gender::Male, name)),
+    );
+    m.set(ResKey::parse("lost", ResType::ARE).unwrap(), are.to_bytes().unwrap());
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    unfold_left_dock(&mut h);
+    h.state_mut().settings.area_names = true;
+    left_dock_width(&mut h, 190.0);
+    settle(&mut h);
+    let dock = left_dock_rect(&h);
+    assert!(dock.width() < 200.0, "{dock:?}");
+    let (row, mark) = (tree_row(&h, name).rect(), h.get_by_label("(not in the area list)").rect());
+    assert!(mark.right() <= dock.right() + 1.0, "the mark past the dock: {mark:?} {dock:?}");
+    // (The name keeps half the row's room, about 70 points at 190: "A…"
+    // beside the whole mark before.)
+    let name_room = mark.left() - row.left();
+    assert!(name_room > 50.0, "the name left {name_room} points: {mark:?} {row:?}");
+    assert!(row.right() <= dock.right() + 1.0, "the row past the dock: {row:?} {dock:?}");
+}
+
 /// A builder's report: closing an area, or a Properties window opened from
 /// the module tree, scrolled the tree to its top. The tab come to the front
 /// because another closed was not chosen: the tree stays where it was.
@@ -1597,6 +2038,9 @@ fn an_area_its_list_leaves_out_is_marked_and_listed_from_its_menu() {
 fn the_module_tree_stays_where_it_was_when_a_tab_closes() {
     use mg_area::ObjectKind;
     let Some((mut h, area)) = area_harness("tree-tab-closed") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
     // Forty waypoints, for a tree that scrolls.
     let git = ResKey::new(area, ResType::GIT);
     let ws = h.state_mut().ws.as_mut().unwrap();
@@ -1621,17 +2065,39 @@ fn the_module_tree_stays_where_it_was_when_a_tab_closes() {
     h.run_steps(3);
     h.get_by_label("Waypoints (40)").click();
     h.run_steps(6);
-    // Scrolled down to the last (selected in the area: brought into view).
+    // Scrolled down to the last (End over the Areas group's well: with the
+    // Outliner shown, the tree no longer scrolls to an object selected in
+    // the view, the owner's ruling of 2026-11-14).
+    h.hover_at(h.get_by_label("WP_00").rect().center());
+    h.key_press(egui::Key::End);
+    let started = std::time::Instant::now();
+    while h.query_by_label("WP_39").is_none() {
+        assert!(started.elapsed().as_secs() < 10, "never: scrolled to");
+        h.step();
+    }
+    // (And selected in the view: its row marked, the tree still.)
     h.state_mut().area_views.get_mut(&area).unwrap().selection = vec![(ObjectKind::Waypoint, 39)];
-    h.run_steps(8);
-    assert!(h.query_by_label("WP_39").is_some(), "scrolled to");
+    let started = std::time::Instant::now();
+    while h.state().tree_object != Some((area, ObjectKind::Waypoint, 39)) {
+        assert!(started.elapsed().as_secs() < 10, "never: marked");
+        h.step();
+    }
     let row = h.get_by_label("WP_39").rect();
+    // (How high the Outliner is, which the tree gains as it goes.)
+    let outliner = h.get_by_label(mg_ui::OUTLINER).get_by_label("Collapse All").rect();
+    let gained = h.ctx.content_rect().bottom() - 24.0 - (outliner.center().y - 13.0);
     // The area closed: Module Properties (opened with the module) in front.
     assert!(h.state().dock.find_tab(&Tab::ModuleProperties).is_some());
     h.state_mut().actions.push(mg_ui::Action::CloseTab(Tab::Area(area)));
     h.run_steps(8);
     assert!(h.state().dock.find_tab(&Tab::Area(area)).is_none());
-    assert_eq!(h.query_by_label("WP_39").map(|n| n.rect()), Some(row), "the area closed");
+    // (The Outliner gone with the area, the tree is taller by its height:
+    // the last row stays in sight, as low as it was or lower by no more
+    // than that, the tree's end in sight; scrolled to the top, it would be
+    // out of sight, 40 rows further.)
+    let now = h.query_by_label("WP_39").map(|n| n.rect()).expect("the area closed: in sight");
+    let moved = now.top() - row.top();
+    assert!((0.0..=gained + 1.0).contains(&moved), "{row:?} → {now:?}, {gained} gained");
     // A placed object's Properties, opened from its row, then closed: Module
     // Properties in front again.
     let path = mg_edit::GffPath::root().item("WaypointList", 39);
@@ -1651,7 +2117,12 @@ fn the_module_tree_stays_where_it_was_when_a_tab_closes() {
 #[test]
 fn the_kinds_the_filter_opens_close_again() {
     let Some((mut h, _)) = area_harness("tree-filter-kinds") else { return };
-    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    let filter = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap();
     filter.click();
     h.run_steps(2);
     filter_type(&mut h, "nw_waypoint001");
@@ -1668,7 +2139,10 @@ fn the_kinds_the_filter_opens_close_again() {
     // The Filter cleared and typed again: opened once more.
     h.get_by_label("Clear Filter").click();
     h.run_steps(4);
-    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+    let filter = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap();
     filter.click();
     h.run_steps(2);
     filter_type(&mut h, "nw_waypoint001");
@@ -1684,8 +2158,13 @@ fn the_kinds_the_filter_opens_close_again() {
 #[test]
 fn an_area_the_filter_opens_out_closes_again() {
     let Some((mut h, _)) = area_harness("tree-filter-area") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     let typed = |h: &mut Harness<'_, Moonglow>, text: &str| {
-        let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+        let filter = h
+            .get_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+            .unwrap();
         filter.click();
         h.run_steps(2);
         filter_type(h, text);
@@ -1706,11 +2185,8 @@ fn an_area_the_filter_opens_out_closes_again() {
     h.run_steps(10);
     assert_eq!(kinds(&h), 1, "opened out again");
     // Collapse All, then the Filter cleared and typed again: opened out once more.
-    // (The tree's, left of the area view's.)
-    let collapse = h
-        .get_all_by_label("Collapse All")
-        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()));
-    collapse.unwrap().click();
+    // (The tree's, on the Module panel's header.)
+    module_tool(&h, "Collapse All").click();
     h.run_steps(10);
     assert_eq!(kinds(&h), 0, "Collapse All");
     h.get_by_label("Clear Filter").click();
@@ -1726,7 +2202,12 @@ fn an_area_the_filter_opens_out_closes_again() {
 #[test]
 fn the_filter_follows_what_is_placed_as_it_changes() {
     let Some((mut h, _)) = area_harness("tree-filter-follows") else { return };
-    let filter = h.get_all_by_role(egui::accesskit::Role::TextInput).next().unwrap();
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    let filter = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().label().as_deref() != Some("Quick Open"))
+        .unwrap();
     filter.click();
     h.run_steps(2);
     filter_type(&mut h, "nw_waypoint001");
@@ -1775,6 +2256,9 @@ fn resources_deleted_or_renamed_are_chosen_no_more() {
     let mut app = app_with(Vec::new());
     app.open_module(&path);
     let mut h = harness(app, 1280.0, 800.0);
+    // (A window no width folds the tree's dock in: `hide_tree` is read
+    // there, M3 T14.)
+    wide_window(&mut h);
     h.run();
     let chosen = |h: &Harness<'_, Moonglow>| h.state().tree_selected.iter().copied().collect();
     let gone = |k: ResKey| mg_edit::Edit::SetResource { key: k, data: None };
@@ -1782,6 +2266,7 @@ fn resources_deleted_or_renamed_are_chosen_no_more() {
         h.state_mut().settings.hide_tree = hidden;
         h.state_mut().tree_selected = [key("one"), key("two"), key("three")].into();
         h.run();
+        assert_eq!(h.state().left_dock_shows().is_none(), hidden, "the tree folded: {hidden}");
         let all: Vec<ResKey> = chosen(&h);
         assert_eq!(all.len(), 3, "all in the module: all chosen");
         let delete = mg_edit::Command::new("Delete", vec![gone(key("one")), gone(key("two"))]);
@@ -1950,6 +2435,8 @@ fn several_of_every_kind_have_delete_and_export_in_their_menu() {
     app.load_plugins();
     app.enable_plugin("test.each", true);
     let mut h = harness(app, 1400.0, 900.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     let label = |k: &ResKey| match k.restype {
         ResType::ARE | ResType::DLG | ResType::NSS => k.resref.to_string(),
@@ -2057,6 +2544,8 @@ fn several_chosen_stay_when_an_editor_opened_before_is_clicked_in() {
     app.settings.no_last_area = true;
     app.open_module(&path);
     let mut h = harness(app, 1400.0, 900.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     let k = |name: &str| ResKey::parse(name, ResType::DLG).unwrap();
     h.state_mut().actions.push(mg_ui::Action::OpenResource(k("talk_1")));
@@ -2117,6 +2606,8 @@ fn several_conversations_are_exported_as_ink_twine_text_and_csv() {
     app.settings.no_last_area = true;
     app.open_module(&path);
     let mut h = harness(app, 1400.0, 900.0);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
     h.run();
     // The inn's editor open, with a change not saved.
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Dialog(k("inn"))));
@@ -2276,4 +2767,288 @@ fn opened_out(h: &Harness<'_, Moonglow>) -> usize {
         said
     };
     h.query_all_by_label_contains("Placed Objects in ").filter(open).count()
+}
+
+/// Frames until `done`, for ten seconds at most (an area's view asks for
+/// frames as it draws).
+fn until_tree(
+    h: &mut Harness<'_, Moonglow>,
+    what: &str,
+    done: impl Fn(&Harness<'_, Moonglow>) -> bool,
+) {
+    let started = std::time::Instant::now();
+    while !done(h) {
+        assert!(started.elapsed().as_secs() < 10, "never: {what}");
+        h.step();
+    }
+}
+
+/// The module tree's rows (`Module Tree Rows`) whose names contain `words`.
+fn tree_rows_with<'t>(h: &'t Harness<'_, Moonglow>, words: &'t str) -> Vec<egui_kittest::Node<'t>> {
+    h.get_by_label("Module Tree Rows").query_all_by_label_contains(words).collect()
+}
+
+/// A placed object of a read-only area (another builder's) is not
+/// deleted from the module tree, by its Delete key or its menu's Delete:
+/// the claims' gate refuses it and says why, and what was selected,
+/// marked and the keys' row stay as they were.
+#[test]
+fn a_read_only_area_s_object_is_not_deleted_from_the_tree() {
+    use mg_area::ObjectKind;
+    let Some((mut h, area)) = read_only_area_harness("tree-read-only-delete") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    // (The tree its old height: the area's kinds and rows in the well's sight.)
+    tall_tree(&mut h);
+    let chests = |h: &mut Harness<'_, Moonglow>| {
+        let git = ResKey::new(area, ResType::GIT);
+        let ws = h.state_mut().ws.as_mut().unwrap();
+        ws.doc(&git).unwrap().root.list("Placeable List").map_or(0, |l| l.len())
+    };
+    h.get_by_label_contains("Placed Objects in ").click();
+    until_tree(&mut h, "its kinds", |h| !tree_rows_with(h, "Placeables (1)").is_empty());
+    tree_rows_with(&h, "Placeables (1)")[0].click();
+    until_tree(&mut h, "the chest's row", |h| !tree_rows_with(h, "Chest").is_empty());
+    tree_rows_with(&h, "Chest")[0].click();
+    let chosen = [(ObjectKind::Placeable, 0)];
+    until_tree(&mut h, "selected", |h| h.state().area_views[&area].selection == chosen);
+    let marked = |h: &Harness<'_, Moonglow>| {
+        tree_rows_with(h, "Chest")
+            .first()
+            .is_some_and(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+    };
+    let refused = |h: &Harness<'_, Moonglow>, since: usize| {
+        h.state().log.entries.iter().skip(since).any(|e| e.1.contains("read-only"))
+    };
+    // Its key, the keys the tree's (the row clicked), the pointer away.
+    let cursor = h.state().tree_cursor;
+    h.hover_at(egui::pos2(600.0, 20.0));
+    let said = h.state().log.entries.len();
+    h.key_press(egui::Key::Delete);
+    until_tree(&mut h, "refused by the key", |h| refused(h, said));
+    assert_eq!(chests(&mut h), 1, "not deleted");
+    assert_eq!(h.state().area_views[&area].selection, chosen, "still selected");
+    assert_eq!(h.state().tree_cursor, cursor, "the keys' row as it was");
+    assert!(marked(&h), "its row marked");
+    // Its menu's Delete.
+    let row = tree_rows_with(&h, "Chest")[0].rect().center();
+    h.hover_at(row);
+    for pressed in [true, false] {
+        let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::NONE);
+        h.event(egui::Event::PointerButton { pos: row, button, pressed, modifiers });
+        // (One step for each input event.)
+        h.step();
+    }
+    let said = h.state().log.entries.len();
+    h.get_all_by_label("Delete").last().unwrap().click();
+    until_tree(&mut h, "refused by the menu", |h| refused(h, said));
+    assert_eq!(chests(&mut h), 1, "not deleted");
+    assert_eq!(h.state().area_views[&area].selection, chosen, "still selected");
+    assert!(marked(&h), "its row marked");
+}
+
+/// Going to or selecting an object of a kind hidden in the view, from the
+/// module tree (a click, a Ctrl+click), shows its kind, in every view, as
+/// its Show toggle would, and the object stays selected (one rule with
+/// the Outliner's).
+#[test]
+fn an_object_of_a_hidden_kind_gone_to_from_the_tree_shows_its_kind() {
+    use mg_area::ObjectKind;
+    let Some((mut h, area)) = area_harness("tree-hidden-kind") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    // (The tree its old height: the area's kinds and rows in the well's sight.)
+    tall_tree(&mut h);
+    let shown =
+        |h: &Harness<'_, Moonglow>| h.state().area_views[&area].show[ObjectKind::Waypoint.index()];
+    h.get_by_label_contains("Placed Objects in ").click();
+    until_tree(&mut h, "its kinds", |h| !tree_rows_with(h, "Waypoints (2)").is_empty());
+    tree_rows_with(&h, "Waypoints (2)")[0].click();
+    until_tree(&mut h, "its rows", |h| tree_rows_with(h, "NW_WAYPOINT001").len() == 2);
+    area_click(&mut h, "Show Waypoints");
+    until_tree(&mut h, "hidden", |h| !shown(h));
+    tree_rows_with(&h, "NW_WAYPOINT001")[0].click();
+    until_tree(&mut h, "shown and selected", |h| {
+        shown(h) && h.state().area_views[&area].selection.len() == 1
+    });
+    // With Ctrl.
+    area_click(&mut h, "Show Waypoints");
+    until_tree(&mut h, "hidden again", |h| {
+        !shown(h) && h.state().area_views[&area].selection.is_empty()
+    });
+    tree_rows_with(&h, "NW_WAYPOINT001")[1].click_modifiers(egui::Modifiers::COMMAND);
+    until_tree(&mut h, "shown and chosen", |h| {
+        shown(h) && h.state().area_views[&area].selection.len() == 1
+    });
+}
+
+/// At the window's size at first (the Outliner under the tree, the Areas
+/// group's well five rows high), a builder still reaches a placed
+/// object's row in the module tree and does there what the tree does:
+/// the well scrolled by the wheel to the area's last kind and its rows; a
+/// click selects, Ctrl+click chooses another with it; the menu of one of
+/// them deletes both (Undo brings them back); one's menu has Export as
+/// Blueprint…; and by the keys, from the kind's row, Down and Enter go to
+/// an object.
+#[test]
+fn the_module_tree_s_placed_objects_at_the_size_at_first() {
+    use mg_area::ObjectKind;
+    let Some((mut h, area)) = area_harness("tree-default-size") else { return };
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    let w = |i: usize| (ObjectKind::Waypoint, i);
+    h.get_by_label_contains("Placed Objects in ").click();
+    until_tree(&mut h, "its kinds", |h| !tree_rows_with(h, "Waypoints (2)").is_empty());
+    // (The last kind under the well's foot: the wheel over the well until
+    // its row ends above the next group's row, which is under the well.)
+    let in_well = |h: &Harness<'_, Moonglow>, words: &str| {
+        let rows = h.get_by_label("Module Tree Rows");
+        let next = rows.get_by_label("Conversations (0)").rect().top();
+        tree_rows_with(h, words).first().is_some_and(|n| n.rect().bottom() <= next + 0.5)
+    };
+    let wheel = |h: &mut Harness<'_, Moonglow>| {
+        // (Over the well: between the Areas group's row and the next's.)
+        let rows = h.get_by_label("Module Tree Rows");
+        let (top, foot) =
+            (rows.get_by_label("Areas (1)").rect(), rows.get_by_label("Conversations (0)").rect());
+        let at = egui::pos2(top.center().x, (top.bottom() + foot.top()) / 2.0);
+        h.hover_at(at);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        // (One step for the wheel's event.)
+        h.step();
+    };
+    // (The wheel's scroll goes on a while after it: until a row rests.)
+    let rest = |h: &mut Harness<'_, Moonglow>, words: &str| {
+        let at = |h: &Harness<'_, Moonglow>| tree_rows_with(h, words).first().map(|n| n.rect());
+        let (mut was, mut same) = (at(h), 0);
+        let started = std::time::Instant::now();
+        while same < 3 {
+            assert!(started.elapsed().as_secs() < 10, "never at rest: {words}");
+            h.step();
+            let now = at(h);
+            same = if now == was { same + 1 } else { 0 };
+            was = now;
+        }
+    };
+    let started = std::time::Instant::now();
+    while !in_well(&h, "Waypoints (2)") {
+        assert!(started.elapsed().as_secs() < 10, "never: Waypoints in the well's sight");
+        wheel(&mut h);
+        rest(&mut h, "Waypoints (2)");
+    }
+    tree_rows_with(&h, "Waypoints (2)")[0].click();
+    // (Both waypoints' rows brought into the well's sight by the wheel.)
+    let into_sight = |h: &mut Harness<'_, Moonglow>| {
+        let seen = |h: &Harness<'_, Moonglow>| {
+            let rows = tree_rows_with(h, "NW_WAYPOINT001");
+            let next = h.get_by_label("Module Tree Rows").get_by_label("Conversations (0)");
+            rows.len() == 2 && rows.iter().all(|n| n.rect().bottom() <= next.rect().top() + 0.5)
+        };
+        let started = std::time::Instant::now();
+        loop {
+            rest(h, "NW_WAYPOINT001");
+            if seen(h) {
+                break;
+            }
+            assert!(started.elapsed().as_secs() < 10, "never: both rows in the well's sight");
+            wheel(h);
+        }
+    };
+    into_sight(&mut h);
+    // A click, then Ctrl+click.
+    tree_rows_with(&h, "NW_WAYPOINT001")[0].click();
+    until_tree(&mut h, "one selected", |h| h.state().area_views[&area].selection.len() == 1);
+    tree_rows_with(&h, "NW_WAYPOINT001")[1].click_modifiers(egui::Modifiers::COMMAND);
+    until_tree(&mut h, "both chosen", |h| {
+        let mut s = h.state().area_views[&area].selection.clone();
+        s.sort();
+        s == [w(0), w(1)]
+    });
+    // The menu of one of them: Delete, on both; Undo.
+    let row = tree_rows_with(&h, "NW_WAYPOINT001")[1].rect().center();
+    let menu = |h: &mut Harness<'_, Moonglow>, at: egui::Pos2| {
+        h.hover_at(at);
+        for pressed in [true, false] {
+            let (button, modifiers) = (egui::PointerButton::Secondary, egui::Modifiers::NONE);
+            h.event(egui::Event::PointerButton { pos: at, button, pressed, modifiers });
+            // (One step for each input event.)
+            h.step();
+        }
+    };
+    menu(&mut h, row);
+    h.get_by_label("2 objects chosen");
+    h.get_all_by_label("Delete").last().unwrap().click();
+    let placed = |h: &Harness<'_, Moonglow>| {
+        let git = ResKey::new(area, ResType::GIT);
+        let ws = h.state().ws.as_ref().unwrap();
+        ws.loaded(&git).and_then(|g| g.root.list("WaypointList").map(|l| l.len()))
+    };
+    until_tree(&mut h, "both deleted", |h| placed(h) == Some(0));
+    h.state_mut().actions.push(mg_ui::Action::Undo);
+    until_tree(&mut h, "back", |h| placed(h) == Some(2));
+    // One alone: Export as Blueprint… on its menu.
+    into_sight(&mut h);
+    tree_rows_with(&h, "NW_WAYPOINT001")[0].click();
+    until_tree(&mut h, "one selected", |h| h.state().area_views[&area].selection.len() == 1);
+    into_sight(&mut h);
+    let row = tree_rows_with(&h, "NW_WAYPOINT001")[0].rect().center();
+    menu(&mut h, row);
+    assert!(h.query_by_label("Export as Blueprint…").is_some(), "on one's menu");
+    h.key_press(egui::Key::Escape);
+    // (One step for the key's event.)
+    h.step();
+    // The keys: from the kind's row, Down and Enter.
+    h.state_mut().area_views.get_mut(&area).unwrap().selection.clear();
+    tree_rows_with(&h, "Waypoints (2)")[0].click();
+    until_tree(&mut h, "the tree's keys", |h| {
+        mg_ui::palette_view::arrow_keys_are(&h.ctx) == "Tree"
+    });
+    h.hover_at(egui::pos2(600.0, 20.0));
+    // (Its kind closed again by the click: open it by Right.)
+    if tree_rows_with(&h, "NW_WAYPOINT001").is_empty() {
+        h.key_press(egui::Key::ArrowRight);
+        // (One step for the key's event.)
+        h.step();
+    }
+    h.key_press(egui::Key::ArrowDown);
+    // (One step for the key's event.)
+    h.step();
+    h.key_press(egui::Key::Enter);
+    until_tree(&mut h, "gone to", |h| h.state().area_views[&area].selection.len() == 1);
+}
+
+/// Beside a docked conversation the Outliner lists its bookmarks, not an
+/// area's objects, so the module tree follows an area's selection again,
+/// as where no Outliner is shown (M4's U15: `tree::follow_selection` read
+/// the Outliner's being there).
+#[test]
+fn the_module_tree_follows_the_selection_beside_a_docked_conversation() {
+    use mg_area::ObjectKind;
+    let Some((mut h, area)) = area_harness("tree-follows-beside-conversation") else { return };
+    unfold_left_dock(&mut h);
+    tall_tree(&mut h);
+    h.state_mut().settings.open_editors = mg_ui::OpenEditors::Tabs;
+    let key = ResKey::parse("talk", ResType::DLG).unwrap();
+    h.state_mut().ws.as_mut().unwrap().view(key, mg_module::dialog::new_dialog());
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Dialog(key)));
+    let started = std::time::Instant::now();
+    while h.state().active_editor() != Some(&Tab::Dialog(key)) {
+        assert!(started.elapsed().as_secs() < 10, "never: the conversation in front");
+        h.step();
+    }
+    h.run_steps(4);
+    assert!(h.query_by_label(mg_ui::OUTLINER).is_some(), "the Outliner, its bookmarks");
+    assert!(h.query_all_by_label_contains("WAYPOINT").next().is_none(), "the area not opened out");
+    h.state_mut().area_views.get_mut(&area).unwrap().selection = vec![(ObjectKind::Waypoint, 1)];
+    let started = std::time::Instant::now();
+    while h.query_all_by_label_contains("WAYPOINT").next().is_none() {
+        assert!(started.elapsed().as_secs() < 10, "never: the tree opened out to the waypoint");
+        h.step();
+    }
+    assert_eq!(h.state().tree_object, Some((area, ObjectKind::Waypoint, 1)));
 }

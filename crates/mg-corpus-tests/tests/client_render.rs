@@ -78,6 +78,8 @@ mod icons;
 mod joined;
 #[path = "client_render/local_z.rs"]
 mod local_z;
+#[path = "client_render/night_fog.rs"]
+mod night_fog;
 #[path = "client_render/nui.rs"]
 mod nui;
 #[path = "client_render/part_emitters.rs"]
@@ -105,11 +107,12 @@ const FACING: f32 = 90.0;
 const AHEAD: f32 = 3.0;
 /// The view the client shows for `SetCameraFacing(90, 12, 45)`: field of
 /// view (degrees), focus height, distance, pitch (degrees from straight
-/// down).
-const FIT_FOV: f32 = 48.0;
-const FIT_FOCUS: f32 = 1.25;
-const FIT_DISTANCE: f32 = 19.0;
-const FIT_PITCH: f32 = 50.0;
+/// down): the client's own camera there, which does not take the command
+/// given at once ([`Camera::GAME_ENTRY`], where the fit is kept).
+const FIT_FOV: f32 = Camera::GAME_FOV;
+const FIT_FOCUS: f32 = Camera::GAME_FOCUS;
+const FIT_DISTANCE: f32 = Camera::GAME_ENTRY.0;
+const FIT_PITCH: f32 = Camera::GAME_ENTRY.1;
 
 const ENTER: &str = r#"
 void Log(string s) { WriteTimestampedLogEntry(s); }
@@ -326,23 +329,9 @@ fn fitted_camera(pc: Vec3, fov: f32, focus: f32, distance: f32, pitch: f32) -> C
 }
 
 /// [`fitted_camera`] looking along another facing (degrees anticlockwise
-/// from east).
+/// from east): the game's camera as mg-render has it ([`Camera::game`]).
 fn camera_facing(pc: Vec3, facing: f32, fov: f32, focus: f32, distance: f32, pitch: f32) -> Camera {
-    let elevation = (90.0 - pitch).to_radians();
-    let facing = facing.to_radians();
-    let focus = pc + Vec3::new(0.0, 0.0, focus);
-    let dir = Vec3::new(
-        -facing.cos() * elevation.cos(),
-        -facing.sin() * elevation.cos(),
-        elevation.sin(),
-    );
-    Camera {
-        eye: focus + dir * distance,
-        target: focus,
-        fov_y: fov.to_radians(),
-        near: 0.1,
-        far: 200.0,
-    }
+    Camera::game(pc, facing, distance, pitch, focus, fov)
 }
 
 /// How far a picture of Moonglow's is from the client's: the mean
@@ -454,8 +443,8 @@ fn off_and_on(
 /// second after the player enters (as [`save_area_module_facing`] turns
 /// it): field of view and focus as [`fitted_camera`]'s, this distance and
 /// pitch (fitted to its pictures: [`fit_turned_camera`]).
-const TURNED_DISTANCE: f32 = 11.0;
-const TURNED_PITCH: f32 = 44.0;
+const TURNED_DISTANCE: f32 = Camera::GAME_SCRIPTED_12_45.0;
+const TURNED_PITCH: f32 = Camera::GAME_SCRIPTED_12_45.1;
 
 /// [`camera_facing`] for the camera [`save_area_module_facing`] gives the
 /// client: [`fitted_camera`]'s looking north, else turned.
@@ -465,6 +454,14 @@ fn scripted_camera(pc: Vec3, facing: f32) -> Camera {
     } else {
         camera_facing(pc, facing, FIT_FOV, FIT_FOCUS, TURNED_DISTANCE, TURNED_PITCH)
     }
+}
+
+/// How far the client's camera of [`save_area_module_facing`] stands from
+/// the player, as the client keeps it (what its fog's start follows:
+/// `mg_area::View::camera`): its own as the player enters (20 m) looking
+/// north, the script's 12 m else.
+fn scripted_camera_distance(facing: f32) -> f32 {
+    if facing == FACING { mg_area::GAME_CAMERA } else { 12.0 }
 }
 
 /// Exploration (`MG_FIT=1`): the distance, pitch and focus of the camera
@@ -1083,7 +1080,10 @@ fn placeable_light_uniforms() {
 /// L5: the client's fog uniforms (read back through the debug shader) are
 /// Moonglow's fog: the end at the fog clip distance, the start the fog
 /// amount nearer than 30 m (at most 1 m before the end), with or without a
-/// skybox. `MG_FOG_CASES=amount:clip,...` measures others.
+/// skybox, by day (the sun's fog) and at night (the moon's), outdoors and
+/// in. `MG_FOG_CASES=amount:clip[:flags],...` measures others, the flags
+/// `n` for night and `i` for an interior (as `12:22:ni`, the Shard of
+/// The Domains of Dread).
 #[test]
 #[ignore]
 fn fog_uniforms_match_the_client() {
@@ -1091,27 +1091,59 @@ fn fog_uniforms_match_the_client() {
     let _ = oracle_tool!("nwn_script_comp");
     let game = GameData::open(&GameInstall::new(&root, None, "en")).unwrap();
     let shader = debug_shader(&game);
-    let cases: Vec<(u8, f32, u8)> = std::env::var("MG_FOG_CASES")
+    // (amount, clip, skybox, night, interior)
+    let cases: Vec<(u8, f32, u8, bool, bool)> = std::env::var("MG_FOG_CASES")
         .ok()
         .map(|v| {
             v.split(',')
                 .map(|c| {
-                    let (a, d) = c.split_once(':').unwrap();
-                    (a.parse().unwrap(), d.parse().unwrap(), 0)
+                    let mut parts = c.split(':');
+                    let a = parts.next().unwrap().parse().unwrap();
+                    let d = parts.next().unwrap().parse().unwrap();
+                    let flags = parts.next().unwrap_or("");
+                    (a, d, 0, flags.contains('n'), flags.contains('i'))
                 })
                 .collect()
         })
-        .unwrap_or_else(|| vec![(0, 45.0, 0), (10, 45.0, 0), (50, 100.0, 1), (0, 25.0, 0)]);
+        .unwrap_or_else(|| {
+            vec![
+                (0, 45.0, 0, false, false),
+                (10, 45.0, 0, false, false),
+                (50, 100.0, 1, false, false),
+                (0, 25.0, 0, false, false),
+                (12, 22.0, 0, true, true),
+                (12, 22.0, 0, false, false),
+            ]
+        });
     let mut failures = Vec::new();
-    for (amount, clip, sky) in cases {
-        let dir = scratch_dir(&format!("client_fog_{amount}_{clip}"));
+    for (amount, clip, sky, night, interior) in cases {
+        let what = format!(
+            "fog {amount} clip {clip} sky {sky}{}{}",
+            if night { " night" } else { "" },
+            if interior { " interior" } else { "" }
+        );
+        let dir = scratch_dir(&format!(
+            "client_fog_{amount}_{clip}{}{}",
+            if night { "_n" } else { "" },
+            if interior { "_i" } else { "" }
+        ));
         let light =
             Lighting { ambient: 0x404040, diffuse: 0xB0B0B0, main_light: 0, only_tile: None };
         let (mut m, mut are) = build_module(&game, &dir, light);
-        are.root.set("SunFogAmount", Value::Byte(amount));
-        are.root.set("SunFogColor", Value::Dword(0x806040));
+        // (The other one's fog another amount and colour, to tell which
+        // the client takes.)
+        let (this, other) = if night { ("Moon", "Sun") } else { ("Sun", "Moon") };
+        are.root.set(&format!("{this}FogAmount"), Value::Byte(amount));
+        are.root.set(&format!("{this}FogColor"), Value::Dword(0x806040));
+        are.root.set(&format!("{other}FogAmount"), Value::Byte(amount.wrapping_add(7)));
+        are.root.set(&format!("{other}FogColor"), Value::Dword(0x204080));
+        are.root.set("IsNight", Value::Byte(u8::from(night)));
         are.root.set("FogClipDist", Value::Float(clip));
         are.root.set("SkyBox", Value::Byte(sky));
+        if interior {
+            let flags = are.root.integer("Flags").unwrap_or(0) | 1;
+            are.root.set("Flags", Value::Dword(u32::try_from(flags).unwrap_or(1)));
+        }
         let area =
             m.info().unwrap().root.list("Mod_Area_list").unwrap()[0].resref("Area_Name").unwrap();
         m.set_gff(ResKey::new(area, ResType::ARE), &are).unwrap();
@@ -1120,31 +1152,31 @@ fn fog_uniforms_match_the_client() {
         std::fs::write(dir.join("user/override/inc_standard.shd"), &shader).unwrap();
         m.save_as(&ModuleLocation::Archive(dir.join("user/modules/MgScene.mod"))).unwrap();
         let Some(client) = client_screenshot(&dir, "MgScene") else {
-            panic!("fog {amount}: the client did not reach the scene (see {})", dir.display());
+            panic!("{what}: the client did not reach the scene (see {})", dir.display());
         };
         // The start from 1 / (end - start): the read-back clamps below 0.
         let end = debug_value(&client, 12, 1024.0);
         let start = end - 1.0 / debug_value(&client, 13, 1.0);
         let color = [14, 15, 16].map(|k| debug_value(&client, k, 1.0));
         let lighting = mg_area::Lighting::read(&are.root, None);
-        let ours = mg_area::fog(&lighting, false);
+        let ours = mg_area::fog(&lighting, night);
         eprintln!(
-            "fog {amount} clip {clip} sky {sky}: client {start:.2}..{end:.2}, \
-             moonglow {:.2}..{:.2}",
-            ours.start, ours.end
+            "{what}: client {start:.2}..{end:.2} colour {color:.3?}, \
+             moonglow {:.2}..{:.2} colour {:.3}",
+            ours.start, ours.end, ours.color
         );
         let close = |a: f32, b: f32, tolerance: f32| (a - b).abs() <= tolerance;
         if debug_value(&client, 10, 1.0) < 0.5 {
-            failures.push(format!("fog {amount}: the client has fog off"));
+            failures.push(format!("{what}: the client has fog off"));
         }
         if !close(start, ours.start, 0.3) || !close(end, ours.end, 0.1) {
             failures.push(format!(
-                "fog {amount} clip {clip}: client {start}..{end}, moonglow {}..{}",
+                "{what}: client {start}..{end}, moonglow {}..{}",
                 ours.start, ours.end
             ));
         }
         if (0..3).any(|c| !close(color[c], ours.color[c], 0.003)) {
-            failures.push(format!("fog {amount}: colour {color:?} vs {}", ours.color));
+            failures.push(format!("{what}: colour {color:?} vs {}", ours.color));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
@@ -1197,6 +1229,191 @@ fn grass_and_sky_look() {
     let (w, h) = client.as_ref().map_or((1280, 800), |c| (c.width, c.height));
     off_and_on(&gpu, &game, &scene, &camera, (w, h), client.as_ref(), &dir, "moonglow");
     eprintln!("{}: client {}", dir.display(), client.is_some());
+}
+
+/// The sky under the game's farthest camera (`SetCameraFacing`'s distance
+/// 25, its most) and under Moonglow's far beyond it, for a look (M3 T15's
+/// review): a rural field (ttr01, 4 by 4) with the Grass_Clear skybox and
+/// a magenta fog color (the horizon fade is drawn in it), the player at
+/// the field's west edge, the client's camera looking north straight down
+/// (`top`: pitch 1, the field's west edge at the picture's left) and 30°
+/// down from the horizon (`low`: pitch 60, the land past the field's west
+/// and north edges and the fade over it). Moonglow's camera is fitted to
+/// the field in each client picture (its distance and pitch, by the
+/// ground alone: the scripted ones do not map one to one onto the view),
+/// and the sky beside the field compared ([`sky_difference`]); then drawn
+/// from 150 m at the same pitch (`far`, and `far_wide` 2559 by 800), where
+/// no game camera goes. Pictures in `target/test-output/client_render_sky/`,
+/// Moonglow's named by `MG_SKY_LABEL` (default `now`); `MG_SKY_TOP` or
+/// `MG_SKY_LOW` ("distance,pitch") give Moonglow's camera instead of the
+/// fit, `MG_NO_CLIENT=1` draws Moonglow's alone.
+#[test]
+#[ignore]
+fn sky_under_the_game_s_farthest_camera_look() {
+    let root = corpus!();
+    let _ = oracle_tool!("nwn_script_comp");
+    mg_testkit::gpu::hold();
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let game = GameData::open(&GameInstall::new(&root, None, "en")).unwrap();
+    let light = Lighting { ambient: 0x404040, diffuse: 0xB0B0B0, main_light: 0, only_tile: None };
+    let label = std::env::var("MG_SKY_LABEL").unwrap_or_else(|_| "now".into());
+    let skip_client = std::env::var_os("MG_NO_CLIENT").is_some();
+    let entry = glam::Vec2::new(3.0, 20.0);
+    let out = scratch_dir("client_render_sky");
+    // (The case, the client's pitch, and the fit's search for Moonglow's
+    // pitch, degrees from straight down; the camera where no client ran.)
+    let cases =
+        [("top", "1.0", (0.0, 12.0), (23.0, 2.0)), ("low", "60.0", (52.0, 66.0), (23.0, 59.0))];
+    for (case, pitch, search, fallback) in cases {
+        let dir = scratch_dir(&format!("client_render_sky_{case}"));
+        let (mut m, mut are) = build_module_on(&game, &dir, light, "ttr01", 1);
+        let are_key = *m.keys_of(ResType::ARE).next().unwrap();
+        are.root.set("SunFogColor", Value::Dword(0x00C0_20C0));
+        m.set_gff(are_key, &are).unwrap();
+        // (Where the player stands, to the log: [`player_stood`].)
+        let ready = "DelayCommand(4.0, Log(\"MG_READY\"));";
+        let stood = "DelayCommand(3.5, Log(\"MG_PC \" + FloatToString(GetPosition(pc).x, 0, 3) \
+                     + \" \" + FloatToString(GetPosition(pc).y, 0, 3) + \" \" \
+                     + FloatToString(GetPosition(pc).z, 0, 3)));";
+        let enter = enter_with_camera("25.0", pitch)
+            .replace("CreateObject(", "if (FALSE) CreateObject(")
+            .replace(ready, &format!("{stood}\n    {ready}"));
+        assert!(enter.contains("MG_PC"));
+        let ncs = compile(&dir, "mg_enter", &enter);
+        m.set(ResKey::parse("mg_enter", ResType::NCS).unwrap(), ncs);
+        let mut info = m.info().unwrap();
+        info.root.write(&ifo::MOD_ENTRY_X, entry.x);
+        info.root.write(&ifo::MOD_ENTRY_Y, entry.y);
+        m.set_info(&info).unwrap();
+        std::fs::create_dir_all(dir.join("user")).unwrap();
+        std::fs::write(dir.join("user/settings.tml"), batch5::with_skybox(SETTINGS)).unwrap();
+        m.save_as(&ModuleLocation::Archive(dir.join("user/modules/MgScene.mod"))).unwrap();
+        let client = if skip_client { None } else { client_screenshot(&dir, "MgScene") };
+        let git_key = *m.keys_of(ResType::GIT).next().unwrap();
+        let git = m.gff(&git_key).unwrap().unwrap();
+        let tileset = mg_area::tileset(&game, ResRef::from_str("ttr01").unwrap()).ok();
+        let model = mg_area::AreaModel::read(&game, &are.root, &git.root, tileset.as_ref());
+        let pc = player_stood(&dir, &game, &model, entry);
+        let area_scene = mg_area::AreaScene::new(&gpu, &game, &model);
+        let scene =
+            area_scene.scene(&model, &mg_area::View { fog: false, ..mg_area::View::of(&model) });
+        let (w, h) = client.as_ref().map_or((1024, 768), |c| (c.width, c.height));
+        let camera = |distance: f32, pitch: f32| {
+            camera_facing(pc, FACING, FIT_FOV, FIT_FOCUS, distance, pitch)
+        };
+        if let Some(c) = &client {
+            save_png(c, &out.join(format!("{case}_client.png")));
+        }
+        let given = std::env::var(format!("MG_SKY_{}", case.to_uppercase())).ok().and_then(|v| {
+            let (d, p) = v.split_once(',')?;
+            Some((d.trim().parse().ok()?, p.trim().parse().ok()?))
+        });
+        let (distance, fitted) = match (&client, given) {
+            (_, Some(given)) => given,
+            (Some(c), None) => fit_to_the_ground(&gpu, &game, &scene, c, search, &camera),
+            (None, None) => fallback,
+        };
+        eprintln!("{case}: Moonglow's camera at distance {distance}, pitch {fitted}");
+        let near = camera(distance, fitted);
+        let (off, on) = off_and_on(&gpu, &game, &scene, &near, (w, h), client.as_ref(), &dir, "mg");
+        save_png(&off, &out.join(format!("{case}_moonglow_{label}.png")));
+        save_png(&on, &out.join(format!("{case}_moonglow_shaders_{label}.png")));
+        if let Some(c) = &client {
+            let (sky, n) = sky_difference(c, &off);
+            let (sky_on, _) = sky_difference(c, &on);
+            eprintln!(
+                "{case}: the sky beside the field ({n} pixels) {sky:.2} from the client's of 255, \
+                 the game's shaders {sky_on:.2}"
+            );
+        }
+        let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 4);
+        let far = camera(150.0, fitted);
+        let far_img = r.render_image(&gpu, &game.resman, &scene, &far, w, h);
+        save_png(&far_img, &out.join(format!("{case}_far_{label}.png")));
+        let wide = r.render_image(&gpu, &game.resman, &scene, &far, 2559, 800);
+        save_png(&wide, &out.join(format!("{case}_far_wide_{label}.png")));
+    }
+    eprintln!("pictures in {}", out.display());
+}
+
+/// Whether a pixel of the client's picture shows the ground (grass,
+/// dirt, rock), not the sky's fade in [`sky_under_the_game_s_farthest_camera_look`]'s
+/// magenta fog, nor black.
+fn ground_pixel(p: &[u8]) -> bool {
+    let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+    r + g + b > 30 && 2 * g > r.min(b)
+}
+
+/// The rows and columns of a picture compared, clear of the game's GUI.
+fn clear_of_the_gui(w: usize, h: usize) -> impl Iterator<Item = (usize, usize)> {
+    (h / 10..h * 7 / 10).flat_map(move |y| (w / 10..w * 9 / 10).map(move |x| (x, y)))
+}
+
+/// How far the sky in Moonglow's picture is from the client's: the mean
+/// difference per channel (of 255) over what is not the ground in the
+/// client's ([`ground_pixel`]), clear of its GUI; and how many pixels.
+fn sky_difference(client: &Rgba, ours: &Rgba) -> (f64, usize) {
+    let (w, h) = (client.width as usize, client.height as usize);
+    let (mut sum, mut n) = (0f64, 0usize);
+    for (x, y) in clear_of_the_gui(w, h) {
+        let i = (y * w + x) * 4;
+        if ground_pixel(&client.data[i..i + 3]) {
+            continue;
+        }
+        sum +=
+            (0..3).map(|c| f64::from(client.data[i + c].abs_diff(ours.data[i + c]))).sum::<f64>()
+                / 3.0;
+        n += 1;
+    }
+    (sum / n.max(1) as f64, n)
+}
+
+/// The distance (15 to 35 m, half a meter apart) and pitch (degrees from
+/// straight down, half a degree apart over `pitches`) of `camera`'s that
+/// match the client's picture best on the ground alone ([`ground_pixel`],
+/// gray levels, clear of its GUI): the sky is what is compared, not
+/// what is fitted.
+fn fit_to_the_ground(
+    gpu: &Gpu,
+    game: &GameData,
+    scene: &Scene,
+    client: &Rgba,
+    (low, high): (f32, f32),
+    camera: &dyn Fn(f32, f32) -> Camera,
+) -> (f32, f32) {
+    let mut r = Renderer::new(gpu, wgpu::TextureFormat::Rgba8Unorm, 4);
+    let (w, h) = (client.width as usize, client.height as usize);
+    let gray = |img: &Rgba, i: usize| {
+        (f32::from(img.data[i]) + f32::from(img.data[i + 1]) + f32::from(img.data[i + 2])) / 3.0
+    };
+    let ground: Vec<usize> = clear_of_the_gui(w, h)
+        .filter(|&(x, y)| x % 2 == 0 && y % 2 == 0)
+        .map(|(x, y)| (y * w + x) * 4)
+        .filter(|&i| ground_pixel(&client.data[i..i + 3]))
+        .collect();
+    let mut best = (f32::MAX, (0.0, 0.0));
+    let pitches = (0..).map(|k| low + k as f32 * 0.5).take_while(|&p| p <= high);
+    for pitch in pitches {
+        for distance in (30..=70).map(|d| d as f32 / 2.0) {
+            let cam = camera(distance, pitch);
+            let img = r.render_image(gpu, &game.resman, scene, &cam, client.width, client.height);
+            let err = ground.iter().map(|&i| (gray(&img, i) - gray(client, i)).abs()).sum::<f32>()
+                / ground.len().max(1) as f32;
+            if err < best.0 {
+                best = (err, (distance, pitch));
+            }
+        }
+    }
+    eprintln!(
+        "best fit on {} ground pixels: error {:.2}: distance, pitch {:?}",
+        ground.len(),
+        best.0,
+        best.1
+    );
+    best.1
 }
 
 /// One grass override for [`grass_overrides_look`], as Moonglow writes it.

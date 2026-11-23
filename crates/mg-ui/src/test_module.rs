@@ -298,7 +298,7 @@ fn is_there(path: &Path) -> bool {
 }
 
 /// What goes into the content user directory's `hak` and `tlk` folders:
-/// file names (`l64_parts.hak`) and the files they are.
+/// file names (`pw_parts.hak`) and the files they are.
 #[derive(Debug, Clone, Default)]
 pub struct Content {
     pub haks: Vec<(std::ffi::OsString, PathBuf)>,
@@ -457,17 +457,17 @@ mod tests {
         std::fs::write(written.join("k1.hak"), b"from nwsync").unwrap();
         std::fs::write(written.join("t.tlk"), b"tlk").unwrap();
         let content = Content {
-            haks: vec![("l64_parts.hak".into(), written.join("k1.hak"))],
-            tlks: vec![("layonara.tlk".into(), written.join("t.tlk"))],
+            haks: vec![("pw_parts.hak".into(), written.join("k1.hak"))],
+            tlks: vec![("world.tlk".into(), written.join("t.tlk"))],
         };
         let dir = root.join("test-user");
         content_user_dir(&real, &dir, &content).unwrap();
         assert_eq!(std::fs::read(dir.join("localvault/me.bic")).unwrap(), b"me");
         assert!(std::fs::symlink_metadata(dir.join("modules")).unwrap().is_symlink());
         assert_eq!(std::fs::read(dir.join("settings.tml")).unwrap(), b"x = 1");
-        assert_eq!(std::fs::read(dir.join("hak/l64_parts.hak")).unwrap(), b"from nwsync");
+        assert_eq!(std::fs::read(dir.join("hak/pw_parts.hak")).unwrap(), b"from nwsync");
         assert!(!dir.join("hak/old.hak").exists());
-        assert_eq!(std::fs::read(dir.join("tlk/layonara.tlk")).unwrap(), b"tlk");
+        assert_eq!(std::fs::read(dir.join("tlk/world.tlk")).unwrap(), b"tlk");
         let ini = std::fs::read_to_string(dir.join("nwn.ini")).unwrap();
         assert_eq!(ini, "[Alias]\nMODULES=/m\n[Game Options]\nHak=keep\n");
         // (What the game writes goes to the player's folder.)
@@ -478,9 +478,9 @@ mod tests {
         let content =
             Content { haks: vec![("other.hak".into(), written.join("k1.hak"))], tlks: vec![] };
         content_user_dir(&real, &dir, &content).unwrap();
-        assert!(!is_there(&dir.join("hak/l64_parts.hak")));
+        assert!(!is_there(&dir.join("hak/pw_parts.hak")));
         assert!(dir.join("hak/other.hak").is_file());
-        assert!(!is_there(&dir.join("tlk/layonara.tlk")));
+        assert!(!is_there(&dir.join("tlk/world.tlk")));
         // The player's folder as it was, the written files too.
         assert_eq!(std::fs::read(real.join("hak/old.hak")).unwrap(), b"the player's");
         assert!(written.join("k1.hak").is_file() && written.join("t.tlk").is_file());
