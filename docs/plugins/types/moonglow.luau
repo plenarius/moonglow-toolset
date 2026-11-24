@@ -1,5 +1,5 @@
 --!strict
--- The types of Moonglow's plugin API, version 0.10, for editors that check
+-- The types of Moonglow's plugin API, version 0.11, for editors that check
 -- Luau (luau-lsp): point the alias "moonglow" at this file in a `.luaurc`
 -- in or above your plugin's folder, and `require("@moonglow")` is typed
 -- and completed:
@@ -191,7 +191,24 @@ export type Ui = {
 -- each hak), and the module's list of haks.
 export type Hak = {
     write: (self: Hak, hak: string, name: string, bytes: string) -> (),
+    -- A whole hak streamed into the hak folder from a declared host,
+    -- checked by its size and SHA-256 (API 0.11, the Layonara build).
+    download: (self: Hak, hak: string, spec: HakDownload) -> HakDownloaded,
     attach: (self: Hak, hak: string) -> (),
+}
+
+export type HakDownload = {
+    url: string,
+    sha256: string,
+    bytes: number,
+    signin: string?,
+    above_nwsync: boolean?,
+}
+
+export type HakDownloaded = {
+    downloaded: boolean,
+    bytes: number,
+    resumed: number,
 }
 
 -- A picture decoded. Pixels count from 0, from the top left.
@@ -410,7 +427,7 @@ export type Element = string | {
 
 local mg = {}
 
-mg.api = "0.10"
+mg.api = "0.11"
 
 -- A command's handler may return what Undo calls the change:
 -- { label = "..." }, or the text alone.

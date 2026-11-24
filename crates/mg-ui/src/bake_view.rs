@@ -387,7 +387,7 @@ fn made(app: &mut Moonglow, d: &BakeDraft, plan: &Plan) {
         let files = (plan.files.iter())
             .map(|(k, data)| (*k, mg_plugin::HakData::Bytes(data.as_slice().into())))
             .collect();
-        let write = mg_plugin::HakWrite { name: plan.hak.clone(), files, held: None };
+        let write = mg_plugin::HakWrite { name: plan.hak.clone(), files, held: None, whole: None };
         match write.write_kept(&dir) {
             Ok(done) => written.push(done),
             Err(e) => return say(app, format!("{}.hak was not written: {e}", plan.hak)),

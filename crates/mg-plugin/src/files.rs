@@ -273,7 +273,7 @@ fn write(s: &Shared, dir: &Path, name: &str, bytes: Vec<u8>) -> mlua::Result<()>
 
 /// A hak's name as a plugin may give it: what a file of the hak folder
 /// can be called, and nothing that leads elsewhere.
-fn hak_name(name: &str) -> mlua::Result<String> {
+pub(crate) fn hak_name(name: &str) -> mlua::Result<String> {
     let name = name.strip_suffix(".hak").unwrap_or(name);
     let fine = !name.is_empty()
         && name.len() <= 32
@@ -286,23 +286,39 @@ fn hak_name(name: &str) -> mlua::Result<String> {
     Ok(name.to_ascii_lowercase())
 }
 
+/// The user's leave for the job to write into the hak (asked `text` the
+/// first time, whether to write or to download).
+pub(crate) fn hak_leave(s: &Shared, hak: &str, text: String) -> mlua::Result<()> {
+    if s.hak_leave.borrow().contains(hak) {
+        return Ok(());
+    }
+    if s.host.ask(&Question::Confirm(text)) != Some(Answer::Yes) {
+        return fail(format!("writing the hak {hak} was not allowed"));
+    }
+    s.hak_leave.borrow_mut().insert(hak.to_string());
+    Ok(())
+}
+
+/// The hak among what the job writes, added where it is not yet.
+pub(crate) fn hak_entry(s: &Shared, hak: &str) {
+    let mut haks = s.haks.borrow_mut();
+    if !haks.iter().any(|h| h.name == hak) {
+        haks.push(HakWrite { name: hak.to_string(), files: Vec::new(), held: None, whole: None });
+    }
+}
+
 /// A resource for a hak of the user's hak folder, with their leave for
 /// the first one of each hak.
 fn put(s: &Shared, hak: &str, name: &str, data: HakData) -> mlua::Result<()> {
     let hak = hak_name(hak)?;
     let key = mg_module::hak_edit::key_for(name).or_else(|why| fail(format!("{name}: {why}")))?;
-    let known = s.haks.borrow().iter().any(|h| h.name == hak);
-    if !known {
-        let text = format!(
-            "{} wants to put resources into the hak {hak}.hak in your hak folder (added to it \
-             if it is there; a copy of it is kept as {hak}.hak.bak). Allow it?",
-            s.who
-        );
-        if s.host.ask(&Question::Confirm(text)) != Some(Answer::Yes) {
-            return fail(format!("writing the hak {hak} was not allowed"));
-        }
-        s.haks.borrow_mut().push(HakWrite { name: hak.clone(), files: Vec::new(), held: None });
-    }
+    let text = format!(
+        "{} wants to put resources into the hak {hak}.hak in your hak folder (added to it \
+         if it is there; a copy of it is kept as {hak}.hak.bak). Allow it?",
+        s.who
+    );
+    hak_leave(s, &hak, text)?;
+    hak_entry(s, &hak);
     // (Past what a job holds in memory, its bytes wait in a scratch file.)
     let mut held = None;
     let data = match data {
@@ -345,6 +361,13 @@ pub(crate) fn hak(lua: &Lua, sh: &Rc<Shared>) -> mlua::Result<Table> {
                 put(&s, &hak, &name, HakData::Bytes(bytes.as_bytes().to_vec().into()))
             },
         )?,
+    )?;
+    let s = sh.clone();
+    t.set(
+        "download",
+        lua.create_function(move |lua, (_, hak, spec): (This, String, Table)| {
+            crate::download::download(lua, &s, &hak, &spec)
+        })?,
     )?;
     let s = sh.clone();
     t.set(

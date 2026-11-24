@@ -465,8 +465,11 @@ impl Module {
             Ok(missing) => (missing, None),
             Err(e) => (Vec::new(), Some(e)),
         };
-        let nwsync = (self.project_file.nwsync_settings())
-            .map(|s| nwsync_content::mount(resman, install, &s, &mut missing));
+        let nwsync = (self.project_file.nwsync_settings()).map(|s| {
+            let mut m = nwsync_content::mount(resman, install, &s, &mut missing);
+            m.raised = nwsync_content::raise_haks(resman, &self.project_file.user.above_nwsync);
+            m
+        });
         // The walkmesh bake's rows the haks' table lacks yet, drawn as the
         // project's build will add them (`bake::PENDING_LABEL`).
         let rows = self.project_file.baked_rows().ok();

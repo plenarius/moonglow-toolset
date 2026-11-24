@@ -49,6 +49,9 @@
 //! ```toml
 //! [builder]
 //! code = "ab"                         # new ResRefs begin ab_ (by the pattern)
+//!
+//! [haks]
+//! above_nwsync = ["tb_intro_"]        # over the NWSync content, in Moonglow's view
 //! ```
 //!
 //! A key the file doesn't know, or a value of the wrong kind, is a
@@ -386,6 +389,10 @@ pub struct UserSettings {
     /// proposes for new resources start with (by `[resrefs] pattern`),
     /// in lower case.
     pub builder_code: Option<String>,
+    /// `[haks] above_nwsync`: haks of the builder's hak folder layered
+    /// above the project's NWSync content, which a plugin downloaded
+    /// (a reworked tileset over its released copy).
+    pub above_nwsync: Patterns,
 }
 
 /// A command the project names (`[commands]`), which File › Project runs
@@ -1189,7 +1196,7 @@ impl ProjectFile {
             // (A .mod's folder holds other modules: what is a checkout's,
             // and the builder's own file, are a project folder's. Its
             // `[nwsync]` server is read, but not what runs a command.)
-            if beside && matches!(section, "claims" | "commands" | "plugins" | "builder") {
+            if beside && matches!(section, "claims" | "commands" | "plugins" | "builder" | "haks") {
                 r.warn(
                     key.span().start,
                     format!(
@@ -1519,6 +1526,25 @@ impl ProjectFile {
                         }
                     }
                 }
+                ("haks", true) => {
+                    for e in r.section(entry) {
+                        match e.0.get_ref().as_ref() {
+                            "above_nwsync" => {
+                                if let Some(p) = r.patterns(e) {
+                                    self.user.above_nwsync = p;
+                                }
+                            }
+                            _ => r.unknown(section, e),
+                        }
+                    }
+                }
+                ("haks", false) => r.warn(
+                    key.span().start,
+                    format!(
+                        "[haks] is each builder's own: it goes in {USER_DIR}/{USER_FILE}, not in \
+                         the file the team shares"
+                    ),
+                ),
                 ("builder", false) => r.warn(
                     key.span().start,
                     format!(
@@ -1908,6 +1934,37 @@ impl ProjectFile {
         let code = code.map(str::to_ascii_lowercase);
         let text = with_code(&text, code.as_deref()).map_err(invalid)?;
         Self::write_user(root, &text)
+    }
+
+    /// Adds the hak (by name, without `.hak`) to `[haks] above_nwsync` in
+    /// the builder's own file, keeping the rest as written; one there
+    /// already (whatever its case) is not added again.
+    pub fn add_above_nwsync(root: &Path, hak: &str) -> std::io::Result<()> {
+        use crate::project_plugins::{document, invalid};
+        let name = hak.trim().trim_end_matches(".hak").to_ascii_lowercase();
+        if name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(invalid(format!("{hak:?} is not a hak's name")));
+        }
+        let path = Self::user_path(root);
+        let mut doc = document(&path, &format!("{USER_DIR}/{USER_FILE}"))?;
+        let haks = doc.entry("haks").or_insert_with(|| toml_edit::Item::Table(Default::default()));
+        let haks = haks
+            .as_table_like_mut()
+            .ok_or_else(|| invalid("\"haks\" is not a table (mend it first)"))?;
+        if haks.get("above_nwsync").is_none() {
+            haks.insert("above_nwsync", toml_edit::value(toml_edit::Array::new()));
+        }
+        let list = haks
+            .get_mut("above_nwsync")
+            .and_then(|i| i.as_array_mut())
+            .ok_or_else(|| invalid("[haks] above_nwsync is not a list (mend it first)"))?;
+        if list.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case(&name))) {
+            return Ok(());
+        }
+        list.push(name.as_str());
+        Self::write_user(root, &doc.to_string())
     }
 
     /// Adds a name or glob to `[used] key` (`scripts`, `conversations`,
@@ -2621,6 +2678,29 @@ keeper_variable = "tdod_store"
             let out = with_value_in("f", &set(text), "talk", "lines", None).unwrap();
             assert_eq!(read(&out).0, None, "{out}");
         }
+    }
+
+    /// `[haks] above_nwsync` is the builder's own: added to their file
+    /// once, the rest of it kept, and read back; in the team's file, said.
+    #[test]
+    fn haks_above_nwsync_are_the_builder_s_own() {
+        let dir = mg_testkit::scratch_dir("project-file-above-nwsync");
+        std::fs::create_dir_all(dir.join(USER_DIR)).unwrap();
+        std::fs::write(ProjectFile::user_path(&dir), "# mine\n[builder]\ncode = \"ab\"\n").unwrap();
+        ProjectFile::add_above_nwsync(&dir, "TB_Intro_.hak").unwrap();
+        ProjectFile::add_above_nwsync(&dir, "tb_intro_").unwrap();
+        ProjectFile::add_above_nwsync(&dir, "ls_textures").unwrap();
+        assert!(ProjectFile::add_above_nwsync(&dir, "../x").is_err());
+        let text = std::fs::read_to_string(ProjectFile::user_path(&dir)).unwrap();
+        assert!(text.starts_with("# mine\n[builder]\ncode = \"ab\"\n"), "{text}");
+        let p = ProjectFile::read(&dir);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.user.above_nwsync.globs, ["tb_intro_", "ls_textures"]);
+        assert_eq!(p.user.builder_code.as_deref(), Some("ab"));
+        let mut team = ProjectFile::default();
+        team.apply(FILE_NAME, "[haks]\nabove_nwsync = [\"x\"]\n", false);
+        assert!(team.user.above_nwsync.is_empty());
+        assert!(team.warnings[0].contains("[haks] is each builder's own"), "{:?}", team.warnings);
     }
 
     #[test]

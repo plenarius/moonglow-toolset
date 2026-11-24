@@ -904,7 +904,11 @@ with a `.gitignore` in it holding `*`, so that it stays out of version
 control without a line in the project's own (the log warns of a
 `.moonglow` made by hand without one). It holds `[builder] code`, your
 builder code (below), and the values of plugins' settings of scope
-`user-project` (`[plugins."<plugin id>"]`, as in the team's file). A
+`user-project` (`[plugins."<plugin id>"]`, as in the team's file), and
+`[haks] above_nwsync`, haks of your hak folder Moonglow layers over the
+project's NWSync content (names or globs; a plugin that downloads a
+reworked tileset adds it, since plugin API 0.11 in the Layonara build;
+the game itself reads the server's copy). A
 team's section put there, or `[builder]` put in the team's file, is said
 and left out. Which of the project's commands you allowed to run is
 never kept in the project's files ([below](#the-projects-commands)).

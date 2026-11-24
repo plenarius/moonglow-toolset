@@ -18,6 +18,7 @@
 //!   and run only once the builder allows them; [`settings`]: the values
 //!   a plugin keeps.
 
+mod download;
 mod files;
 mod json;
 mod kept;
@@ -422,6 +423,12 @@ pub trait Host {
     fn network(&self) -> Option<Network> {
         None
     }
+
+    /// The hak folder `ctx.hak:download` streams into (API 0.11): the one
+    /// the host writes a job's haks into. None: no download.
+    fn hak_dir(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// What a job reads.
@@ -634,7 +641,7 @@ pub struct Selection {
 
 /// What a command made: the edits to apply as one command, and its name;
 /// and what it wants written into haks (which the user agreed to).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Outcome {
     pub label: String,
     pub edits: Vec<Edit>,
@@ -647,6 +654,10 @@ pub struct Outcome {
     /// What a `resource-saving` handler said of the resources it was
     /// called for: warnings, and refusals.
     pub said: Vec<Said>,
+    /// Haks it downloaded that go above the NWSync layer
+    /// (`ctx.hak:download{ above_nwsync = true }`, API 0.11), for the host
+    /// to record in the builder's own project file.
+    pub above_nwsync: Vec<String>,
 }
 
 /// What a `resource-saving` handler said of a resource
@@ -791,8 +802,12 @@ pub struct HakWrite {
     pub files: Vec<(ResKey, HakData)>,
     /// The job's scratch files, kept while this is.
     pub held: Option<Arc<Held>>,
+    /// A whole hak downloaded (`ctx.hak:download`, API 0.11), checked:
+    /// put in the hak's place before `files` go into it.
+    pub whole: Option<PathBuf>,
 }
 
+pub use download::MAX_DOWNLOAD;
 pub use kept::{HELD_IN_MEMORY, HakWritten, Held, UNDO_FOLDER};
 pub use mg_module::hak_edit::Source as HakData;
 

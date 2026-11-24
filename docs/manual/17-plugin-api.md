@@ -8,7 +8,7 @@ generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 
 # Plugin API reference
 
-Everything a plugin's code can use, for plugin API 0.10. The API is
+Everything a plugin's code can use, for plugin API 0.11. The API is
 experimental: a later release may change it, and each change is listed
 in the API's [change list](https://github.com/jadzziaa/moonglow-toolset/tree/develop/docs/plugins).
 How plugins work and how to write one is in
@@ -29,7 +29,7 @@ nothing, and a check is reported as failed.
 
 | | |
 | --- | --- |
-| `mg.api` | The plugin API of the Moonglow running, as text: `"0.10"`. |
+| `mg.api` | The plugin API of the Moonglow running, as text: `"0.11"`. |
 | `mg.command(id, handler)` | Registers the function for the command the manifest declares as `id`. `handler(ctx)` makes its edits with `ctx.edit`. It may return what Undo calls the change, as `{ label = "…" }` or the text alone; else that is the command's title. |
 | `mg.check(id, handler)` | Registers the function for the check the manifest declares as `id`. `handler(ctx)` returns a list of findings (below), or nothing for none. A check that edits fails. |
 | `mg.on(id, handler)` | Registers the function for the event the manifest declares as `id` (`[event]`, its `on` one of the events of [`ctx.event`](#ctxevent)). `handler(ctx)` is called when it happens, as a command's is, with what happened as `ctx.event`: `ctx.event.name`, and what the event is of. It may return what Undo calls its change. |
@@ -607,6 +607,7 @@ Undo, and its hak stays. A check can't write one.
 | | |
 | --- | --- |
 | `ctx.hak:write(hak, name, bytes)` | Puts a resource into the hak named `hak` (letters, digits, `_` and `-`; `.hak` may be left out), as `name` (`name.ext`: at most 16 letters, digits, `_` and `-`, and a type the game reads). |
+| `ctx.hak:download(hak, spec)` | Downloads a whole hak into the hak folder (since API 0.11, Moonglow's Layonara build; a command's or a wizard's job only, as `ctx.net`). `spec` is `{ url, sha256, bytes, signin?, above_nwsync? }`: `url` on a declared host, as `ctx.net:request`'s; `sha256` the file's, 64 hex digits; `bytes` its size, up to 512 MB; `signin` as a request's (a refused token refreshed once); `above_nwsync` to layer it over the project's NWSync content. Streams to `hak.hak.part` (never into the plugin's memory), with its progress in the status bar, Cancel, and no time limit while bytes arrive (60 seconds without one is an error); the next download of the hak goes on from where one stopped. A file of another size or SHA-256 is an error, and not kept. Returns `{ downloaded, bytes, resumed }`: `downloaded = false` when the hak there has that SHA-256 already; `resumed` the bytes a part already had. The user's leave is asked as for `write`; the hak takes the place of the one there (kept as `hak.hak.bak`) when the handler returns, before `write`'s resources go into it, and goes with the edits. |
 | `ctx.hak:attach(hak)` | Lists the hak at the top of the module's haks (an edit of the module, undone with the command). |
 
 A folder the user chose copies a file straight into a hak, however large
