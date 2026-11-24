@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-24
+* **Update** (Layonara's fork): version `5.1.0-layonara.4` (`Cargo.toml`): the Layonara plugin 1.1.1, its refusals shown as messages.
 * **Fix** (Layonara's fork): **the Layonara plugin's refusals are a message, not a runtime error** (version 1.1.1). A refusal from ops-api (a 400's problems, a 409, a 5xx such as a proxy's 502), no connection, a failed Forge download, and the plugin's own "select an area first" and the like now end the command with a dialog (`ctx.ui:message`) and the log: the service's words, its problems by area, and what to do next (fix the copy, wait for the other trial, try again in a few minutes, check the connection). They are raised as `api.stop` and shown by `api.command`, which wraps every command; any other error is a bug and still fails the job with its traceback. Edits made before a refusal (a merge already written) stay. `mg plugin test` gains `fail` on a `[[test.reply]]` (no answer, as a dropped connection). 25 new tests (`tests/refusals.toml`): a 400 with problems, a 409, a 502 and no connection on each of Fetch Area, Try on Dev, Send for Review, From the Forge, Trial Status and Release.
 * **Update** (Layonara's fork): version `5.1.0-layonara.3` (`Cargo.toml`), with plugin API 0.11 and the Layonara plugin's From the Forge… (5.1.0-layonara.2 was never released).
 
