@@ -2704,14 +2704,15 @@ mod tests {
             let retired = ["toolbar_icons_only", "test_without_steam"];
             let kept: Vec<_> =
                 old.into_iter().filter(|(n, _)| !retired.contains(&n.as_str())).collect();
-            // (Three fields came after the file, two from develop's
-            // Builders' asks and M5's W1's: written at their defaults, the
-            // rest as it was.)
+            // (Four fields came after the file, two from develop's
+            // Builders' asks, M5's W1's and the fork's bundled plugins:
+            // written at their defaults, the rest as it was.)
             let (added, written): (Vec<_>, Vec<_>) = fields_of(&back)
                 .expect("fields")
                 .into_iter()
                 .partition(|(n, _)| !kept.iter().any(|(k, _)| k == n));
             let defaults = [
+                ("plugins_bundled", "[]"),
                 ("tree_tags", "false"),
                 ("tree_extensions", "false"),
                 ("appearance_portrait", "false"),
