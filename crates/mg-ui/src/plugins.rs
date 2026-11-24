@@ -1637,7 +1637,9 @@ impl Moonglow {
     /// Runs the next thing a plugin does on an event, if no job is
     /// running: as a job, like a command.
     pub(crate) fn next_plugin_event(&mut self) {
-        if self.busy() || self.ws.is_none() {
+        // (A field typed in sets its text first, or the job writes over it.)
+        let waits = self.plugin_after_text.is_some() || self.typing_in_a_field();
+        if self.busy() || self.ws.is_none() || waits {
             return;
         }
         // What the last event's job was allowed is kept for the next run.
@@ -1799,6 +1801,47 @@ impl Moonglow {
     /// `console`: the plugin console's, whose output shows under it too;
     /// `plugin`: whose settings what it sets are.
     pub(crate) fn run_plugin(
+        &mut self,
+        name: String,
+        title: String,
+        console: bool,
+        granted: Option<Granted>,
+        plugin: Option<Plugin>,
+        run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
+    ) {
+        if self.plugin_after_text.is_some() {
+            self.log.warn(format!("{name}: {title}: waiting for another job to start"));
+            return;
+        }
+        // A field typed in sets its text before the snapshot, or the job's write undoes it.
+        if self.job.is_none() && granted.is_none() && !console && self.leave_keys_for_a_job() {
+            let pass = self.egui_ctx.as_ref().map_or(0, egui::Context::cumulative_pass_nr);
+            let start: StartLater = Box::new(move |app: &mut Moonglow| {
+                app.run_plugin_now(name, title, console, granted, plugin, run)
+            });
+            self.plugin_after_text = Some((pass, start));
+            return;
+        }
+        self.run_plugin_now(name, title, console, granted, plugin, run);
+    }
+
+    /// Whether a text field typed in has the keyboard (not a script's editor).
+    fn typing_in_a_field(&self) -> bool {
+        let Some(ctx) = &self.egui_ctx else { return false };
+        let focused = ctx.memory(egui::Memory::focused);
+        focused.is_some() && self.text_typed == focused && !crate::script_view::has_keys(self, ctx)
+    }
+
+    /// Takes the keyboard from the widget that has it: whether one had it.
+    fn leave_keys_for_a_job(&mut self) -> bool {
+        let Some(ctx) = &self.egui_ctx else { return false };
+        let Some(id) = ctx.memory(egui::Memory::focused) else { return false };
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        ctx.request_repaint();
+        true
+    }
+
+    fn run_plugin_now(
         &mut self,
         name: String,
         title: String,
@@ -3410,6 +3453,9 @@ pub(crate) fn remove_window(app: &mut Moonglow, ctx: &egui::Context) {
         app.plugins.remove = None;
     }
 }
+
+/// A plugin's job held back until a text field has set its text.
+pub(crate) type StartLater = Box<dyn FnOnce(&mut Moonglow)>;
 
 #[cfg(test)]
 mod tests {

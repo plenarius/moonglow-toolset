@@ -145,12 +145,6 @@ impl Moonglow {
         self.job.is_some()
     }
 
-    /// The job's work is done, to be handed over at the next frame (tests).
-    #[doc(hidden)]
-    pub fn job_work_done(&self) -> bool {
-        self.job.as_ref().is_some_and(|j| j.thread.is_finished())
-    }
-
     /// The job was called off or its question answered, and is ending (tests).
     #[doc(hidden)]
     pub fn job_ending(&self) -> bool {

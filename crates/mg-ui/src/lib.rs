@@ -1195,6 +1195,10 @@ pub struct Moonglow {
     /// A command asked for by its key while a text field was typed in:
     /// run in the next frame, after the field has set its text.
     pub(crate) command_after_text: Option<commands::AfterText>,
+    /// The window's egui context, for a plugin's job to take the keyboard.
+    pub(crate) egui_ctx: Option<egui::Context>,
+    /// A plugin's job held for a field to set its text, and the frame asked in.
+    pub(crate) plugin_after_text: Option<(u64, plugins::StartLater)>,
     /// What each script was compiled from when Compile All last compiled
     /// it (its stamp), and what those stamps were made with: a script
     /// whose stamp is the same is not compiled again.
@@ -1819,6 +1823,8 @@ impl Moonglow {
             references: Default::default(),
             text_typed: None,
             command_after_text: None,
+            egui_ctx: None,
+            plugin_after_text: None,
             script_stamps: Default::default(),
             compiled_dir: None,
             locks_dir: None,
@@ -2096,6 +2102,7 @@ impl Moonglow {
         // (Tab is a 2DA grid's with its keys, before any control can take
         // it: M4's U16.)
         self.active_tab_now = table_view::front_of_focused(self);
+        self.egui_ctx = Some(ui.ctx().clone());
         report_table::tab_from_the_rows(ui.ctx());
         table_view::keep_tab_for_the_grid(self, ui.ctx());
         faction_view::keep_tab_for_the_matrix(self, &ui.ctx().clone());
@@ -2594,6 +2601,16 @@ impl Moonglow {
         if !self.actions.is_empty() || !self.closing_cancels.is_empty() {
             self.run_actions();
             // Show the result now, not at the next input event.
+            ui.ctx().request_repaint();
+        }
+        // A held plugin's job starts once its field has set its text.
+        if self
+            .plugin_after_text
+            .as_ref()
+            .is_some_and(|(at, _)| *at < ui.ctx().cumulative_pass_nr())
+            && let Some((_, start)) = self.plugin_after_text.take()
+        {
+            start(self);
             ui.ctx().request_repaint();
         }
         self.open_tabs_frame(ui.ctx());

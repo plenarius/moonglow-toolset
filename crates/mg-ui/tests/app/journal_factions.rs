@@ -379,37 +379,17 @@ fn no_redo_is_offered_while_journal_text_is_pending() {
     assert!(!redo_off(&h) || h.state().ws.as_ref().unwrap().can_redo().is_none(), "on again");
 }
 
-/// The journal written whole (a plugin's command, as a module-wide Find
-/// and Replace or a rename writes it) while an entry's Text is typed in:
-/// its entry is found again by its category's Tag and its ID, and what is
-/// typed set on it, not on the entry now at its place (Entry001 removed
-/// before it; the review's finding 10). Where the ID is not unique (a
-/// pasted copy keeps it), what is typed is dropped: no entry changed.
+/// The journal written whole (a module-wide Find and Replace or a rename
+/// writes it) while an entry's Text is typed in: its entry is found again
+/// by its category's Tag and its ID, and what is typed set on it, not on
+/// the entry now at its place (Entry001 removed before it; the review's
+/// finding 10). Where the ID is not unique (a pasted copy keeps it), what
+/// is typed is dropped: no entry changed.
 #[test]
 fn typed_text_follows_its_entry_through_a_whole_write() {
-    let dir = mg_testkit::scratch_dir("ui-u22-fix-whole-plugins");
-    let plugin = dir.join("drop");
-    std::fs::create_dir_all(&plugin).unwrap();
-    let cfg = "[plugin]\nid = \"test.drop-entry\"\nname = \"Drop Entry\"\nversion = \"1\"\n\
-               api = \"0.1\"\nlicense = \"MIT\"\n\n[command]\nid = \"drop\"\n\
-               title = \"Drop the First Entry\"\n";
-    std::fs::write(plugin.join("plugin.cfg"), cfg).unwrap();
-    let luau = "local mg = require(\"@moonglow\")\n\
-                mg.command(\"drop\", function(ctx)\n\
-                \x20   local n = 0 for i = 1, 10000000 do n = n + i end\n\
-                \x20   local doc = ctx.module:raw(\"module.jrl\")\n\
-                \x20   table.remove(doc.Categories.value[1].EntryList.value, 1)\n\
-                \x20   ctx.edit:write_gff(\"module.jrl\", doc)\n\
-                end)\n";
-    std::fs::write(plugin.join("main.luau"), luau).unwrap();
     for (case, paste) in [("found", false), ("dropped", true)] {
         let mut h =
             opened(Mode::Tabs, &format!("ui-u22-fix-whole-{case}"), 1600.0, Tab::Journal, 0);
-        h.state_mut().plugin_dir = Some(dir.clone());
-        h.state_mut().load_plugins();
-        h.state_mut().enable_plugin("test.drop-entry", true);
-        h.state_mut().background_jobs = true;
-        settle(&mut h);
         // Quest A: Entry001, Entry002 and a third after them (Add), or a
         // copy of Entry002 (Copy, Paste: its ID kept).
         choose_second_entry(&mut h);
@@ -427,32 +407,83 @@ fn typed_text_follows_its_entry_through_a_whole_write() {
         settle(&mut h);
         let before = all_texts(&mut h);
         type_into_text(&mut h, "Entry002", " typed");
-        // (Run as a job finishing while the Text keeps the keyboard, its
-        // typing pending as the plugin's write arrives: a command run by
-        // its key or menu leaves the field first.)
-        h.state_mut().run_plugin_command("test.drop-entry", "drop");
-        // One frame under its modal window, then none until the write is made.
-        assert!(h.state().busy(), "{case}: the plugin's job under way");
-        h.run_steps(1);
-        let started = std::time::Instant::now();
-        while h.state().busy() && !h.state().job_work_done() {
-            assert!(started.elapsed().as_secs() < 20, "{case}: the plugin never done");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        // (Written while the Text keeps the keyboard, its typing pending.)
+        let mut doc = h.state_mut().ws.as_mut().unwrap().doc(&jrl()).unwrap().clone();
+        let cats = doc.root.list_mut("Categories").unwrap();
+        cats[0].list_mut("EntryList").unwrap().remove(0);
+        let set = mg_edit::Edit::SetResource { key: jrl(), data: Some(doc.to_bytes().unwrap()) };
+        let depth = undo_depth(&h);
+        h.state_mut()
+            .actions
+            .push(mg_ui::Action::Apply(mg_edit::Command::new("Written", vec![set])));
+        until(&mut h, "the write applied", |h| undo_depth(h) > depth);
+        if paste {
+            assert_eq!(h.state().journal_view.selected, None, "{case}: not to be told");
+        } else {
+            let followed = Some(Node::Entry(0, 0));
+            assert_eq!(h.state().journal_view.selected, followed, "{case}: followed");
+            assert_eq!(focused_text(&h).as_deref(), Some("Entry002 typed"), "{case}: typed in");
         }
-        until(&mut h, "the plugin done", |h| !h.state().busy());
+        h.get_by_label(JOURNAL_HEADER).get_by_label("Collapse All").click();
         settle(&mut h);
         let mut want = before.clone();
         want[0].remove(0);
         if paste {
-            assert_eq!(h.state().journal_view.selected, None, "{case}: not to be told");
             assert_eq!(all_texts(&mut h), want, "{case}: no entry changed");
             continue;
         }
-        assert_eq!(h.state().journal_view.selected, Some(Node::Entry(0, 0)), "{case}: followed");
-        // (Set as the write arrives, as the editor's own commands set it.)
+        // (Set as the field is left, on the entry it followed.)
         want[0][0] = "Entry002 typed".into();
         assert_eq!(all_texts(&mut h), want, "{case}: on Entry002 alone");
     }
+}
+
+/// A plugin's job started while an entry's Text holds typing (run here
+/// without leaving the field, as a panel's action or Quick Open may): the
+/// field sets its text before the job takes its snapshot, so the job's
+/// write of the whole journal (Quest B removed), under its window for many frames, keeps
+/// it. (The field gave up the keyboard to the job's window, set its text
+/// during the job, and the job's write was made over it.)
+#[test]
+fn a_plugin_s_job_started_while_a_field_is_typed_in_keeps_what_was_typed() {
+    let dir = mg_testkit::scratch_dir("ui-u22-typed-plugin-job");
+    let plugin = dir.join("rewrite");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let cfg = "[plugin]\nid = \"test.rewrite-journal\"\nname = \"Rewrite Journal\"\n\
+               version = \"1\"\napi = \"0.1\"\nlicense = \"MIT\"\n\n[command]\n\
+               id = \"rewrite\"\ntitle = \"Rewrite the Journal\"\n";
+    std::fs::write(plugin.join("plugin.cfg"), cfg).unwrap();
+    // (Long enough for several frames under the job's window.)
+    let luau = "local mg = require(\"@moonglow\")\n\
+                mg.command(\"rewrite\", function(ctx)\n\
+                \x20   local n = 0 for i = 1, 30000000 do n = n + i end\n\
+                \x20   local doc = ctx.module:raw(\"module.jrl\")\n\
+                \x20   table.remove(doc.Categories.value, 2)\n\
+                \x20   ctx.edit:write_gff(\"module.jrl\", doc)\n\
+                end)\n";
+    std::fs::write(plugin.join("main.luau"), luau).unwrap();
+    let mut h = opened(Mode::Tabs, "ui-u22-typed-plugin-job", 1600.0, Tab::Journal, 0);
+    h.state_mut().plugin_dir = Some(dir.clone());
+    h.state_mut().load_plugins();
+    h.state_mut().enable_plugin("test.rewrite-journal", true);
+    h.state_mut().background_jobs = true;
+    settle(&mut h);
+    choose_second_entry(&mut h);
+    let mut want = all_texts(&mut h);
+    type_into_text(&mut h, "Entry002", " typed");
+    h.state_mut().run_plugin_command("test.rewrite-journal", "rewrite");
+    until(&mut h, "the plugin under way", |h| h.state().busy());
+    let mut frames = 0;
+    while h.state().busy() {
+        h.run_steps(1);
+        frames += 1;
+        assert!(frames < 20_000, "the plugin never done");
+    }
+    settle(&mut h);
+    // (Quest B removed by the plugin: its write made.)
+    want.pop();
+    want[0][1] = "Entry002 typed".into();
+    assert_eq!(all_texts(&mut h), want, "what was typed kept through the plugin's write");
 }
 
 /// The factions written whole (as a plugin's write or a module-wide Find
