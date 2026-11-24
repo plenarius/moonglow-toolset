@@ -65,7 +65,7 @@ local function merge(ctx, kind: string, key: string, base: number)
   if #conflicts > 0 then
     local choices, mine = ask_conflicts(ctx, key, conflicts)
     if not choices then
-      error(`{key}: the merge was canceled`, 0)
+      api.stop(`{key}: the merge was canceled`)
     end
     -- (Open conflicts come back as live has them: a second merge only for "take mine".)
     if mine > 0 then
@@ -89,7 +89,7 @@ local function take(ctx, kind: string, key: string, data)
   res.record(ctx, kind, key, data.rev)
 end
 
-mg.command("sign-in", function(ctx)
+mg.command("sign-in", api.command(function(ctx)
   local s = ctx.signin:status(api.SIGNIN)
   if not s.signed_in then
     s = ctx.signin:start(api.SIGNIN)
@@ -107,12 +107,12 @@ mg.command("sign-in", function(ctx)
   if not me.trials then
     ctx.log:warn("Try on Dev is off on the dev server now")
   end
-end)
+end))
 
-mg.command("sign-out", function(ctx)
+mg.command("sign-out", api.command(function(ctx)
   ctx.signin:stop(api.SIGNIN)
   ctx.log:info("Signed out of Layonara")
-end)
+end))
 
 -- The live areas whose key, tag or name has the text (an exact key alone if there is one).
 local function matching(items, text: string)
@@ -132,7 +132,7 @@ local function matching(items, text: string)
   return out
 end
 
-mg.command("fetch", function(ctx)
+mg.command("fetch", api.command(function(ctx)
   api.signed_in(ctx)
   local kind = "area"
   local chosen = res.chosen(ctx)
@@ -151,7 +151,7 @@ mg.command("fetch", function(ctx)
   end
   local found = matching(list.items or {}, a.area)
   if #found == 0 then
-    error(`No live area has {a.area} in its resref, tag or name`, 0)
+    api.stop(`No live area has {a.area} in its resref, tag or name`)
   end
   local item = found[1]
   if #found > 1 then
@@ -204,16 +204,16 @@ mg.command("fetch", function(ctx)
     ctx.log:info(`{key}: your copy (from revision {base}) merged with live's revision {live.rev}`)
   end
   return { label = `Fetch Area {key}` }
-end)
+end))
 
-mg.command("forge", forge.fetch)
+mg.command("forge", api.command(forge.fetch))
 
 -- The items to send: each with its docs, the revision its copy came from, and (for review) its Forge export.
 local function items_of(ctx, chosen, with_forge: boolean)
   local items = {}
   for _, c in chosen do
     if not res.has(ctx, c.kind, c.key) then
-      error(`{c.key} is not in the module`, 0)
+      api.stop(`{c.key} is not in the module`)
     end
     table.insert(items, {
       kind = c.kind,
@@ -264,7 +264,7 @@ local function folders_for(ctx, items)
         fields = { { id = "folder", label = "Its folder", type = "choice", choices = folders, default = folders[1] } },
       })
       if not a then
-        error("Canceled", 0)
+        api.stop("Canceled")
       end
       i.folder = a.folder
     end
@@ -299,7 +299,7 @@ local function catch_up(ctx, items, data, may_try_anyway: boolean): boolean
           i.base_rev = b.rev
           ctx.log:warn(`{i.key}: tried over live's revision {b.rev}, whose changes your copy lacks`)
         elseif i.base_rev == 0 then
-          error(`{i.key}: no revision is recorded for your copy to merge from: fetch it first`, 0)
+          api.stop(`{i.key}: no revision is recorded for your copy to merge from: fetch it first`)
         else
           local merged = merge(ctx, i.kind, i.key, i.base_rev)
           take(ctx, i.kind, i.key, merged)
@@ -330,13 +330,15 @@ local function send(ctx, route: string, body, what: string, may_try_anyway: bool
       merged = true
     elseif merged then
       -- (The merge stays in the module, sent or not.)
-      local plain, meant = pcall(refused, r, data)
-      if not plain then
-        ctx.log:error(tostring(meant))
-        return nil, merged
+      local _, e = pcall(function()
+        refused(r, data)
+        api.fail(ctx, r, data, what)
+      end)
+      if not (type(e) == "table" and e.stop) then
+        error(e, 0)
       end
-      api.log_problems(ctx, data)
-      ctx.log:error(`{what}: {api.detail(r, data)}`)
+      ctx.log:error(e.stop)
+      ctx.ui:message(e.stop)
       return nil, merged
     else
       if r.status == 409 and type(data) == "table" and data.skipped then
@@ -354,10 +356,10 @@ end
 local function chosen_or_fail(ctx)
   local chosen = res.chosen(ctx)
   if #chosen == 0 then
-    error("Select an area (or open one) first", 0)
+    api.stop("Select an area (or open one) first")
   end
   if #chosen > 12 then
-    error(`{#chosen} areas: at most 12 at once`, 0)
+    api.stop(`{#chosen} areas: at most 12 at once`)
   end
   return chosen
 end
@@ -370,7 +372,7 @@ local function names(chosen): string
   return table.concat(keys, ", ")
 end
 
-mg.command("try", function(ctx)
+mg.command("try", api.command(function(ctx)
   local chosen = chosen_or_fail(ctx)
   api.signed_in(ctx)
   local items = items_of(ctx, chosen, false)
@@ -411,9 +413,9 @@ mg.command("try", function(ctx)
   if merged then
     return { label = "Try on Dev (merged with live's)" }
   end
-end)
+end))
 
-mg.command("submit", function(ctx)
+mg.command("submit", api.command(function(ctx)
   local chosen = chosen_or_fail(ctx)
   api.signed_in(ctx)
   local a = ctx.ui:form({
@@ -425,10 +427,10 @@ mg.command("submit", function(ctx)
   end
   local note = string.gsub(a.note or "", "^%s+", "")
   if note == "" then
-    error("Say what you changed: the reviewer reads it", 0)
+    api.stop("Say what you changed: the reviewer reads it")
   end
   if utf8.len(note) and utf8.len(note) > 200 then
-    error("The note is over 200 characters", 0)
+    api.stop("The note is over 200 characters")
   end
   local items = items_of(ctx, chosen, true)
   folders_for(ctx, items)
@@ -449,7 +451,7 @@ mg.command("submit", function(ctx)
   if merged then
     return { label = "Send for Review (merged with live's)" }
   end
-end)
+end))
 
 -- This builder's trial (nil: none), as GET /trial gives it.
 local function trial(ctx)
@@ -464,7 +466,7 @@ local function trial(ctx)
   return t
 end
 
-mg.command("status", function(ctx)
+mg.command("status", api.command(function(ctx)
   api.signed_in(ctx)
   local t = trial(ctx)
   if not t then
@@ -485,9 +487,9 @@ mg.command("status", function(ctx)
   local ends = `Your trial on dev ({t.user}) ends in {minutes} minutes without activity.`
   ctx.log:info(ends)
   ctx.ui:message(table.concat(lines, "\n") .. "\n\n" .. ends)
-end)
+end))
 
-mg.command("release", function(ctx)
+mg.command("release", api.command(function(ctx)
   api.signed_in(ctx)
   local t = trial(ctx)
   if not t or #(t.items or {}) == 0 then
@@ -521,7 +523,7 @@ mg.command("release", function(ctx)
       for _, p in data.pending do
         ctx.log:warn(`{p.key}: {p.message or "dev has not put it back yet"}`)
       end
-      error("Dev has not put everything back yet: try again in a minute", 0)
+      api.stop("Dev has not put everything back yet: try again in a minute")
     end
     api.fail(ctx, r, data, "Release")
   end
@@ -530,4 +532,4 @@ mg.command("release", function(ctx)
   end
   local left = #(data.trial or {})
   ctx.log:info(if left == 0 then "Nothing of yours is on trial now" else `{left} still on trial`)
-end)
+end))

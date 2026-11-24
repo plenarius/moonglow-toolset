@@ -24,8 +24,8 @@ name = "send for review needs a note"
 command = "submit"
 select = ["crypt.are"]
 signed_in = "alice"
-error = "Say what you changed"
 request = []
+log = ["Say what you changed"]
 
 [[test]]
 name = "send for review behind live: only update first or cancel"
@@ -101,8 +101,7 @@ has = ['{"items":[{"key":"well","kind":"area"}]}']
 name = "release while dev hasn't put an area back yet"
 command = "release"
 signed_in = "alice"
-log = ["crypt: someone is in it"]
-error = "try again in a minute"
+log = ["crypt: someone is in it", "try again in a minute"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/trial"
 file = "replies/trial.json"

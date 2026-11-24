@@ -276,6 +276,8 @@ struct Reply {
     /// It answers every such request, not only the first.
     #[serde(default)]
     again: bool,
+    /// No answer at all, the transport failing with this (a dropped connection).
+    fail: Option<String>,
 }
 
 fn status_ok() -> u16 {
@@ -328,6 +330,9 @@ impl crate::net::Transport for Stub {
         };
         used[i] = true;
         let (reply, body) = &self.replies[i];
+        if let Some(why) = &reply.fail {
+            return Err(why.clone());
+        }
         let mut headers: Vec<(String, String)> =
             reply.headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
         if reply.json.is_some() && !headers.iter().any(|(k, _)| k == "content-type") {

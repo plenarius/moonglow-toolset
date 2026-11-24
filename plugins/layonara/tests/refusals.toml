@@ -1,0 +1,361 @@
+# Refusals and network failures on every command: a message to read, no runtime error.
+module = "module"
+root = false
+
+[[test]]
+name = "Fetch Area: a 400 with problems lists them by area and says what to do"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "well" }
+log = ["well: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "Fetch Area: a 409 is a message"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "well" }
+log = ["well: The area well is not live."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+status = 409
+json = { detail = "The area well is not live." }
+
+[[test]]
+name = "Fetch Area: a 502 from the proxy, no JSON"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "well" }
+log = ["well: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "Fetch Area: no connection"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "well" }
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "Try on Dev: a 400 with problems lists them by area and says what to do"
+command = "try"
+signed_in = "alice"
+select = ["crypt.are"]
+log = ["Try on Dev: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "Try on Dev: a 409 is a message"
+command = "try"
+signed_in = "alice"
+select = ["crypt.are"]
+log = ["Try on Dev: An area is held by another builder.", "• The area crypt is held by bob (their trial on dev).", "Wait until that trial is released"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 409
+json = { detail = "An area is held by another builder.", problems = ["The area crypt is held by bob (their trial on dev)."] }
+
+[[test]]
+name = "Try on Dev: a 502 from the proxy, no JSON"
+command = "try"
+signed_in = "alice"
+select = ["crypt.are"]
+log = ["Try on Dev: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "Try on Dev: no connection"
+command = "try"
+signed_in = "alice"
+select = ["crypt.are"]
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "Send for Review: a 400 with problems lists them by area and says what to do"
+command = "submit"
+signed_in = "alice"
+select = ["crypt.are"]
+answers = { note = "Moved the altar" }
+log = ["Send for Review: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "Send for Review: a 409 is a message"
+command = "submit"
+signed_in = "alice"
+select = ["crypt.are"]
+answers = { note = "Moved the altar" }
+log = ["Send for Review: Nothing to send.", "• area crypt: The same as live's.", "Your copy is the same as live's: change something first."]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+status = 409
+json = { detail = "Nothing to send.", items = [{ kind = "area", key = "crypt", status = 409, detail = "The same as live's." }] }
+
+[[test]]
+name = "Send for Review: a 502 from the proxy, no JSON"
+command = "submit"
+signed_in = "alice"
+select = ["crypt.are"]
+answers = { note = "Moved the altar" }
+log = ["Send for Review: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "Send for Review: no connection"
+command = "submit"
+signed_in = "alice"
+select = ["crypt.are"]
+answers = { note = "Moved the altar" }
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "From the Forge: a 400 with problems lists them by area and says what to do"
+command = "forge"
+signed_in = "alice"
+log = ["The Forge's glade: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "From the Forge: a 409 is a message"
+command = "forge"
+signed_in = "alice"
+log = ["The Forge's glade: The area glade is not live."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+status = 409
+json = { detail = "The area glade is not live." }
+
+[[test]]
+name = "From the Forge: a 502 from the proxy, no JSON"
+command = "forge"
+signed_in = "alice"
+log = ["The Forge's glade: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "From the Forge: no connection"
+command = "forge"
+signed_in = "alice"
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "Trial Status: a 400 with problems lists them by area and says what to do"
+command = "status"
+signed_in = "alice"
+log = ["Your trial: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "Trial Status: a 409 is a message"
+command = "status"
+signed_in = "alice"
+log = ["Your trial: Conflict."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 409
+json = { detail = "Conflict." }
+
+[[test]]
+name = "Trial Status: a 502 from the proxy, no JSON"
+command = "status"
+signed_in = "alice"
+log = ["Your trial: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "Trial Status: no connection"
+command = "status"
+signed_in = "alice"
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "Release: a 400 with problems lists them by area and says what to do"
+command = "release"
+signed_in = "alice"
+log = ["Release: The area can't be published as it is.", "• area crypt: The GIT does not survive nwn_gff's round trip unchanged.", "Fix these in your copy, then try again."]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+status = 400
+json = { detail = "The area can't be published as it is.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The GIT does not survive nwn_gff's round trip unchanged."] }] }
+
+[[test]]
+name = "Release: a 409 is a message"
+command = "release"
+signed_in = "alice"
+log = ["crypt: Someone is in it.", "Dev has not put everything back yet: try again in a minute"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+status = 409
+json = { detail = "Dev has not put it back.", pending = [{ kind = "area", key = "crypt", message = "Someone is in it." }] }
+
+[[test]]
+name = "Release: a 502 from the proxy, no JSON"
+command = "release"
+signed_in = "alice"
+log = ["Release: Layonara's builder service answered 502", "Try again in a few minutes"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+status = 502
+body = "<html><body>502 Bad Gateway</body></html>"
+
+[[test]]
+name = "Release: no connection"
+command = "release"
+signed_in = "alice"
+log = ["Moonglow couldn't reach Layonara's builder service (the host was not found (not connected?)).", "Check your internet connection"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+file = "replies/trial.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial/release"
+fail = "the host was not found (not connected?)"
+
+[[test]]
+name = "From the Forge: a 502 with the service's words"
+command = "forge"
+signed_in = "alice"
+log = ["Your Forge exports: The Forge couldn't be reached.", "couldn't reach a server behind it"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+status = 502
+json = { detail = "The Forge couldn't be reached." }

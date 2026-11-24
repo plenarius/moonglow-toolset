@@ -1,6 +1,7 @@
 -- Resources as the builder routes speak of them: (kind, key) and their docs, and the
 -- revisions the module's copies came from (module.ifo's LAYO_EXPORT_REVS).
 local mg = require("@moonglow")
+local api = require("api")
 
 local res = {}
 
@@ -65,7 +66,7 @@ function res.docs(ctx, kind: string, key: string)
     elseif res.kind(kind).optional[part] then
       docs[part] = mg.json.null
     else
-      error(`{name} is not in the module`, 0)
+      api.stop(`{name} is not in the module`)
     end
   end
   return docs

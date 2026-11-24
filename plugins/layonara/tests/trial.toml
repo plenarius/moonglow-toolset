@@ -34,8 +34,8 @@ file = "replies/tried.json"
 name = "nothing selected or open"
 command = "try"
 signed_in = "alice"
-error = "Select an area (or open one) first"
 request = []
+log = ["Select an area (or open one) first"]
 
 [[test]]
 name = "behind live, update first: merged, written, recorded, and sent again from live's revision"
@@ -135,12 +135,11 @@ url = "https://builders.layonara.com/api/v1/builder/trial"
 has = ['"base_rev":0', '"folder":"deep"', '"key":"myplace"', '"gic":null']
 
 [[test]]
-name = "a publish check's refusal: its problems in the log, and the job fails"
+name = "a publish check's refusal: its problems in the log and the message"
 command = "try"
 select = ["crypt.are"]
 signed_in = "alice"
-log = ["area crypt: The tileset tzz01 is not in the live haks."]
-error = "Try on Dev: crisp refusal"
+log = ["area crypt: The tileset tzz01 is not in the live haks.", "Try on Dev: crisp refusal"]
 [[test.reply]]
 method = "POST"
 url = "https://builders.layonara.com/api/v1/builder/trial"
@@ -152,7 +151,7 @@ name = "the rate limit says when to try again"
 command = "try"
 select = ["crypt.are"]
 signed_in = "alice"
-error = "Too many trials. (try again in 120 s)"
+log = ["Too many trials. (try again in 120 s)"]
 [[test.reply]]
 method = "POST"
 url = "https://builders.layonara.com/api/v1/builder/trial"
