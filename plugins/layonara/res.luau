@@ -128,43 +128,48 @@ local function rev_name(kind: string, key: string): string
   return if kind == "area" then key else kind .. ":" .. key
 end
 
--- The module's local LAYO_EXPORT_REVS: its revisions, and its place in VarTable (nil: none).
-local function read_revs(ctx)
+-- A module local holding a JSON object: its value, and its place in VarTable (nil: none).
+function res.read_var(ctx, name: string)
   local ifo = ctx.module:gff("module.ifo")
   for i, v in ifo.VarTable or {} do
-    if v.Name == res.REVS then
-      local ok, revs = pcall(mg.json.decode, v.Value or "")
-      if ok and type(revs) == "table" then
-        return revs, i - 1
+    if v.Name == name then
+      local ok, value = pcall(mg.json.decode, v.Value or "")
+      if ok and type(value) == "table" then
+        return value, i - 1
       end
-      ctx.log:warn(`module.ifo's {res.REVS} is no JSON: it is written anew`)
+      ctx.log:warn(`module.ifo's {name} is no JSON: it is written anew`)
       return {}, i - 1
     end
   end
   return {}, nil
 end
 
--- The live revision the module's copy came from: 0 where none is recorded.
-function res.base(ctx, kind: string, key: string): number
-  local revs = read_revs(ctx)
-  return tonumber(revs[rev_name(kind, key)]) or 0
-end
-
--- Records the revision the module's copy now comes from.
-function res.record(ctx, kind: string, key: string, rev: number)
-  local revs, at = read_revs(ctx)
-  revs[rev_name(kind, key)] = rev
-  local text = mg.json.encode(revs)
+-- Writes a module local as JSON text, made where the module has none.
+function res.write_var(ctx, name: string, value, at: number?)
+  local text = mg.json.encode(value)
   if at then
     ctx.edit:set("module.ifo", `/VarTable[{at}]/Value`, text)
     return
   end
-  local var = { __struct_id = 0, Name = mg.string(res.REVS), Type = mg.dword(3), Value = mg.string(text) }
+  local var = { __struct_id = 0, Name = mg.string(name), Type = mg.dword(3), Value = mg.string(text) }
   if ctx.module:gff("module.ifo").VarTable then
     ctx.edit:insert("module.ifo", "/VarTable", var)
   else
     ctx.edit:set("module.ifo", "VarTable", { type = "list", value = { var } })
   end
+end
+
+-- The live revision the module's copy came from: 0 where none is recorded.
+function res.base(ctx, kind: string, key: string): number
+  local revs = res.read_var(ctx, res.REVS)
+  return tonumber(revs[rev_name(kind, key)]) or 0
+end
+
+-- Records the revision the module's copy now comes from.
+function res.record(ctx, kind: string, key: string, rev: number)
+  local revs, at = res.read_var(ctx, res.REVS)
+  revs[rev_name(kind, key)] = rev
+  res.write_var(ctx, res.REVS, revs, at)
 end
 
 return res

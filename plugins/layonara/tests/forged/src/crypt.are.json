@@ -1,0 +1,29 @@
+{
+  "__data_type": "ARE ",
+  "Tag": {
+    "type": "cexostring",
+    "value": "CRYPT"
+  },
+  "ResRef": {
+    "type": "resref",
+    "value": "crypt"
+  },
+  "Name": {
+    "type": "cexolocstring",
+    "value": {
+      "0": "The Crypt"
+    }
+  },
+  "Tileset": {
+    "type": "resref",
+    "value": "tdc01"
+  },
+  "Width": {
+    "type": "int",
+    "value": 2
+  },
+  "Height": {
+    "type": "int",
+    "value": 2
+  }
+}

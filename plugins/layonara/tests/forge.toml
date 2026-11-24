@@ -1,0 +1,334 @@
+# From the Forge: the builder's own Forge exports into the module, and the Forge source on submit and Try on Dev.
+module = "module"
+root = false
+
+[[test]]
+name = "a new area: its files, blueprints, tile hak and texture library, its revision 0 and its Forge source recorded"
+command = "forge"
+signed_in = "alice"
+yes = true
+log = [
+  "glade → glade (a new area), exported",
+  "crypt (rework of crypt)",
+  "tiles published",
+  "glade.hak: downloaded",
+  "ls_textures.hak: downloaded",
+  "glade: glade_chest has no inventory",
+  "glade: fetched from the Forge's glade (a new area)",
+]
+downloaded = ["glade", "ls_textures"]
+above_nwsync = ["glade", "ls_textures"]
+resources = ["glade.are", "glade.git", "glade_chest.utp", "glade_open.nss", "module.ifo"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+file = "replies/forge-glade.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+file = "replies/forge/glade.hak"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/library"
+file = "replies/forge/ls_textures.hak"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+signin = true
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+signin = true
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+signin = true
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/library"
+signin = true
+[[test.field]]
+resource = "glade.are"
+field = "Tileset"
+value = "glade"
+[[test.field]]
+resource = "glade.git"
+field = "/WaypointList[0]/Tag"
+value = "WP_GLADE"
+[[test.field]]
+resource = "glade_chest.utp"
+field = "Tag"
+value = "GLADE_CHEST"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_Area_list[2]/Area_Name"
+value = "glade"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Value"
+value = '{"crypt":3,"glade":0}'
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[2]/Name"
+value = "LAYO_FORGE"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[2]/Value"
+value = '{"glade":{"export":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"glade"}}'
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[0]/Mod_Hak"
+value = "glade"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[1]/Mod_Hak"
+value = "ls_textures"
+
+[[test]]
+name = "a module with no locals gets LAYO_EXPORT_REVS and LAYO_FORGE"
+command = "forge"
+module = "bare"
+signed_in = "alice"
+yes = true
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+file = "replies/forge-glade.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+file = "replies/forge/glade.hak"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/library"
+file = "replies/forge/ls_textures.hak"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[0]/Value"
+value = '{"glade":0}'
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Name"
+value = "LAYO_FORGE"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_Area_list[0]/Area_Name"
+value = "glade"
+
+[[test]]
+name = "the texture library already has the Forge's SHA-256: not downloaded again, still listed"
+command = "forge"
+signed_in = "alice"
+yes = true
+hak_folder = "haks-have"
+log = ["glade.hak: downloaded", "ls_textures.hak: yours is the Forge's already"]
+downloaded = ["glade"]
+above_nwsync = ["glade", "ls_textures"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+file = "replies/forge-glade.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+file = "replies/forge/glade.hak"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[1]/Mod_Hak"
+value = "ls_textures"
+
+[[test]]
+name = "a rework of an area the module has: asked, then replaced whole, live's revision recorded"
+command = "forge"
+signed_in = "alice"
+yes = true
+log = ["crypt: fetched from the Forge's fgcrypt (rework of live's revision 4)"]
+downloaded = ["fgcrypt", "ls_textures"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list-crypt.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt"
+file = "replies/forge-crypt.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt/hak"
+file = "replies/forge/fgcrypt.hak"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/library"
+file = "replies/forge/ls_textures.hak"
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[0]/Tag"
+value = "WP_FORGED"
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[1]"
+absent = true
+[[test.field]]
+resource = "crypt.are"
+field = "Tileset"
+value = "fgcrypt"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Value"
+value = '{"crypt":4}'
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[2]/Value"
+value = '{"crypt":{"export":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"fgcrypt"}}'
+
+[[test]]
+name = "a rework of an area the module has, declined: nothing downloaded or changed"
+command = "forge"
+signed_in = "alice"
+log = ["crypt: kept as it is"]
+edits = 0
+downloaded = []
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list-crypt.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt"
+file = "replies/forge-crypt.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt"
+
+[[test]]
+name = "a hak the module lists already is not listed again"
+command = "forge"
+module = "forged"
+signed_in = "alice"
+yes = true
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list-crypt.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt"
+file = "replies/forge-crypt.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/fgcrypt/hak"
+file = "replies/forge/fgcrypt.hak"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/library"
+file = "replies/forge/ls_textures.hak"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[0]/Mod_Hak"
+value = "ls_textures"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[1]/Mod_Hak"
+value = "fgcrypt"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_HakList[2]"
+absent = true
+
+[[test]]
+name = "no exports in the Forge"
+command = "forge"
+signed_in = "alice"
+error = "Your Forge has no exports"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+json = { user = "alice", items = [] }
+
+[[test]]
+name = "no Forge workspace"
+command = "forge"
+signed_in = "alice"
+error = "No Forge workspace for alice. (export an area in the Forge first)"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+status = 404
+json = { detail = "No Forge workspace for alice." }
+
+[[test]]
+name = "a download refused: the job fails, and nothing is written"
+command = "forge"
+signed_in = "alice"
+yes = true
+error = "glade.hak: the server answered 429"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas"
+file = "replies/forge-list.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade"
+file = "replies/forge-glade.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/forge/areas/glade/hak"
+status = 429
+json = { detail = "2 GB of Forge downloads a day." }
+
+[[test]]
+name = "send for review of a Forge area carries its export, and names the tiles' PR"
+command = "submit"
+module = "forged"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { note = "Finished the crypt" }
+log = ["crypt: sent for review", "crypt: its tiles are the Forge's Publish of fgcrypt, https://github.com/layonara/nwn-haks/pull/9"]
+edits = 0
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+file = "replies/forge-submitted.json"
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+has = ['"forge":{"export":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"fgcrypt"}', '"base_rev":4']
+
+[[test]]
+name = "send for review after a newer export: fetch again"
+command = "submit"
+module = "forged"
+select = ["crypt.are"]
+signed_in = "alice"
+answers = { note = "Finished the crypt" }
+error = "crypt: The Forge has a newer export of fgcrypt than the one you fetched: fetch again and send again. (Layonara › From the Forge…)"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/submit"
+status = 409
+json = { detail = "crypt: The Forge has a newer export of fgcrypt than the one you fetched: fetch again and send again.", items = [{ kind = "area", key = "crypt", status = 409, detail = "The Forge has a newer export of fgcrypt than the one you fetched: fetch again and send again.", code = "forge_changed" }] }
+
+[[test]]
+name = "try on dev before the Forge's Try on dev: press it first"
+command = "try"
+module = "forged"
+select = ["crypt.are"]
+signed_in = "alice"
+error = "crypt: its fgcrypt tiles aren't on dev yet: press Try on dev in the Forge first"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+status = 400
+json = { detail = "crypt: Not publishable.", items = [{ kind = "area", key = "crypt", status = 400, detail = "Not publishable.", problems = ["The live haks have no tileset fgcrypt (a new tileset waits for its hak release)."] }] }
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/trial"
+has = ['"base_rev":4']
+
+[[test]]
+name = "fetching live's copy over a Forge area forgets its Forge source"
+command = "fetch"
+module = "forged"
+signed_in = "alice"
+yes = true
+answers = { area = "crypt" }
+log = ["crypt: replaced with live's revision 4"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+file = "replies/crypt-live.json"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[2]/Value"
+value = '{}'

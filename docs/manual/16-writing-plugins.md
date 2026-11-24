@@ -1440,7 +1440,7 @@ A test (`[[test]]`) has a `name` and runs one thing:
 | `by` | What made the objects or resources (`ctx.event.by`). |
 | `settings` | The plugin's settings for the run (`settings = { code = "ab" }`), over what the fixture's project files hold and the defaults. |
 | `game`, `root` | The test's own folder of game resources and the game it reads, as the file's `game` and `root` (above) say them, for this test alone (since Moonglow 2.2.0; `root = false` and `true` since 2.3.0). |
-| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. A download (`ctx.hak:download`, API 0.11) goes into a scratch hak folder of the test's, empty at its start, and gets the reply's whole body (a `file`, for a hak). |
+| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. A download (`ctx.hak:download`, API 0.11) goes into a scratch hak folder of the test's, empty at its start (or with `hak_folder`'s files), and gets the reply's whole body (a `file`, for a hak). |
 | `[[test.reply]]` | What the network answers (API 0.10), a stub of the plugin's service, whose hosts are then allowed: each with `url` (exactly, or ending in `*`, any URL that starts so), and as wanted `method`, `status` (200 if left out), `headers`, and the body as `json` (a value), `body` (text) or `file` (from the test file's folder). The first reply not yet used that fits answers a request; `again = true` answers every such request. A request no reply fits fails, as no answer would. |
 
 and says what is to come of it (each key may be left out):
@@ -1456,6 +1456,7 @@ and says what is to come of it (each key may be left out):
 | `haks` | What the job puts into haks, by hak, every resource in any order (since Moonglow 3.3.0): `haks = { tiles = ["tiles.set", "grass.tga"] }`. Nothing is written. |
 | `downloaded` | The haks the job downloads (API 0.11), all of them, by name: `downloaded = ["tb_intro_"]`. Nothing is put in the hak folder. |
 | `above_nwsync` | The haks it puts over NWSync (API 0.11), all of them. |
+| `hak_folder` | A folder (from the test file's) whose files are in the test's scratch hak folder before the job (API 0.11): a hak there already, which a download of the same SHA-256 leaves as it is. |
 | `written` | The files the job writes into folders the user chose (`folder:write`, or an export's `out:write`), by their names, every one in any order (since 3.3.0). Nothing is written. |
 | `content` | For an export: what the files it writes have, by name, each text part of the file (`content = { "creatures.csv" = ["guard,gate_guard"] }`; since API 0.6). |
 | `shows` | For a panel: texts it shows, each part of one of its texts (a value's as `Areas: 1`, a button's, a list item's; since API 0.6; a field's as its label and the value it is given, `Tint: #2a4d8f`, since API 0.9). |

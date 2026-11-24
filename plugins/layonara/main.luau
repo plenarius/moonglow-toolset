@@ -3,6 +3,7 @@
 local mg = require("@moonglow")
 local api = require("api")
 local res = require("res")
+local forge = require("forge")
 
 local KEEP_LIVE, TAKE_MINE = "Keep live's", "Take mine"
 local UPDATE, ANYWAY, CANCEL =
@@ -183,6 +184,7 @@ mg.command("fetch", function(ctx)
   local base = res.base(ctx, kind, key)
   if not res.has(ctx, kind, key) then
     take(ctx, kind, key, live)
+    forge.forget(ctx, key)
     ctx.log:info(`{key}: fetched, live's revision {live.rev}`)
   elseif res.same(ctx, kind, key, live.docs) then
     if base ~= live.rev then
@@ -195,6 +197,7 @@ mg.command("fetch", function(ctx)
       return
     end
     take(ctx, kind, key, live)
+    forge.forget(ctx, key)
     ctx.log:info(`{key}: replaced with live's revision {live.rev}`)
   else
     take(ctx, kind, key, merge(ctx, kind, key, base))
@@ -203,8 +206,10 @@ mg.command("fetch", function(ctx)
   return { label = `Fetch Area {key}` }
 end)
 
--- The items to send: each with its docs and the revision its copy came from.
-local function items_of(ctx, chosen)
+mg.command("forge", forge.fetch)
+
+-- The items to send: each with its docs, the revision its copy came from, and (for review) its Forge export.
+local function items_of(ctx, chosen, with_forge: boolean)
   local items = {}
   for _, c in chosen do
     if not res.has(ctx, c.kind, c.key) then
@@ -215,6 +220,7 @@ local function items_of(ctx, chosen)
       key = c.key,
       base_rev = res.base(ctx, c.kind, c.key),
       docs = res.docs(ctx, c.kind, c.key),
+      forge = if with_forge and c.kind == "area" then forge.source(ctx, c.key) else nil,
     })
   end
   return items
@@ -308,7 +314,8 @@ local function catch_up(ctx, items, data, may_try_anyway: boolean): boolean
 end
 
 -- Sends items to a route, catching up once if they are behind: the answer, or nil (canceled).
-local function send(ctx, route: string, body, what: string, may_try_anyway: boolean)
+-- `refused(r, data)` may raise what a refusal means here before the service's own words.
+local function send(ctx, route: string, body, what: string, may_try_anyway: boolean, refused)
   local merged = false
   for round = 1, 2 do
     local r, data = api.call(ctx, "POST", route, body)
@@ -323,6 +330,11 @@ local function send(ctx, route: string, body, what: string, may_try_anyway: bool
       merged = true
     elseif merged then
       -- (The merge stays in the module, sent or not.)
+      local plain, meant = pcall(refused, r, data)
+      if not plain then
+        ctx.log:error(tostring(meant))
+        return nil, merged
+      end
       api.log_problems(ctx, data)
       ctx.log:error(`{what}: {api.detail(r, data)}`)
       return nil, merged
@@ -332,6 +344,7 @@ local function send(ctx, route: string, body, what: string, may_try_anyway: bool
           ctx.log:warn(`{s.key}: the same as live's, nothing to try`)
         end
       end
+      refused(r, data)
       api.fail(ctx, r, data, what)
     end
   end
@@ -360,10 +373,12 @@ end
 mg.command("try", function(ctx)
   local chosen = chosen_or_fail(ctx)
   api.signed_in(ctx)
-  local items = items_of(ctx, chosen)
+  local items = items_of(ctx, chosen, false)
   folders_for(ctx, items)
   local body = { items = items, note = `Moonglow: {names(chosen)}`, mode = "add" }
-  local data, merged = send(ctx, "/trial", body, "Try on Dev", true)
+  local data, merged = send(ctx, "/trial", body, "Try on Dev", true, function(r, d)
+    forge.not_on_dev(ctx, r, d)
+  end)
   if data then
     local commands = {}
     for _, i in data.items or {} do
@@ -415,12 +430,16 @@ mg.command("submit", function(ctx)
   if utf8.len(note) and utf8.len(note) > 200 then
     error("The note is over 200 characters", 0)
   end
-  local items = items_of(ctx, chosen)
+  local items = items_of(ctx, chosen, true)
   folders_for(ctx, items)
-  local data, merged = send(ctx, "/submit", { items = items, note = note }, "Send for Review", false)
+  local data, merged = send(ctx, "/submit", { items = items, note = note }, "Send for Review", false, forge.changed)
   if data then
     for _, i in data.items or {} do
       ctx.log:info(`{i.key}: sent for review ({i.state or "waiting"}), {i.toolbox or ""}`)
+      local f = if type(i.forge) == "table" then i.forge else nil
+      if f and type(f.haks_pr) == "string" then
+        ctx.log:info(`{i.key}: its tiles are the Forge's Publish of {f.name}, {f.haks_pr}`)
+      end
       local check = i.check or {}
       for _, w in check.warnings or {} do
         ctx.log:warn(`{i.key}: {w}`)
