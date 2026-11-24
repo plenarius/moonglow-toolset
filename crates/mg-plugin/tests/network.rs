@@ -402,3 +402,21 @@ fn mg_json_is_lossless() {
         assert_eq!(ws.module.get(&key(name)), m.get(&key("tavern.git")), "{name}");
     }
 }
+
+/// The plugins the fork bundles (`plugins/`) pass their own tests, which
+/// run against stubs of their services (`[[test.reply]]`).
+#[test]
+fn the_bundled_plugins_pass_their_own_tests() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+    let found = mg_plugin::folders(&root);
+    assert!(!found.is_empty(), "no plugins in {}", root.display());
+    for dir in found {
+        let plugin = Plugin::load(&dir).unwrap();
+        let faults = mg_plugin::test_faults(&plugin);
+        assert!(faults.is_empty(), "{faults:?}");
+        let results = mg_plugin::run_tests(&plugin, None, &|_, _| Ok(None));
+        assert!(results.len() > 20, "{} tests", results.len());
+        let failed: Vec<_> = results.iter().filter(|r| !r.passed()).collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+}

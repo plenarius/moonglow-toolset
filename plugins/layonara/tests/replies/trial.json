@@ -1,0 +1,26 @@
+{
+  "trial": {
+    "user": "mg-alice",
+    "items": [
+      {
+        "kind": "area",
+        "key": "crypt",
+        "state": "trial",
+        "dev_rev": 1000000007,
+        "live_rev": 4,
+        "message": ""
+      },
+      {
+        "kind": "area",
+        "key": "well",
+        "state": "live",
+        "dev_rev": 5,
+        "live_rev": 5,
+        "message": "Replaced by live revision 5."
+      }
+    ],
+    "since": 1795400000.0,
+    "last_activity": 1795400300.0,
+    "expires_in": 3300
+  }
+}

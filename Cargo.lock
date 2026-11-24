@@ -3408,6 +3408,7 @@ dependencies = [
  "egui-wgpu",
  "mg-audio",
  "mg-core",
+ "mg-plugin",
  "mg-testkit",
  "mg-ui",
  "mg-update",

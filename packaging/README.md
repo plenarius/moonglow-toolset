@@ -105,6 +105,15 @@ before.
   fork's build replaces an upstream install of Moonglow (and the other
   way around), as one Moonglow on the machine.
 
+### Bundled plugins
+
+Each folder of `plugins/` at the source's top (a fork's: the Layonara
+plugin) is built into the `moonglow` program by `apps/moonglow/build.rs`,
+without its `tests/`, and installed and enabled at a user's first start
+(`Moonglow::install_bundled_plugins`). So every package has it with
+nothing in these scripts; a release only needs the version raised in
+the plugin's `plugin.cfg` for a user's copy to be updated.
+
 ## Signing a release
 
 Moonglow installs an update only when the release's `SHA256SUMS` (the

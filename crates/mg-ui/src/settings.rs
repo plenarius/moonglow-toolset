@@ -818,6 +818,10 @@ pub struct Settings {
     pub table_widths: Vec<(String, Vec<(String, u32)>)>,
     /// The plugins enabled, by id (one installed is off until it is here).
     pub plugins_enabled: Vec<String>,
+    /// The plugins this build bundles that it installed, as `id version`:
+    /// each is installed (and enabled) once, and updated while it is the
+    /// version installed; one the user removed stays removed.
+    pub plugins_bundled: Vec<String>,
     /// What each plugin's events were allowed, kept between runs: the
     /// plugin (its id, its code's digest and its folder; an installed
     /// plugin's id and version before 4.0.0, carried over to its code once),
@@ -2700,14 +2704,15 @@ mod tests {
             let retired = ["toolbar_icons_only", "test_without_steam"];
             let kept: Vec<_> =
                 old.into_iter().filter(|(n, _)| !retired.contains(&n.as_str())).collect();
-            // (Three fields came after the file, two from develop's
-            // Builders' asks and M5's W1's: written at their defaults, the
-            // rest as it was.)
+            // (Four fields came after the file, two from develop's
+            // Builders' asks, M5's W1's and the fork's bundled plugins:
+            // written at their defaults, the rest as it was.)
             let (added, written): (Vec<_>, Vec<_>) = fields_of(&back)
                 .expect("fields")
                 .into_iter()
                 .partition(|(n, _)| !kept.iter().any(|(k, _)| k == n));
             let defaults = [
+                ("plugins_bundled", "[]"),
                 ("tree_tags", "false"),
                 ("tree_extensions", "false"),
                 ("appearance_portrait", "false"),

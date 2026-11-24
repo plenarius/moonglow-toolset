@@ -43,6 +43,11 @@
 //! `hak/`, the fixture's haks. A test may also run Moonglow's own checks
 //! (`builtin = "tag-unique"`, a list of them, or `"all"`) on its fixture,
 //! with the fixture's project file.
+//!
+//! A plugin that reaches the network (API 0.10) is tested against a stub
+//! of its service: `[[test.reply]]` says what each request gets,
+//! `[[test.request]]` what the job is to send, and `signed_in` signs the
+//! user in to the plugin's sign-ins.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -231,6 +236,178 @@ struct Test {
     /// the value each ends with.
     #[serde(default)]
     set: BTreeMap<String, toml::Value>,
+    /// The user is signed in, as this name, to each of the plugin's
+    /// sign-ins (API 0.10).
+    signed_in: Option<String>,
+    /// What the network answers (API 0.10): a stub of the plugin's
+    /// service, which the hosts are allowed to reach.
+    #[serde(default, rename = "reply")]
+    replies: Vec<Reply>,
+    /// The requests the job sends, all of them, in order.
+    #[serde(default, rename = "request")]
+    requests: Option<Vec<Sent>>,
+}
+
+/// A stub's answer to a request (`[[test.reply]]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reply {
+    /// The request's method; any, if left out.
+    method: Option<String>,
+    /// Its URL: exactly, or, ending in `*`, any that starts so.
+    url: String,
+    #[serde(default = "status_ok")]
+    status: u16,
+    /// The body: a value sent as JSON, text, or a file's bytes (from the
+    /// test file's folder).
+    json: Option<toml::Value>,
+    body: Option<String>,
+    file: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    /// It answers every such request, not only the first.
+    #[serde(default)]
+    again: bool,
+}
+
+fn status_ok() -> u16 {
+    200
+}
+
+/// A request the job is to send (`[[test.request]]`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Sent {
+    method: Option<String>,
+    /// Its URL, as a reply's (`*` at the end: any that starts so).
+    url: String,
+    /// Texts its body has, each part of it.
+    #[serde(default)]
+    has: Vec<String>,
+    /// Whether it was sent with a sign-in's token.
+    signin: Option<bool>,
+}
+
+fn url_matches(pattern: &str, url: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(start) => url.starts_with(start),
+        None => url == pattern,
+    }
+}
+
+/// The stub a test's network is: its replies, and what was sent.
+struct Stub {
+    replies: Vec<(Reply, Vec<u8>)>,
+    used: std::sync::Mutex<Vec<bool>>,
+    seen: std::sync::Mutex<Vec<crate::net::Request>>,
+    /// Requests no reply answered.
+    unanswered: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::net::Transport for Stub {
+    fn send(&self, r: &crate::net::Request) -> Result<crate::net::Response, String> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner).push(r.clone());
+        let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+        let found = self.replies.iter().enumerate().position(|(i, (reply, _))| {
+            (reply.again || !used[i])
+                && reply.method.as_ref().is_none_or(|m| m.eq_ignore_ascii_case(&r.method))
+                && url_matches(&reply.url, &r.url)
+        });
+        let Some(i) = found else {
+            let what = format!("{} {}", r.method, r.url);
+            self.unanswered.lock().unwrap_or_else(PoisonError::into_inner).push(what.clone());
+            return Err(format!("the test has no reply for {what}"));
+        };
+        used[i] = true;
+        let (reply, body) = &self.replies[i];
+        let mut headers: Vec<(String, String)> =
+            reply.headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
+        if reply.json.is_some() && !headers.iter().any(|(k, _)| k == "content-type") {
+            headers.push(("content-type".into(), "application/json".into()));
+        }
+        Ok(crate::net::Response { status: reply.status, headers, body: body.clone() })
+    }
+}
+
+/// The access token a test's sign-ins hold (`signed_in`).
+const TEST_TOKEN: &str = "test-token";
+
+/// A test's network: the stub of its replies, and the sign-ins.
+fn test_network(
+    plugin: &Plugin,
+    t: &Test,
+    dir: &Path,
+) -> Result<Option<(crate::Network, Arc<Stub>)>, String> {
+    if t.replies.is_empty() && t.signed_in.is_none() && t.requests.is_none() {
+        return Ok(None);
+    }
+    let mut replies = Vec::new();
+    for r in &t.replies {
+        let body = match (&r.json, &r.body, &r.file) {
+            (Some(j), None, None) => toml_json(j)?.to_string().into_bytes(),
+            (None, Some(b), None) => b.clone().into_bytes(),
+            (None, None, Some(f)) => {
+                std::fs::read(dir.join(f)).map_err(|e| format!("reply {}: {f}: {e}", r.url))?
+            }
+            (None, None, None) => Vec::new(),
+            _ => return Err(format!("reply {}: one of json, body and file", r.url)),
+        };
+        replies.push((r.clone(), body));
+    }
+    let n = replies.len();
+    let stub = Arc::new(Stub {
+        replies,
+        used: std::sync::Mutex::new(vec![false; n]),
+        seen: Default::default(),
+        unanswered: Default::default(),
+    });
+    let sign_ins = Arc::new(crate::SignIns::in_memory());
+    if let Some(name) = &t.signed_in {
+        for decl in &plugin.manifest.signins {
+            let account = crate::signin::account(&plugin.manifest.id, decl);
+            sign_ins.hold(&account, name, TEST_TOKEN);
+        }
+    }
+    Ok(Some((crate::Network::new(stub.clone(), sign_ins), stub)))
+}
+
+/// What the job sent, held to the test's `[[test.request]]`.
+fn sent_as_wanted(t: &Test, stub: &Stub, problems: &mut Vec<String>) {
+    for what in stub.unanswered.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+        problems.push(format!("the test has no reply for {what}"));
+    }
+    let Some(wanted) = &t.requests else { return };
+    let seen = stub.seen.lock().unwrap_or_else(PoisonError::into_inner);
+    let said: Vec<String> = seen.iter().map(|r| format!("{} {}", r.method, r.url)).collect();
+    if seen.len() != wanted.len() {
+        problems.push(format!("{} requests, not {}: {said:?}", seen.len(), wanted.len()));
+        return;
+    }
+    for (i, (r, w)) in seen.iter().zip(wanted).enumerate() {
+        let n = i + 1;
+        if w.method.as_ref().is_some_and(|m| !m.eq_ignore_ascii_case(&r.method))
+            || !url_matches(&w.url, &r.url)
+        {
+            let m = w.method.as_deref().unwrap_or("*");
+            problems.push(format!("request {n} is {}, not {m} {}", said[i], w.url));
+            continue;
+        }
+        let body = String::from_utf8_lossy(&r.body);
+        for has in &w.has {
+            if !body.contains(has.as_str()) {
+                problems.push(format!("request {n} ({}) has no {has:?} in its body", said[i]));
+            }
+        }
+        let bearer = format!("Bearer {TEST_TOKEN}");
+        let signed =
+            r.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("authorization") && *v == bearer);
+        if let Some(want) = w.signin
+            && want != signed
+        {
+            let how = if signed { "with" } else { "without" };
+            problems.push(format!("request {n} ({}) was sent {how} the sign-in's token", said[i]));
+        }
+    }
 }
 
 /// What a job wrote outside the module (haks, folders), held to the test.
@@ -708,6 +885,8 @@ struct TestHost {
     answers: BTreeMap<String, toml::Value>,
     files: RefCell<std::collections::VecDeque<PathBuf>>,
     yes: bool,
+    /// The test's stub of the network, where it has one.
+    network: Option<crate::Network>,
 }
 
 impl Host for TestHost {
@@ -741,10 +920,24 @@ impl Host for TestHost {
             Question::File { .. } | Question::Folder { .. } => {
                 self.files.borrow_mut().pop_front().map(Answer::Path)
             }
-            // (A test reaches no network: it has none.)
-            Question::Network { .. } => Some(Answer::No),
-            Question::SignIn(_) => None,
+            // (Its stub, where the test has one.)
+            Question::Network { .. } => {
+                Some(if self.network.is_some() { Answer::Yes } else { Answer::No })
+            }
+            // (The code said, and the issuer's stub waited for.)
+            Question::SignIn(code) => {
+                self.log(Level::Info, &format!("enter {} at {}", code.code, code.uri));
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                while !code.waiting.done() && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                None
+            }
         }
+    }
+
+    fn network(&self) -> Option<crate::Network> {
+        self.network.clone()
     }
 }
 
@@ -786,6 +979,11 @@ fn run_one(
     fixture: &Fixture,
     from: &GameFrom,
 ) -> (Vec<String>, Vec<String>) {
+    let (network, stub) = match test_network(plugin, t, dir) {
+        Ok(Some((n, s))) => (Some(n), Some(s)),
+        Ok(None) => (None, None),
+        Err(e) => return (vec![e], Vec::new()),
+    };
     let host = Rc::new(TestHost {
         log: RefCell::default(),
         not_in_game: RefCell::default(),
@@ -794,8 +992,12 @@ fn run_one(
         answers: t.answers.clone(),
         files: RefCell::new(t.files.iter().map(|f| dir.join(f)).collect()),
         yes: t.yes,
+        network,
     });
     let mut problems = held(plugin, t, dir, fixture, from, &host);
+    if let Some(stub) = &stub {
+        sent_as_wanted(t, stub, &mut problems);
+    }
     let mut notes = fixture.notes.clone();
     notes.extend(host.notes.take());
     // What it read of the game and did not find: where it failed, that may
@@ -925,6 +1127,9 @@ fn held(
             ("settings", !t.settings.is_empty()),
             ("log", !t.log.is_empty()),
             ("error", t.error.is_some()),
+            ("reply", !t.replies.is_empty()),
+            ("request", t.requests.is_some()),
+            ("signed_in", t.signed_in.is_some()),
         ];
         let given: Vec<&str> = theirs.iter().filter(|(_, g)| *g).map(|(k, _)| *k).collect();
         if !given.is_empty() {

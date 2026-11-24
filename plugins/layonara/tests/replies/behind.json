@@ -1,0 +1,22 @@
+{
+  "detail": "crypt is behind live: someone published meanwhile.",
+  "code": "behind",
+  "behind": [
+    {
+      "kind": "area",
+      "key": "crypt",
+      "base_rev": 3,
+      "rev": 4,
+      "published": {
+        "name": "Bob",
+        "at": "2026-11-23T10:00:00Z"
+      }
+    }
+  ],
+  "options": [
+    "update",
+    "try_anyway",
+    "cancel"
+  ],
+  "items": []
+}

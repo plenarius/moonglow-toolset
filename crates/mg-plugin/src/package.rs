@@ -305,6 +305,24 @@ impl Package {
         Ok(Package { manifest, files })
     }
 
+    /// A plugin from its files (each one's path in its folder, with `/`,
+    /// and bytes), held to what an archive's are: one a build bundles.
+    pub fn from_files(files: Vec<(String, Vec<u8>)>) -> Result<Package, PluginError> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut bytes));
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let written = |e: zip::result::ZipError| PluginError::Package(e.to_string());
+            for (name, data) in &files {
+                zip.start_file(name.as_str(), options).map_err(written)?;
+                zip.write_all(data).map_err(|e| PluginError::Package(e.to_string()))?;
+            }
+            zip.finish().map_err(written)?;
+        }
+        Package::read(&bytes)
+    }
+
     /// Loads its code, as it is in the archive (nothing is unpacked),
     /// and compares what it registers with what its manifest declares:
     /// the faults, as [`crate::inspect`] gives them for a folder.

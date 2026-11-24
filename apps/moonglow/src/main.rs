@@ -787,6 +787,7 @@ fn main() -> eframe::Result<()> {
             moonglow.plugin_values = mg_ui::plugins::values_path();
             moonglow.no_plugins = line.no_plugins;
             moonglow.plugins.system_keychain = true;
+            moonglow.install_bundled_plugins(&bundled_plugins());
             moonglow.load_plugins();
             moonglow.prefab_dir = mg_ui::prefabs::dir();
             moonglow.var_set_dir = mg_ui::var_sets::dir();
@@ -859,8 +860,29 @@ fn device_descriptor(
     mg_ui::graphics::device_descriptor("moonglow", features, limits)
 }
 
+/// The plugins this build bundles (`plugins/` of the source; `build.rs`).
+fn bundled_plugins() -> Vec<mg_plugin::Package> {
+    const BUNDLED: &[&[(&str, &[u8])]] = include!(concat!(env!("OUT_DIR"), "/bundled.rs"));
+    (BUNDLED.iter())
+        .filter_map(|files| {
+            let files = files.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
+            mg_plugin::Package::from_files(files)
+                .inspect_err(|e| eprintln!("a bundled plugin does not read: {e}"))
+                .ok()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    /// The build bundles the Layonara plugin, which reads as an archive's.
+    #[test]
+    fn the_bundled_plugins_read() {
+        let ids: Vec<String> =
+            super::bundled_plugins().into_iter().map(|p| p.manifest.id).collect();
+        assert!(ids.contains(&"layonara.builders".to_string()), "{ids:?}");
+    }
+
     /// The window's device asks for BC textures where the adapter has
     /// them (without, the frame test's took four times the memory), and
     /// for the GPU's memory in small blocks.

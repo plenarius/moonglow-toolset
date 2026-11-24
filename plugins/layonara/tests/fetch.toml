@@ -1,0 +1,189 @@
+# Fetch Area: from the database into the module, merged with the module's copy where it has one.
+module = "module"
+root = false
+
+[[test]]
+name = "a new area: written, listed in module.ifo, its revision recorded"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "well" }
+log = ["well: fetched, live's revision 5"]
+resources = ["well.are", "well.git", "module.ifo"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+file = "replies/well.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+signin = true
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+signin = true
+[[test.field]]
+resource = "well.are"
+field = "Tag"
+value = "WELL"
+[[test.field]]
+resource = "well.git"
+field = "/WaypointList[0]/Tag"
+value = "WP_WELL"
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_Area_list[2]/Area_Name"
+value = "well"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Value"
+value = '{"crypt":3,"well":5}'
+
+[[test]]
+name = "a module with no locals gets LAYO_EXPORT_REVS, and its area list"
+command = "fetch"
+module = "bare"
+signed_in = "alice"
+answers = { area = "WELL" }
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+file = "replies/well.json"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[0]/Name"
+value = "LAYO_EXPORT_REVS"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[0]/Value"
+value = '{"well":5}'
+[[test.field]]
+resource = "module.ifo"
+field = "/Mod_Area_list[0]/Area_Name"
+value = "well"
+
+[[test]]
+name = "several areas match: the builder picks one (the first, here)"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "wel" }
+log = ["well: fetched"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/well"
+file = "replies/well.json"
+
+[[test]]
+name = "no area matches"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "nowhere" }
+error = "No live area has nowhere"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+
+[[test]]
+name = "the module's copy is behind: a 3-way merge from its revision, and the new base recorded"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "crypt" }
+log = ["crypt: 1 object added by live", "crypt: your copy (from revision 3) merged with live's revision 4"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+file = "replies/crypt-live.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+file = "replies/crypt-merged.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+[[test.request]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+has = ['"base_rev":3', '"WP_ALTAR"', 'GIC ']
+signin = true
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[2]/Tag"
+value = "WP_BOB"
+[[test.field]]
+resource = "module.ifo"
+field = "/VarTable[1]/Value"
+value = '{"crypt":4}'
+
+[[test]]
+name = "a conflict: the builder takes theirs, and the merge is asked again with the choice"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "crypt", c1 = "Take mine" }
+log = ["crypt: 1 conflicts, 1 taken from your copy"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+file = "replies/crypt-live.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+file = "replies/crypt-conflict.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+file = "replies/crypt-mine.json"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+[[test.request]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+has = ['"choices":{"x1":"theirs"}']
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[1]/Tag"
+value = "WP_ALTAR_MINE"
+
+[[test]]
+name = "a conflict left as live's has it: no second merge"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "crypt" }
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+file = "replies/crypt-live.json"
+[[test.reply]]
+method = "POST"
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt/merge"
+file = "replies/crypt-conflict.json"
+[[test.field]]
+resource = "crypt.git"
+field = "/WaypointList[1]/Tag"
+value = "WP_ALTAR_LIVE"
+
+[[test]]
+name = "the module's copy is live's already: nothing changes"
+command = "fetch"
+signed_in = "alice"
+answers = { area = "crypt" }
+log = ["crypt: your copy is live's revision 3 already"]
+edits = 0
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area"
+file = "replies/areas.json"
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/res/area/crypt"
+file = "replies/crypt-same.json"

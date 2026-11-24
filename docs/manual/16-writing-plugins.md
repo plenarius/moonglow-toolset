@@ -1406,6 +1406,8 @@ A test (`[[test]]`) has a `name` and runs one thing:
 | `by` | What made the objects or resources (`ctx.event.by`). |
 | `settings` | The plugin's settings for the run (`settings = { code = "ab" }`), over what the fixture's project files hold and the defaults. |
 | `game`, `root` | The test's own folder of game resources and the game it reads, as the file's `game` and `root` (above) say them, for this test alone (since Moonglow 2.2.0; `root = false` and `true` since 2.3.0). |
+| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. |
+| `[[test.reply]]` | What the network answers (API 0.10), a stub of the plugin's service, whose hosts are then allowed: each with `url` (exactly, or ending in `*`, any URL that starts so), and as wanted `method`, `status` (200 if left out), `headers`, and the body as `json` (a value), `body` (text) or `file` (from the test file's folder). The first reply not yet used that fits answers a request; `again = true` answers every such request. A request no reply fits fails, as no answer would. |
 
 and says what is to come of it (each key may be left out):
 
@@ -1424,6 +1426,7 @@ and says what is to come of it (each key may be left out):
 | `log` | Lines the log must have: each is part of one. |
 | `error` | The job fails, saying this (part of what it says). |
 | `set` | The settings the command or event sets (`ctx.settings:set`), each with the value it ends with: `set = { code = "cd" }`. |
+| `[[test.request]]` | The requests the job sends (API 0.10), all of them, in order: each with `url` (as a reply's), and as wanted `method`, `has` (texts its body has, each part of it) and `signin` (whether it went with the sign-in's token). `request = []`: none. |
 | `warned`, `refused` | What a `resource-saving` handler says: its warnings and its refusals, all of them in order, each part of one as `name.ext: text` (`"cellar.are: its tag was OLD_CELLAR"`); `[]`: none. |
 
 Without a game, and with no game folder of its own, a test's

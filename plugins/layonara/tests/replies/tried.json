@@ -1,0 +1,38 @@
+{
+  "user": "mg-alice",
+  "reconnect": false,
+  "way_in": "Connect to dev, then type ;forge for your areas, ;forge <area> to go in and ;forge back to come out. No reconnect needed.",
+  "items": [
+    {
+      "kind": "area",
+      "key": "crypt",
+      "new": false,
+      "rev": 1000000007,
+      "base_rev": 4,
+      "live_rev": 4,
+      "command": ";forge crypt",
+      "ways": {
+        "total": 3,
+        "broken": 0,
+        "new_broken": [],
+        "house": 0
+      },
+      "review": "### What changed",
+      "dev": {
+        "written": true,
+        "rev": 1000000007,
+        "applied": true,
+        "message": ""
+      }
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "trial": [
+    {
+      "kind": "area",
+      "key": "crypt"
+    }
+  ],
+  "expires_in": 3600
+}
