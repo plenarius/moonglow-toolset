@@ -786,6 +786,7 @@ fn main() -> eframe::Result<()> {
             moonglow.plugin_answers = mg_ui::plugins::answers_path();
             moonglow.plugin_values = mg_ui::plugins::values_path();
             moonglow.no_plugins = line.no_plugins;
+            moonglow.plugins.system_keychain = true;
             moonglow.install_bundled_plugins(&bundled_plugins());
             moonglow.load_plugins();
             moonglow.prefab_dir = mg_ui::prefabs::dir();

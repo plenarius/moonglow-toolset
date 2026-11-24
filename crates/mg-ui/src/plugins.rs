@@ -142,6 +142,8 @@ pub struct Plugins {
     /// What a sign-in's question's buttons asked for, done the next frame
     /// it is drawn: the page opened (true), or the code copied.
     sign_in_asked: Option<bool>,
+    /// Sign-ins go to the system's keychain (the app's); off, memory alone (tests).
+    pub system_keychain: bool,
 }
 
 /// What a plugin's job holds of the network: the network, and the hosts
@@ -544,6 +546,8 @@ struct Ask {
     /// The question, and once it is given the answer (`None`: closed).
     state: Mutex<(Option<Question>, Option<Option<Answer>>)>,
     changed: Condvar,
+    /// The last question asked was answered (a test waits for its job then).
+    answered: std::sync::atomic::AtomicBool,
 }
 
 impl Ask {
@@ -552,6 +556,7 @@ impl Ask {
     fn ask(&self, question: Question, progress: &Progress) -> Option<Answer> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         *state = (Some(question), None);
+        self.answered.store(false, std::sync::atomic::Ordering::Relaxed);
         loop {
             if let Some(answer) = state.1.take() {
                 state.0 = None;
@@ -572,6 +577,7 @@ impl Ask {
 
     fn answer(&self, answer: Option<Answer>) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = Some(answer);
+        self.answered.store(true, std::sync::atomic::Ordering::Relaxed);
         self.changed.notify_all();
     }
 }
@@ -613,6 +619,14 @@ impl Moonglow {
     #[doc(hidden)]
     pub fn question_waiting(&self) -> bool {
         self.plugins.ask.as_ref().is_some_and(|a| a.pending().is_some())
+    }
+
+    /// The job's plugin question was answered and the job not yet ended (tests).
+    #[doc(hidden)]
+    pub fn question_answered(&self) -> bool {
+        self.busy()
+            && (self.plugins.ask.as_ref())
+                .is_some_and(|a| a.answered.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -1278,12 +1292,16 @@ impl Moonglow {
 
     /// The network plugins reach, made the first time it is asked for.
     pub fn plugin_network(&mut self) -> mg_plugin::Network {
+        let system = self.plugins.system_keychain;
         self.plugins
             .network
             .get_or_insert_with(|| {
                 let transport = Arc::new(mg_plugin::net::Http::new(false));
-                let keychain = Box::new(mg_plugin::signin::OsKeychain);
-                mg_plugin::Network::new(transport, Arc::new(mg_plugin::SignIns::new(keychain)))
+                let sign_ins = match system {
+                    true => mg_plugin::SignIns::new(Box::new(mg_plugin::signin::OsKeychain)),
+                    false => mg_plugin::SignIns::in_memory(),
+                };
+                mg_plugin::Network::new(transport, Arc::new(sign_ins))
             })
             .clone()
     }
@@ -1639,7 +1657,9 @@ impl Moonglow {
     /// Runs the next thing a plugin does on an event, if no job is
     /// running: as a job, like a command.
     pub(crate) fn next_plugin_event(&mut self) {
-        if self.busy() || self.ws.is_none() {
+        // (A field typed in sets its text first, or the job writes over it.)
+        let waits = self.plugin_after_text.is_some() || self.typing_in_a_field();
+        if self.busy() || self.ws.is_none() || waits {
             return;
         }
         // What the last event's job was allowed is kept for the next run.
@@ -1877,6 +1897,47 @@ impl Moonglow {
     /// `console`: the plugin console's, whose output shows under it too;
     /// `plugin`: whose settings what it sets are.
     pub(crate) fn run_plugin(
+        &mut self,
+        name: String,
+        title: String,
+        console: bool,
+        granted: Option<Granted>,
+        plugin: Option<Plugin>,
+        run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
+    ) {
+        if self.plugin_after_text.is_some() {
+            self.log.warn(format!("{name}: {title}: waiting for another job to start"));
+            return;
+        }
+        // A field typed in sets its text before the snapshot, or the job's write undoes it.
+        if self.job.is_none() && granted.is_none() && !console && self.leave_keys_for_a_job() {
+            let pass = self.egui_ctx.as_ref().map_or(0, egui::Context::cumulative_pass_nr);
+            let start: StartLater = Box::new(move |app: &mut Moonglow| {
+                app.run_plugin_now(name, title, console, granted, plugin, run)
+            });
+            self.plugin_after_text = Some((pass, start));
+            return;
+        }
+        self.run_plugin_now(name, title, console, granted, plugin, run);
+    }
+
+    /// Whether a text field typed in has the keyboard (not a script's editor).
+    fn typing_in_a_field(&self) -> bool {
+        let Some(ctx) = &self.egui_ctx else { return false };
+        let focused = ctx.memory(egui::Memory::focused);
+        focused.is_some() && self.text_typed == focused && !crate::script_view::has_keys(self, ctx)
+    }
+
+    /// Takes the keyboard from the widget that has it: whether one had it.
+    fn leave_keys_for_a_job(&mut self) -> bool {
+        let Some(ctx) = &self.egui_ctx else { return false };
+        let Some(id) = ctx.memory(egui::Memory::focused) else { return false };
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        ctx.request_repaint();
+        true
+    }
+
+    fn run_plugin_now(
         &mut self,
         name: String,
         title: String,
@@ -3488,6 +3549,9 @@ pub(crate) fn remove_window(app: &mut Moonglow, ctx: &egui::Context) {
         app.plugins.remove = None;
     }
 }
+
+/// A plugin's job held back until a text field has set its text.
+pub(crate) type StartLater = Box<dyn FnOnce(&mut Moonglow)>;
 
 #[cfg(test)]
 mod tests {

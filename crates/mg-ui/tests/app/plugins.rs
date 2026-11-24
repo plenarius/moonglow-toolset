@@ -2889,3 +2889,13 @@ fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
     assert_eq!(version, "1.0.0");
     assert!(!app.plugin_enabled(id));
 }
+
+/// A test's window keeps sign-ins in memory, never in the system's keychain.
+#[test]
+fn a_test_s_window_keeps_sign_ins_in_memory() {
+    let mut app = app_with(Vec::new());
+    assert!(!app.plugin_network().sign_ins.in_system_keychain());
+    let mut app = app_with(Vec::new());
+    app.plugins.system_keychain = true;
+    assert!(app.plugin_network().sign_ins.in_system_keychain());
+}

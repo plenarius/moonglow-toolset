@@ -534,7 +534,9 @@ pub(crate) fn rested(h: &mut Harness<'static, Moonglow>, title: &str, job: bool)
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(10));
         let now = (window_now(h, title), h.state().busy());
-        still = if last == Some(now) { still + 1 } else { 0 };
+        // (A job called off or answered is not at rest until its thread ends.)
+        let ending = h.state().job_ending();
+        still = if last == Some(now) && !ending { still + 1 } else { 0 };
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "{title} never came to rest"
