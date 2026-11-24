@@ -396,6 +396,7 @@ fn typed_text_follows_its_entry_through_a_whole_write() {
     std::fs::write(plugin.join("plugin.cfg"), cfg).unwrap();
     let luau = "local mg = require(\"@moonglow\")\n\
                 mg.command(\"drop\", function(ctx)\n\
+                \x20   local n = 0 for i = 1, 10000000 do n = n + i end\n\
                 \x20   local doc = ctx.module:raw(\"module.jrl\")\n\
                 \x20   table.remove(doc.Categories.value[1].EntryList.value, 1)\n\
                 \x20   ctx.edit:write_gff(\"module.jrl\", doc)\n\
@@ -430,6 +431,14 @@ fn typed_text_follows_its_entry_through_a_whole_write() {
         // typing pending as the plugin's write arrives: a command run by
         // its key or menu leaves the field first.)
         h.state_mut().run_plugin_command("test.drop-entry", "drop");
+        // One frame under its modal window, then none until the write is made.
+        assert!(h.state().busy(), "{case}: the plugin's job under way");
+        h.run_steps(1);
+        let started = std::time::Instant::now();
+        while h.state().busy() && !h.state().job_work_done() {
+            assert!(started.elapsed().as_secs() < 20, "{case}: the plugin never done");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         until(&mut h, "the plugin done", |h| !h.state().busy());
         settle(&mut h);
         let mut want = before.clone();

@@ -26,6 +26,10 @@ pub trait Keychain: Send + Sync {
     /// `Err`: not kept (no keychain here, or it refused).
     fn set(&self, account: &str, secret: &str) -> Result<(), String>;
     fn delete(&self, account: &str) -> Result<(), String>;
+    /// The system's own keychain (tests check they never reach it).
+    fn is_system(&self) -> bool {
+        false
+    }
 }
 
 /// Secrets held in memory alone.
@@ -84,6 +88,10 @@ mod os {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(e) => Err(e.to_string()),
             }
+        }
+
+        fn is_system(&self) -> bool {
+            true
         }
     }
 }
@@ -151,6 +159,11 @@ pub fn account(plugin_id: &str, decl: &SigninDecl) -> String {
 impl SignIns {
     pub fn new(keychain: Box<dyn Keychain>) -> SignIns {
         SignIns { keychain, held: Mutex::default(), endpoints: Mutex::default() }
+    }
+
+    /// Whether its secrets go to the system's keychain.
+    pub fn in_system_keychain(&self) -> bool {
+        self.keychain.is_system()
     }
 
     /// Held in memory alone: tests.

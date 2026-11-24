@@ -142,6 +142,8 @@ pub struct Plugins {
     /// What a sign-in's question's buttons asked for, done the next frame
     /// it is drawn: the page opened (true), or the code copied.
     sign_in_asked: Option<bool>,
+    /// Sign-ins go to the system's keychain (the app's); off, memory alone (tests).
+    pub system_keychain: bool,
 }
 
 /// What a plugin's job holds of the network: the network, and the hosts
@@ -524,6 +526,8 @@ struct Ask {
     /// The question, and once it is given the answer (`None`: closed).
     state: Mutex<(Option<Question>, Option<Option<Answer>>)>,
     changed: Condvar,
+    /// The last question asked was answered (a test waits for its job then).
+    answered: std::sync::atomic::AtomicBool,
 }
 
 impl Ask {
@@ -532,6 +536,7 @@ impl Ask {
     fn ask(&self, question: Question, progress: &Progress) -> Option<Answer> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         *state = (Some(question), None);
+        self.answered.store(false, std::sync::atomic::Ordering::Relaxed);
         loop {
             if let Some(answer) = state.1.take() {
                 state.0 = None;
@@ -552,6 +557,7 @@ impl Ask {
 
     fn answer(&self, answer: Option<Answer>) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = Some(answer);
+        self.answered.store(true, std::sync::atomic::Ordering::Relaxed);
         self.changed.notify_all();
     }
 }
@@ -593,6 +599,14 @@ impl Moonglow {
     #[doc(hidden)]
     pub fn question_waiting(&self) -> bool {
         self.plugins.ask.as_ref().is_some_and(|a| a.pending().is_some())
+    }
+
+    /// The job's plugin question was answered and the job not yet ended (tests).
+    #[doc(hidden)]
+    pub fn question_answered(&self) -> bool {
+        self.busy()
+            && (self.plugins.ask.as_ref())
+                .is_some_and(|a| a.answered.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -1258,12 +1272,16 @@ impl Moonglow {
 
     /// The network plugins reach, made the first time it is asked for.
     pub fn plugin_network(&mut self) -> mg_plugin::Network {
+        let system = self.plugins.system_keychain;
         self.plugins
             .network
             .get_or_insert_with(|| {
                 let transport = Arc::new(mg_plugin::net::Http::new(false));
-                let keychain = Box::new(mg_plugin::signin::OsKeychain);
-                mg_plugin::Network::new(transport, Arc::new(mg_plugin::SignIns::new(keychain)))
+                let sign_ins = match system {
+                    true => mg_plugin::SignIns::new(Box::new(mg_plugin::signin::OsKeychain)),
+                    false => mg_plugin::SignIns::in_memory(),
+                };
+                mg_plugin::Network::new(transport, Arc::new(sign_ins))
             })
             .clone()
     }
