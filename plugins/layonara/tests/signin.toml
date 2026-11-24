@@ -48,7 +48,7 @@ url = "https://builders.layonara.com/api/v1/builder/me"
 name = "someone outside the builders' groups is told so"
 command = "sign-in"
 signed_in = "carol"
-error = "You are not a builder. (Layonara's builder routes are for the Builders group)"
+log = ["You are not a builder. (Layonara's builder routes are for the Builders group)"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/me"
 status = 403
@@ -58,7 +58,7 @@ json = { detail = "You are not a builder." }
 name = "a sign-in that has ended says to sign in again"
 command = "status"
 signed_in = "alice"
-error = "sign in again (Plugins › Layonara › Sign In)"
+log = ["sign in again (Plugins › Layonara › Sign In)"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/trial"
 status = 401
@@ -67,5 +67,5 @@ json = { detail = "The token has expired." }
 [[test]]
 name = "not signed in, and not signing in now: nothing is sent"
 command = "status"
-error = "Not signed in to Layonara"
 request = []
+log = ["Not signed in to Layonara"]

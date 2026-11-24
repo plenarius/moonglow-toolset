@@ -123,7 +123,7 @@ local function listed(ctx, hak: string): boolean
 end
 
 local function download(ctx, hak: string, file, url: string)
-  local got = ctx.hak:download(hak, {
+  local ok, got = pcall(ctx.hak.download, ctx.hak, hak, {
     url = url,
     signin = api.SIGNIN,
     sha256 = file.sha256,
@@ -131,6 +131,9 @@ local function download(ctx, hak: string, file, url: string)
     -- (Q5 a: a rework of a released tileset shows the builder's tiles, not live NWSync's.)
     above_nwsync = true,
   })
+  if not ok then
+    api.download_failed(got)
+  end
   if got.downloaded then
     ctx.log:info(`{hak}.hak: downloaded ({mb(got.bytes)})`)
   else
@@ -143,13 +146,13 @@ local function pick(ctx)
   local r, list = api.call(ctx, "GET", "/forge/areas")
   if not r.ok then
     if r.status == 404 and api.detail(r, list) ~= "Not Found" then
-      error(`{api.detail(r, list)} (export an area in the Forge first)`, 0)
+      api.stop(`{api.detail(r, list)} (export an area in the Forge first)`)
     end
     api.fail(ctx, r, list, "Your Forge exports")
   end
   local items = list.items or {}
   if #items == 0 then
-    error("Your Forge has no exports: export an area in the Forge first", 0)
+    api.stop("Your Forge has no exports: export an area in the Forge first")
   end
   local choices, by = {}, {}
   for _, i in items do
@@ -173,7 +176,7 @@ function forge.fetch(ctx)
   end
   local name = tostring(item.name)
   if not string.match(name, "^[a-z0-9_]+$") or #name > 16 then
-    error(`The Forge's {name} is not a name a hak can have`, 0)
+    api.stop(`The Forge's {name} is not a name a hak can have`)
   end
   local r, e = api.call(ctx, "GET", `/forge/areas/{name}`)
   if not r.ok then
@@ -181,11 +184,11 @@ function forge.fetch(ctx)
   end
   local key = tostring(e.area or "")
   if not string.match(key, "^[a-z0-9_]+$") or #key > 16 then
-    error(`The Forge's {name} becomes {key}, which is no area's resref`, 0)
+    api.stop(`The Forge's {name} becomes {key}, which is no area's resref`)
   end
   e.blueprints = if type(e.blueprints) == "table" then e.blueprints else {}
   if type(e.hak) ~= "table" then
-    error(`The Forge lists no tile hak for {name}: export it again`, 0)
+    api.stop(`The Forge lists no tile hak for {name}: export it again`)
   end
   local gone = lost(ctx, e)
   if #gone > 0 then
@@ -247,7 +250,7 @@ function forge.changed(r, data)
   end
   for _, i in data.items or {} do
     if i.code == "forge_changed" then
-      error(`{i.key}: {i.detail or "the Forge has a newer export"} (Layonara › From the Forge…)`, 0)
+      api.stop(`{i.key}: {i.detail or "the Forge has a newer export"} (Layonara › From the Forge…)`)
     end
   end
 end
@@ -263,10 +266,7 @@ function forge.not_on_dev(ctx, r, data)
       for _, p in i.problems or {} do
         if string.find(tostring(p), `no tileset {from.name}`, 1, true) then
           api.log_problems(ctx, data)
-          error(
-            `{i.key}: its {from.name} tiles aren't on dev yet: press Try on dev in the Forge first, then Try on Dev here again`,
-            0
-          )
+          api.stop(`{i.key}: its {from.name} tiles aren't on dev yet: press Try on dev in the Forge first, then Try on Dev here again`)
         end
       end
     end

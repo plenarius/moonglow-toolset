@@ -233,7 +233,7 @@ absent = true
 name = "no exports in the Forge"
 command = "forge"
 signed_in = "alice"
-error = "Your Forge has no exports"
+log = ["Your Forge has no exports"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/forge/areas"
 json = { user = "alice", items = [] }
@@ -242,18 +242,19 @@ json = { user = "alice", items = [] }
 name = "no Forge workspace"
 command = "forge"
 signed_in = "alice"
-error = "No Forge workspace for alice. (export an area in the Forge first)"
+log = ["No Forge workspace for alice. (export an area in the Forge first)"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/forge/areas"
 status = 404
 json = { detail = "No Forge workspace for alice." }
 
 [[test]]
-name = "a download refused: the job fails, and nothing is written"
+name = "a download refused: a message, and nothing is written"
 command = "forge"
 signed_in = "alice"
 yes = true
-error = "glade.hak: the server answered 429"
+log = ["glade.hak: the server answered 429", "Try again in a few minutes"]
+edits = 0
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/forge/areas"
 file = "replies/forge-list.json"
@@ -290,7 +291,7 @@ module = "forged"
 select = ["crypt.are"]
 signed_in = "alice"
 answers = { note = "Finished the crypt" }
-error = "crypt: The Forge has a newer export of fgcrypt than the one you fetched: fetch again and send again. (Layonara › From the Forge…)"
+log = ["crypt: The Forge has a newer export of fgcrypt than the one you fetched: fetch again and send again. (Layonara › From the Forge…)"]
 [[test.reply]]
 method = "POST"
 url = "https://builders.layonara.com/api/v1/builder/submit"
@@ -303,7 +304,7 @@ command = "try"
 module = "forged"
 select = ["crypt.are"]
 signed_in = "alice"
-error = "crypt: its fgcrypt tiles aren't on dev yet: press Try on dev in the Forge first"
+log = ["crypt: its fgcrypt tiles aren't on dev yet: press Try on dev in the Forge first"]
 [[test.reply]]
 method = "POST"
 url = "https://builders.layonara.com/api/v1/builder/trial"

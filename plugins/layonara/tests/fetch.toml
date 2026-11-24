@@ -81,7 +81,7 @@ name = "no area matches"
 command = "fetch"
 signed_in = "alice"
 answers = { area = "nowhere" }
-error = "No live area has nowhere"
+log = ["No live area has nowhere"]
 [[test.reply]]
 url = "https://builders.layonara.com/api/v1/builder/res/area"
 file = "replies/areas.json"
