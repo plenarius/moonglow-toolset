@@ -14,7 +14,7 @@ doesn't have: **commands** (a batch edit, a report, a generator) and
 plugin is a folder with a few text files; anyone can write one
 ([Writing plugins](16-writing-plugins.md)).
 
-**Plugins are experimental.** The plugin API (version 0.10) may change in a
+**Plugins are experimental.** The plugin API (version 0.11) may change in a
 later release as the people who write plugins try it. A plugin written for
 an older version of the API runs (each version only adds to the one
 before); one written for a version this Moonglow doesn't have is not run:
@@ -76,7 +76,20 @@ A plugin's code runs in a sandbox. It can:
   sees the tokens: Moonglow adds them to its requests. Where there is no
   keychain, the sign-in lasts until Moonglow is closed. **Sign Out** on
   the Plugins tab, Forget, disabling and removing the plugin sign you out
-  (the service is told, and the keychain's entry deleted).
+  (the service is told, and the keychain's entry deleted);
+- download a whole hak into your hak folder from one of those hosts
+  (since plugin API 0.11, in Moonglow's Layonara build): it asks first,
+  as for writing a hak ("*Plugin* wants to download the hak *name*.hak
+  (*size* MB) from *host* into your hak folder…"). The download shows its
+  progress in the status bar and stops on **Cancel**; one cut short goes
+  on from where it stopped the next time. The file is checked against
+  the size and SHA-256 the plugin was told, the hak it replaces is kept
+  as `name.hak.bak`, and Undo puts it back with the command's edits. A
+  hak marked to go **above NWSync** is named in your own
+  `.moonglow/user.toml` (`[haks] above_nwsync`), so that Moonglow shows
+  it over the project's NWSync content (a reworked tileset over its
+  released copy); take it out of that list to read the released copy
+  again.
 
 It cannot open files of its own choosing, write any other file, reach
 any other host, start other programs, or reach anything of Moonglow's beyond

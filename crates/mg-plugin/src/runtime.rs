@@ -217,6 +217,10 @@ pub(crate) struct Shared {
     deadline: std::cell::Cell<Option<std::time::Instant>>,
     /// The plugin's hosts and sign-ins, and what the job sent (API 0.10).
     pub(crate) net: crate::net::NetJob,
+    /// The haks the user let the job write or download into, by name.
+    pub(crate) hak_leave: RefCell<std::collections::BTreeSet<String>>,
+    /// The haks it downloaded to go above NWSync (API 0.11).
+    pub(crate) above_nwsync: RefCell<Vec<String>>,
 }
 
 pub(crate) fn fail<T>(message: impl std::fmt::Display) -> mlua::Result<T> {
@@ -1828,6 +1832,8 @@ fn shared_holding(
         settings_set: RefCell::default(),
         no_set: std::cell::Cell::new(None),
         net: crate::net::NetJob::default(),
+        hak_leave: RefCell::default(),
+        above_nwsync: RefCell::default(),
     })
 }
 
@@ -1872,6 +1878,7 @@ pub(crate) fn run_command(
         folders: sh.folders.take(),
         settings: sh.settings_set.take(),
         said: Vec::new(),
+        above_nwsync: sh.above_nwsync.take(),
     })
 }
 
@@ -2060,6 +2067,7 @@ pub(crate) fn run_event(
         folders: Vec::new(),
         settings: Vec::new(),
         said: Vec::new(),
+        above_nwsync: Vec::new(),
     };
     // (Nothing it is for: its code does not run.)
     if (kind.per_resource() && keys.is_empty()) || (objects_event && objects.is_empty()) {
@@ -2131,6 +2139,7 @@ pub(crate) fn run_event(
         folders: sh.folders.take(),
         settings: sh.settings_set.take(),
         said: said.take(),
+        above_nwsync: sh.above_nwsync.take(),
     })
 }
 
@@ -2516,6 +2525,7 @@ pub(crate) fn run_console(
         folders: sh.folders.take(),
         settings: Vec::new(),
         said: Vec::new(),
+        above_nwsync: sh.above_nwsync.take(),
     })
 }
 

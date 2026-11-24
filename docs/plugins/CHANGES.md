@@ -14,6 +14,33 @@ each version may change what the one before had. This file lists each
 version's changes and what a plugin written for the version before has
 to change.
 
+## 0.11
+
+In Moonglow's Layonara build (the fork's `layonara` branch), not in
+upstream Moonglow. Only an addition: a plugin written for 0.10 or before
+runs as it is. A plugin that uses what is new says `api = "0.11"`.
+
+- **Downloading a hak.** `ctx.hak:download(hak, { url, sha256, bytes,
+  signin, above_nwsync })` streams a whole hak (up to 512 MB) from one
+  of the plugin's declared hosts into the user's hak folder, as
+  `hak.hak.part`, never through the plugin's memory, with the sign-in's
+  token as `ctx.net:request` sends it. No time limit while bytes arrive
+  (60 seconds without one ends it), progress in the status bar, Cancel;
+  the next download of the hak goes on from where one stopped (a
+  `Range` request), and a file whose size or SHA-256 isn't the one given
+  is not kept. A hak with that SHA-256 already is not downloaded again.
+  The user's leave is the one `ctx.hak:write` asks for; when the handler
+  returns the hak takes the place of the one there (kept as `.bak`) and
+  goes with the command's edits (Undo puts the old one back). Commands
+  and wizards only. Returns `{ downloaded, bytes, resumed }`.
+- **Above NWSync.** `above_nwsync = true` names the hak in the
+  builder's own `.moonglow/user.toml` (`[haks] above_nwsync`): Moonglow
+  layers it over the project's NWSync content, so a reworked tileset
+  wins over its released copy. Every other hak keeps the game's order.
+- **Tests.** A test's download goes into a scratch hak folder;
+  `downloaded = [...]` and `above_nwsync = [...]` hold the job to what
+  it downloaded.
+
 ## 0.10
 
 In Moonglow's Layonara build (the fork's `layonara` branch), not in

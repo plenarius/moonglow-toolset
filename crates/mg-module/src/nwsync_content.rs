@@ -75,6 +75,8 @@ pub struct Mounted {
     pub layer: Result<Layer, String>,
     /// What else to tell the builder (the game's storage unreadable).
     pub warnings: Vec<String>,
+    /// The haks put over it ([`raise_haks`]), by name.
+    pub raised: Vec<String>,
 }
 
 impl Mounted {
@@ -97,8 +99,14 @@ impl Mounted {
             (1, false) => "; the hak not on disk taken to be in it".into(),
             (n, false) => format!("; the {n} haks not on disk taken to be in it"),
         };
+        let raised = match self.raised.as_slice() {
+            [] => String::new(),
+            names => {
+                format!("; under the hak folder's {} (your [haks] above_nwsync)", names.join(", "))
+            }
+        };
         Some(format!(
-            "NWSync content: manifest {} of {} ({} resources, from {}){haks}",
+            "NWSync content: manifest {} of {} ({} resources, from {}){haks}{raised}",
             &mg_nwsync::sha1_hex(&l.sha1)[..8],
             self.settings.url,
             l.resources,
@@ -168,7 +176,25 @@ pub fn mount(
             haks,
         })
     })();
-    Mounted { settings: settings.clone(), layer, warnings }
+    Mounted { settings: settings.clone(), layer, warnings, raised: Vec::new() }
+}
+
+/// Puts the haks of the user's hak folder that `above` names (the
+/// builder's `[haks] above_nwsync`) over the NWSync layer, where there is
+/// one, keeping their order: a hak a plugin downloaded (a reworked
+/// tileset) wins over the server's copy of the same resources. The game
+/// itself reads the manifest first; this is Moonglow's view alone. The
+/// names raised.
+pub fn raise_haks(resman: &mut ResMan, above: &crate::project_file::Patterns) -> Vec<String> {
+    if above.is_empty() || !resman.layers().iter().any(is_nwsync_layer) {
+        return Vec::new();
+    }
+    let raised = resman.raise(priority::HAK_OVER_NWSYNC, |l| {
+        l.class == LayerClass::Erf
+            && matches!(l.priority, priority::HAK_USER | priority::HAK_OVER_NWSYNC)
+            && l.label.strip_prefix("hak:").is_some_and(|name| above.matches(name))
+    });
+    raised.iter().filter_map(|l| l.strip_prefix("hak:")).map(str::to_string).collect()
 }
 
 /// Whether a layer of the load order is an NWSync manifest's.
@@ -343,5 +369,57 @@ impl crate::Module {
             let tlk = self.custom_tlk().map_err(|e| e.to_string())?;
             write_haks(&settings, game.as_ref(), &names, tlk.as_deref(), o)
         })())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mg_core::{ResRef, ResType};
+    use mg_resman::{MemContainer, ResKey};
+
+    use super::*;
+    use crate::project_file::Patterns;
+
+    fn one(data: &'static [u8]) -> MemContainer {
+        let mut c = MemContainer::new();
+        c.insert(ResKey::new(ResRef::from_str("tile01").unwrap(), ResType::MDL), data);
+        c
+    }
+
+    /// The haks the builder's file names go over the NWSync layer, in the
+    /// module's order; the others, and the install's, keep the game's
+    /// order; without an NWSync layer nothing moves.
+    #[test]
+    fn a_downloaded_hak_goes_over_nwsync_and_no_other() {
+        let mut rm = ResMan::new();
+        for (label, data) in [
+            ("hak:tb_intro_", b"forge" as &[u8]),
+            ("hak:ls_textures", b"lib"),
+            ("hak:l64_tiles5", b"tiles"),
+        ] {
+            rm.add(priority::HAK_USER, label, LayerClass::Erf, one(data));
+        }
+        rm.add(priority::HAK, "hak:stock", LayerClass::Erf, one(b"stock"));
+        let above = Patterns::new(&["tb_intro_", "stock"]).unwrap();
+        assert!(raise_haks(&mut rm, &above).is_empty(), "no NWSync layer: nothing moves");
+        let key = ResKey::new(ResRef::from_str("tile01").unwrap(), ResType::MDL);
+        assert_eq!(rm.get(&key).unwrap().as_ref(), b"forge");
+        rm.add(priority::NWSYNC, mg_nwsync::label(&[7; 20]), LayerClass::NwSync, one(b"released"));
+        assert_eq!(rm.get(&key).unwrap().as_ref(), b"released", "NWSync over the haks");
+        assert_eq!(raise_haks(&mut rm, &above), ["tb_intro_"], "the install's hak stays");
+        assert_eq!(rm.get(&key).unwrap().as_ref(), b"forge", "the rework wins");
+        let order: Vec<(&str, u32)> =
+            rm.layers().iter().map(|l| (l.label.as_str(), l.priority)).collect();
+        assert_eq!(order[0], ("hak:tb_intro_", priority::HAK_OVER_NWSYNC));
+        assert!(order[1].0.starts_with(mg_nwsync::LABEL_PREFIX));
+        assert_eq!(
+            &order[2..],
+            [
+                ("hak:ls_textures", priority::HAK_USER),
+                ("hak:l64_tiles5", priority::HAK_USER),
+                ("hak:stock", priority::HAK),
+            ]
+        );
+        assert!(raise_haks(&mut rm, &Patterns::default()).is_empty());
     }
 }

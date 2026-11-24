@@ -121,6 +121,8 @@ pub struct HakWritten {
     /// Resources added to it, and those of the same name replaced.
     pub added: usize,
     pub replaced: usize,
+    /// The hak was put in place whole, downloaded (API 0.11).
+    pub whole: bool,
     before: Option<PathBuf>,
     after: PathBuf,
     /// The file as it was before (None: there was none), and as written.
@@ -161,9 +163,24 @@ impl HakWritten {
             }
             let _ = std::fs::remove_dir(&copies);
         };
-        let done = match mg_module::hak_edit::write_into(&path, hak.files.clone()) {
+        let whole = match &hak.whole {
+            Some(from) => mg_module::hak_edit::put_whole(from, &path),
+            None => Ok(()),
+        };
+        let done = whole.and_then(|()| match hak.files.is_empty() {
+            true => Ok(mg_module::hak_edit::Added::default()),
+            false => mg_module::hak_edit::write_into(&path, hak.files.clone()),
+        });
+        let done = match done {
             Ok(done) => done,
             Err(e) => {
+                // (A download put in place, then the resources failing: as it was.)
+                if hak.whole.is_some() && stamp(&path) != before_stamp {
+                    let _ = match &before {
+                        Some(b) => put_back(b, &path),
+                        None => std::fs::remove_file(&path).map_err(|e| e.to_string()),
+                    };
+                }
                 forget(&before);
                 return Err(e);
             }
@@ -176,6 +193,7 @@ impl HakWritten {
         Ok(HakWritten {
             added: done.added,
             replaced: done.replaced,
+            whole: hak.whole.is_some(),
             after_stamp: stamp(&path),
             path,
             before,

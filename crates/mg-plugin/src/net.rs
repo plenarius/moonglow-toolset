@@ -48,12 +48,31 @@ impl Response {
     }
 }
 
+/// Where a streamed answer goes (`ctx.hak:download`, API 0.11): its
+/// status and headers, then its body as it arrives.
+pub trait Sink {
+    fn head(&mut self, status: u16, headers: &[(String, String)]) -> Result<(), String>;
+    fn bytes(&mut self, chunk: &[u8]) -> Result<(), String>;
+}
+
 /// What sends the requests: HTTPS with ureq in the window and `mg`
 /// ([`Http`]), a stub in tests.
 pub trait Transport: Send + Sync {
     /// Sends it and waits for the answer; `Err`: no answer (why).
     fn send(&self, request: &Request) -> Result<Response, String>;
+
+    /// Sends it and hands the answer to `sink` as it arrives, with no
+    /// limit on its size or time but [`STREAM_IDLE`] between bytes. A
+    /// stub's whole answer by default.
+    fn stream(&self, request: &Request, sink: &mut dyn Sink) -> Result<(), String> {
+        let r = self.send(request)?;
+        sink.head(r.status, &r.headers)?;
+        sink.bytes(&r.body)
+    }
 }
+
+/// The longest a streamed answer may go without a byte.
+pub const STREAM_IDLE: Duration = Duration::from_secs(60);
 
 /// The network as a host offers it to the jobs it runs.
 #[derive(Clone)]
@@ -403,6 +422,8 @@ mod http {
     #[derive(Debug)]
     pub struct Http {
         agent: ureq::Agent,
+        /// For downloads: no time limit while bytes arrive.
+        streams: ureq::Agent,
     }
 
     impl Http {
@@ -416,34 +437,79 @@ mod http {
                 .timeout_global(Some(REQUEST_TIME))
                 .build()
                 .into();
-            Http { agent }
+            let streams = ureq::Agent::config_builder()
+                .https_only(!local_http)
+                .user_agent(format!("Moonglow/{}", mg_core::release::version()))
+                .max_redirects(0)
+                .http_status_as_error(false)
+                .timeout_connect(Some(REQUEST_TIME))
+                .timeout_recv_response(Some(STREAM_IDLE))
+                .timeout_per_read(Some(STREAM_IDLE))
+                .build()
+                .into();
+            Http { agent, streams }
         }
+    }
+
+    fn reachable(url: &str) -> Result<(), String> {
+        if !url.to_ascii_lowercase().starts_with("https://")
+            && !Url::parse(url).is_ok_and(|u| u.local)
+        {
+            return Err("only https:// is reached".into());
+        }
+        Ok(())
+    }
+
+    fn built(request: &Request) -> Result<ureq::http::Request<Vec<u8>>, String> {
+        let mut b = ureq::http::Request::builder()
+            .method(request.method.as_str())
+            .uri(request.url.as_str());
+        for (n, v) in &request.headers {
+            b = b.header(n.as_str(), v.as_str());
+        }
+        b.body(request.body.clone()).map_err(|e| e.to_string())
+    }
+
+    fn headers_of(res: &ureq::http::Response<ureq::Body>) -> Vec<(String, String)> {
+        (res.headers().iter())
+            .map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into()))
+            .collect()
     }
 
     impl Transport for Http {
         fn send(&self, request: &Request) -> Result<Response, String> {
-            if !request.url.to_ascii_lowercase().starts_with("https://")
-                && !Url::parse(&request.url).is_ok_and(|u| u.local)
-            {
-                return Err("only https:// is reached".into());
-            }
-            let mut b = ureq::http::Request::builder()
-                .method(request.method.as_str())
-                .uri(request.url.as_str());
-            for (n, v) in &request.headers {
-                b = b.header(n.as_str(), v.as_str());
-            }
-            let req = b.body(request.body.clone()).map_err(|e| e.to_string())?;
-            let mut res = self.agent.run(req).map_err(why)?;
+            reachable(&request.url)?;
+            let mut res = self.agent.run(built(request)?).map_err(why)?;
             let status = res.status().as_u16();
-            let headers = (res.headers().iter())
-                .map(|(n, v)| {
-                    (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into())
-                })
-                .collect();
+            let headers = headers_of(&res);
             let body = (res.body_mut().with_config().limit(MAX_BODY as u64 + 1).read_to_vec())
                 .map_err(why)?;
             Ok(Response { status, headers, body })
+        }
+
+        fn stream(&self, request: &Request, sink: &mut dyn Sink) -> Result<(), String> {
+            use std::io::Read;
+            reachable(&request.url)?;
+            let mut res = self.streams.run(built(request)?).map_err(why_stream)?;
+            sink.head(res.status().as_u16(), &headers_of(&res))?;
+            let mut body = res.body_mut().as_reader();
+            let mut buf = vec![0u8; 256 << 10];
+            loop {
+                let n = match body.read(&mut buf) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.to_string()),
+                };
+                sink.bytes(&buf[..n])?;
+            }
+        }
+    }
+
+    fn why_stream(e: ureq::Error) -> String {
+        match e {
+            ureq::Error::Timeout(_) => format!("no answer in {} seconds", STREAM_IDLE.as_secs()),
+            other => why(other),
         }
     }
 
@@ -537,5 +603,63 @@ mod tests {
         let mut far = get("/");
         far.url = "http://example.org/".into();
         assert!(Http::new(true).send(&far).is_err(), "plain HTTP elsewhere");
+    }
+
+    /// The window's transport streams an answer to its sink in pieces,
+    /// with its status and headers first.
+    #[cfg(feature = "net")]
+    #[test]
+    fn http_streams_an_answer_to_its_sink() {
+        use std::io::{Read, Write};
+        let body: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
+        let sent = body.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("range: bytes=100-"));
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes \
+                 100-{}/{}\r\n\r\n",
+                sent.len() - 100,
+                sent.len() - 1,
+                sent.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&sent[100..]).unwrap();
+        });
+        #[derive(Default)]
+        struct Kept {
+            status: u16,
+            range: Option<String>,
+            body: Vec<u8>,
+            pieces: usize,
+        }
+        impl Sink for Kept {
+            fn head(&mut self, status: u16, headers: &[(String, String)]) -> Result<(), String> {
+                self.status = status;
+                self.range =
+                    headers.iter().find(|(k, _)| k == "content-range").map(|h| h.1.clone());
+                Ok(())
+            }
+            fn bytes(&mut self, chunk: &[u8]) -> Result<(), String> {
+                self.body.extend_from_slice(chunk);
+                self.pieces += 1;
+                Ok(())
+            }
+        }
+        let mut kept = Kept::default();
+        let request = Request {
+            method: "GET".into(),
+            url: format!("http://127.0.0.1:{port}/hak"),
+            headers: vec![("Range".into(), "bytes=100-".into())],
+            body: Vec::new(),
+        };
+        Http::new(true).stream(&request, &mut kept).unwrap();
+        assert_eq!((kept.status, kept.range.as_deref()), (206, Some("bytes 100-699999/700000")));
+        assert_eq!(kept.body, body[100..]);
+        assert!(kept.pieces > 1, "in pieces, not whole");
     }
 }

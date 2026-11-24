@@ -366,11 +366,15 @@ pub(crate) fn remount(app: &mut Moonglow) {
     let Some(settings) = settings(app) else { return };
     app.release_game_data();
     let haks = app.ws.as_ref().and_then(|ws| ws.module.haks().ok()).unwrap_or_default();
+    let above = (app.ws.as_ref()).map(|ws| ws.module.project_file.user.above_nwsync.clone());
     let (Some(game), Some(gi)) = (crate::exclusive(&mut app.game), &app.install) else { return };
     // (The haks not on disk, as the module's opening found them: those
     // still missing were said then.)
     let mut missing: Vec<String> = haks.into_iter().filter(|h| gi.find_hak(h).is_none()).collect();
-    let m = mg_module::nwsync_content::mount(&mut game.resman, gi, &settings, &mut missing);
+    let mut m = mg_module::nwsync_content::mount(&mut game.resman, gi, &settings, &mut missing);
+    if let Some(above) = &above {
+        m.raised = mg_module::nwsync_content::raise_haks(&mut game.resman, above);
+    }
     for w in m.warnings() {
         app.log.warn(format!("NWSync content: {w}"));
     }
@@ -378,6 +382,29 @@ pub(crate) fn remount(app: &mut Moonglow) {
     app.game_data_changed();
     app.load_order_changed();
     app.reload_custom_tlk();
+}
+
+/// Puts the haks the builder's `[haks] above_nwsync` names over the
+/// NWSync layer now (a plugin downloaded one): those already in the game
+/// data; a hak attached later is raised when the haks are stacked again.
+pub(crate) fn raise(app: &mut Moonglow) {
+    let Some(above) = (app.ws.as_ref()).map(|ws| ws.module.project_file.user.above_nwsync.clone())
+    else {
+        return;
+    };
+    app.release_game_data();
+    let Some(game) = crate::exclusive(&mut app.game) else { return };
+    let raised = mg_module::nwsync_content::raise_haks(&mut game.resman, &above);
+    if raised.is_empty() {
+        return;
+    }
+    if let Some(m) = app.nwsync_content.mounted.as_mut() {
+        m.raised = raised.clone();
+    }
+    app.log
+        .info(format!("{} over the NWSync content (your [haks] above_nwsync)", raised.join(", ")));
+    app.game_data_changed();
+    app.load_order_changed();
 }
 
 /// `n` of `what`: "1 data file", "3 data files".

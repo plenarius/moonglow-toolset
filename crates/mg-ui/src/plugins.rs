@@ -643,6 +643,8 @@ struct JobHost {
     granted: Option<Granted>,
     /// A plugin's job that may reach the network (API 0.10).
     net: Option<NetGrants>,
+    /// Where its haks are written, and downloaded into (API 0.11).
+    hak_dir: Option<std::path::PathBuf>,
 }
 
 impl Host for JobHost {
@@ -669,6 +671,10 @@ impl Host for JobHost {
 
     fn network(&self) -> Option<mg_plugin::Network> {
         self.net.as_ref().map(|n| n.network.clone())
+    }
+
+    fn hak_dir(&self) -> Option<std::path::PathBuf> {
+        self.hak_dir.clone()
     }
 
     fn ask(&self, question: &Question) -> Option<Answer> {
@@ -746,6 +752,7 @@ pub(crate) fn check_findings(
                 answers: RefCell::default(),
                 granted: None,
                 net: None,
+                hak_dir: None,
             });
             let input = Input {
                 settings: Some(settings.clone()),
@@ -1971,6 +1978,7 @@ impl Moonglow {
         let net = plugin.as_ref().and_then(|p| self.net_grants(p));
         let job_net = net.clone();
         let net_kept = (plugin.as_ref().map(grants_name)).zip(net.map(|n| n.allowed));
+        let hak_dir = self.install.as_ref().and_then(mg_resman::GameInstall::user_hak_dir);
         self.start_job(
             format!("{name}: {heading}"),
             move |job| {
@@ -1981,6 +1989,7 @@ impl Moonglow {
                     answers: RefCell::new(answers),
                     granted,
                     net: job_net,
+                    hak_dir,
                 });
                 let input = Input::new(job.module.clone(), job.game.clone());
                 run(input, host)
@@ -2059,16 +2068,19 @@ impl Moonglow {
                         } else {
                             "Edit › Undo takes it back with the edits"
                         };
-                        say(
-                            self,
-                            Level::Info,
-                            format!(
+                        let text = match done.whole {
+                            true => format!(
+                                "{name}: {title} downloaded {} ({undone})",
+                                done.path.display()
+                            ),
+                            false => format!(
                                 "{name}: {title} put {} resources into {} ({} replaced; {undone})",
                                 done.added + done.replaced,
                                 done.path.display(),
                                 done.replaced,
                             ),
-                        );
+                        };
+                        say(self, Level::Info, text);
                         written.push(done);
                     }
                     Err(e) => {
@@ -2100,6 +2112,31 @@ impl Moonglow {
                             folder.dir.display()
                         )));
                     }
+                }
+            }
+            // Then the haks it put over NWSync, in the builder's own file.
+            if !outcome.above_nwsync.is_empty() {
+                match crate::builder_code::root(self) {
+                    Some(root) => {
+                        for hak in &outcome.above_nwsync {
+                            if let Err(e) = ProjectFile::add_above_nwsync(&root, hak) {
+                                say(self, Level::Warning, format!("{name}: {title}: {hak}: {e}"));
+                            }
+                        }
+                        if let Some(ws) = self.ws.as_mut() {
+                            ws.module.reread_project_file();
+                        }
+                        crate::nwsync_content_view::raise(self);
+                    }
+                    None => say(
+                        self,
+                        Level::Warning,
+                        format!(
+                            "{name}: {title}: a module kept in one file (.mod) has no project \
+                             to put {} over NWSync in",
+                            outcome.above_nwsync.join(", ")
+                        ),
+                    ),
                 }
             }
             Ok(outcome)

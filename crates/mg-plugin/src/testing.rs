@@ -220,6 +220,11 @@ struct Test {
     /// nothing is written (since Moonglow 3.3.0).
     #[serde(default)]
     haks: BTreeMap<String, Vec<String>>,
+    /// The haks the job downloads (`ctx.hak:download`, API 0.11), all of
+    /// them, by name: into a scratch hak folder, put nowhere.
+    downloaded: Option<Vec<String>>,
+    /// The haks it puts over NWSync (`above_nwsync`), all of them.
+    above_nwsync: Option<Vec<String>>,
     /// The files the job writes into folders the user chose, by their
     /// names, all of them, in any order; nothing is written.
     written: Option<Vec<String>>,
@@ -428,6 +433,23 @@ fn outside_as_wanted(t: &Test, outcome: &crate::Outcome, problems: &mut Vec<Stri
             .collect();
         if wanted != haks {
             problems.push(format!("it puts {haks:?} into haks, not {wanted:?}"));
+        }
+    }
+    let names = |v: &[String]| {
+        sorted(v.iter().map(|h| h.strip_suffix(".hak").unwrap_or(h).to_ascii_lowercase()).collect())
+    };
+    if let Some(wanted) = &t.downloaded {
+        let got: Vec<String> = sorted(
+            outcome.haks.iter().filter(|h| h.whole.is_some()).map(|h| h.name.clone()).collect(),
+        );
+        if got != names(wanted) {
+            problems.push(format!("it downloads {got:?}, not {wanted:?}"));
+        }
+    }
+    if let Some(wanted) = &t.above_nwsync {
+        let got = sorted(outcome.above_nwsync.clone());
+        if got != names(wanted) {
+            problems.push(format!("it puts {got:?} over NWSync, not {wanted:?}"));
         }
     }
     if let Some(wanted) = &t.written {
@@ -887,6 +909,30 @@ struct TestHost {
     yes: bool,
     /// The test's stub of the network, where it has one.
     network: Option<crate::Network>,
+    /// A scratch hak folder for downloads, gone with the test.
+    hak_dir: Scratch,
+}
+
+/// A folder of the system's temporary one, taken away when let go of.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Scratch {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("moonglow-plugin-test-{}-{n}", std::process::id()))
+            .join("hak");
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Some(parent) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
 }
 
 impl Host for TestHost {
@@ -938,6 +984,11 @@ impl Host for TestHost {
 
     fn network(&self) -> Option<crate::Network> {
         self.network.clone()
+    }
+
+    fn hak_dir(&self) -> Option<PathBuf> {
+        std::fs::create_dir_all(&self.hak_dir.0).ok()?;
+        Some(self.hak_dir.0.clone())
     }
 }
 
@@ -993,6 +1044,7 @@ fn run_one(
         files: RefCell::new(t.files.iter().map(|f| dir.join(f)).collect()),
         yes: t.yes,
         network,
+        hak_dir: Scratch::new(),
     });
     let mut problems = held(plugin, t, dir, fixture, from, &host);
     if let Some(stub) = &stub {

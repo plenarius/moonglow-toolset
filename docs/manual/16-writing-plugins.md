@@ -17,7 +17,7 @@ plugin can call. What plugins are to the people who use them is in
 
 You need a text editor and Moonglow. Nothing is compiled or built.
 
-The plugin API is **experimental** (version 0.10): it may change in a
+The plugin API is **experimental** (version 0.11): it may change in a
 later release, and Versions, below, says what that means for a plugin.
 
 ## A first plugin
@@ -237,7 +237,7 @@ running the plugin, to list what it adds.
 | `id` | Needed. The plugin's name for programs, the same wherever it is installed: `author.plugin-name`, in lower-case letters, digits, `.`, `-` and `_`. Settings and keys are kept under it, so don't change it between versions. |
 | `name` | Needed. Its name for people. |
 | `version` | Needed. The plugin's own version, as you number it. |
-| `api` | Needed. The plugin API it was written for: `"0.10"`, or an earlier one (`"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
+| `api` | Needed. The plugin API it was written for: `"0.11"`, or an earlier one (`"0.10"`, `"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
 | `license` | Needed. Its license, as an [SPDX](https://spdx.org/licenses/) name. Moonglow is GPL-3.0, and a plugin runs inside it: choose a license compatible with the GPL (`GPL-3.0-or-later`, `MIT`, `Apache-2.0`…). |
 | `description` | One or two sentences on what it does, shown on the Plugins tab. |
 | `author` | Who wrote it. Repeat the line for each author. |
@@ -801,6 +801,40 @@ has run out, or is refused, is replaced from it before the request goes
 without the network, and `ctx.signin:stop(id)` signs out (the issuer is
 told). The example `area-share` (`docs/plugins/examples`) signs in, sends
 an area and fetches it back.
+
+### Downloading a hak
+
+A whole hak, too large for a request's 64 MB or a job's memory, is
+downloaded into the user's hak folder with `ctx.hak:download` (since API
+0.11, in Moonglow's Layonara build). It streams to disk from one of the
+plugin's hosts, never through the plugin's memory, and the plugin gives
+the hak's size and SHA-256 (from the service's listing), which the file
+is checked against:
+
+```lua
+local got = ctx.hak:download("tb_intro_", {
+  url = "https://builders.example.org/v1/forge/areas/tb_intro_/hak",
+  signin = "example",                      -- as ctx.net:request's
+  sha256 = listing.hak.sha256,             -- 64 hex digits
+  bytes = listing.hak.bytes,               -- up to 512 MB
+  above_nwsync = true,                     -- shown over the project's NWSync content
+})
+if got.downloaded then ctx.log:info("Downloaded " .. got.bytes .. " bytes") end
+ctx.hak:attach("tb_intro_")
+```
+
+A hak that already has that SHA-256 is not downloaded again
+(`downloaded = false`). The user is asked first, as for `ctx.hak:write`
+(one leave for each hak a job writes or downloads). The download goes
+into `tb_intro_.hak.part` beside it; one cut short (Cancel, the
+connection gone, 60 seconds without a byte) is an error, and the next
+download of that hak goes on from where it stopped (a `Range` request).
+When the handler returns, the hak takes the place of the one there,
+which is kept as `tb_intro_.hak.bak`, and it goes with the command's
+edits as a hak written does: Undo puts the old one back. `above_nwsync`
+names the hak in the builder's own `.moonglow/user.toml` (`[haks]
+above_nwsync`), which layers it over the NWSync content in Moonglow's
+game data (Moonglow's view only: the game reads the server's manifest).
 
 ## Areas and terrain
 
@@ -1406,7 +1440,7 @@ A test (`[[test]]`) has a `name` and runs one thing:
 | `by` | What made the objects or resources (`ctx.event.by`). |
 | `settings` | The plugin's settings for the run (`settings = { code = "ab" }`), over what the fixture's project files hold and the defaults. |
 | `game`, `root` | The test's own folder of game resources and the game it reads, as the file's `game` and `root` (above) say them, for this test alone (since Moonglow 2.2.0; `root = false` and `true` since 2.3.0). |
-| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. |
+| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. A download (`ctx.hak:download`, API 0.11) goes into a scratch hak folder of the test's, empty at its start, and gets the reply's whole body (a `file`, for a hak). |
 | `[[test.reply]]` | What the network answers (API 0.10), a stub of the plugin's service, whose hosts are then allowed: each with `url` (exactly, or ending in `*`, any URL that starts so), and as wanted `method`, `status` (200 if left out), `headers`, and the body as `json` (a value), `body` (text) or `file` (from the test file's folder). The first reply not yet used that fits answers a request; `again = true` answers every such request. A request no reply fits fails, as no answer would. |
 
 and says what is to come of it (each key may be left out):
@@ -1420,6 +1454,8 @@ and says what is to come of it (each key may be left out):
 | `[[test.field]]` | A field after the edits: `resource`, `field` (its path, as `ctx.edit` takes it) and `value` (text, a number, a localized string's English text), or `absent = true`. `field` may be a list's item (`Equip_ItemList[2]`, `/VarTable[0]`; since Moonglow 2.2.0): it is there, or with `absent = true` it is not; an item has no `value`. |
 | `edits`, `resources` | How many edits there were, and which resources they change. |
 | `haks` | What the job puts into haks, by hak, every resource in any order (since Moonglow 3.3.0): `haks = { tiles = ["tiles.set", "grass.tga"] }`. Nothing is written. |
+| `downloaded` | The haks the job downloads (API 0.11), all of them, by name: `downloaded = ["tb_intro_"]`. Nothing is put in the hak folder. |
+| `above_nwsync` | The haks it puts over NWSync (API 0.11), all of them. |
 | `written` | The files the job writes into folders the user chose (`folder:write`, or an export's `out:write`), by their names, every one in any order (since 3.3.0). Nothing is written. |
 | `content` | For an export: what the files it writes have, by name, each text part of the file (`content = { "creatures.csv" = ["guard,gate_guard"] }`; since API 0.6). |
 | `shows` | For a panel: texts it shows, each part of one of its texts (a value's as `Areas: 1`, a button's, a list item's; since API 0.6; a field's as its label and the value it is given, `Tint: #2a4d8f`, since API 0.9). |

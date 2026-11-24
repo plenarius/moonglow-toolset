@@ -2798,6 +2798,79 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
 }
 
+/// API 0.11: a plugin's download goes into the user's hak folder in the
+/// place of the hak there, and one marked above NWSync is named in the
+/// builder's own file.
+#[test]
+fn a_plugin_s_downloaded_hak_is_put_in_place_and_marked_above_nwsync() {
+    let Some(root) = mg_testkit::nwn_root() else { return };
+    const HAK: &[u8] = b"a reworked tileset's hak";
+    struct Stub;
+    impl mg_plugin::net::Transport for Stub {
+        fn send(&self, _: &mg_plugin::net::Request) -> Result<mg_plugin::net::Response, String> {
+            Ok(mg_plugin::net::Response { status: 200, headers: Vec::new(), body: HAK.to_vec() })
+        }
+    }
+    let dir = mg_testkit::scratch_dir("ui-plugin-download");
+    let user = user_folder(&dir, &["hak"]);
+    std::fs::write(user.join("hak/forge.hak"), b"the released one").unwrap();
+    let project = dir.join("project");
+    let mut m = Module::new();
+    m.set_info(&Gff::new(*b"IFO ")).unwrap();
+    m.save_as(&ModuleLocation::Folder(project.clone())).unwrap();
+    let plugins = dir.join("plugins");
+    let p = plugins.join("dl");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(
+        p.join("plugin.cfg"),
+        "[plugin]\nid = \"t.dl\"\nname = \"Dl\"\nversion = \"1\"\napi = \"0.11\"\n\
+         license = \"MIT\"\n\n[network]\nhosts = \"forge.example.org\"\n\n\
+         [command]\nid = \"get\"\ntitle = \"Get\"\n",
+    )
+    .unwrap();
+    let sha: String = mg_core::sha256::sha256(HAK).iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(
+        p.join("main.luau"),
+        format!(
+            "local mg = require('@moonglow')\n\
+             mg.command('get', function(ctx)\n\
+               ctx.hak:download('forge', {{ url = 'https://forge.example.org/forge.hak', \
+               sha256 = '{sha}', bytes = {}, above_nwsync = true }})\n\
+             end)\n",
+            HAK.len()
+        ),
+    )
+    .unwrap();
+    let mut app = game_app_with(&root, Some(user.clone()), NoDialogs::default());
+    app.open_module(&project);
+    app.plugin_dir = Some(plugins);
+    app.load_plugins();
+    let sign_ins = std::sync::Arc::new(mg_plugin::SignIns::in_memory());
+    app.plugins.network = Some(mg_plugin::Network::new(std::sync::Arc::new(Stub), sign_ins));
+    let mut h = harness(app, 1200.0, 900.0);
+    h.run();
+    h.state_mut().enable_plugin("t.dl", true);
+    for _ in 0..2 {
+        h.state_mut().plugins.answers.push_back(Some(mg_plugin::Answer::Yes));
+    }
+    h.state_mut().run_plugin_command("t.dl", "get");
+    let started = std::time::Instant::now();
+    while h.state().busy() || started.elapsed() < std::time::Duration::from_millis(200) {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "the job never ended");
+    }
+    h.run_steps(2);
+    let log = &h.state().log.entries;
+    assert_eq!(std::fs::read(user.join("hak/forge.hak")).unwrap(), HAK, "{log:?}");
+    assert_eq!(std::fs::read(user.join("hak/forge.hak.bak")).unwrap(), b"the released one");
+    assert!(log.iter().any(|(_, m)| m.contains("downloaded")), "{log:?}");
+    let own = std::fs::read_to_string(project.join(".moonglow/user.toml")).unwrap();
+    assert!(own.contains("[haks]") && own.contains("above_nwsync = [\"forge\"]"), "{own}");
+    let ws = h.state().ws.as_ref().unwrap();
+    assert!(ws.module.project_file.user.above_nwsync.matches("forge"));
+}
+
 /// The plugins a build bundles: installed and enabled once, and a newer
 /// bundle over a lower installed copy, whoever installed it, keeping its
 /// state; the same or a higher copy is kept, and a removed one stays so.

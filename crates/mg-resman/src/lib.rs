@@ -122,6 +122,10 @@ pub mod priority {
     pub const DEVELOPMENT_USER: u32 = 71;
     pub const DEVELOPMENT: u32 = 70;
     pub const RIM: u32 = 60;
+    /// Haks of the user's `hak/` a builder put over the NWSync content
+    /// (Moonglow's, not the game's: a reworked tileset over its released
+    /// copy).
+    pub const HAK_OVER_NWSYNC: u32 = 41;
     pub const NWSYNC: u32 = 40;
     /// Haks found in the user's `hak/` directory.
     pub const HAK_USER: u32 = 31;
@@ -193,6 +197,24 @@ impl ResMan {
     pub fn remove(&mut self, label: &str) -> Option<Layer> {
         let i = self.layers.iter().position(|l| l.label == label)?;
         Some(self.layers.remove(i))
+    }
+
+    /// Moves the layers `which` takes to `priority`, keeping their order
+    /// among themselves, below the layers that have it already: the
+    /// labels of those moved.
+    pub fn raise(&mut self, priority: u32, which: impl Fn(&Layer) -> bool) -> Vec<String> {
+        let (moved, kept): (Vec<Layer>, Vec<Layer>) =
+            std::mem::take(&mut self.layers).into_iter().partition(|l| which(l));
+        self.layers = kept;
+        let labels = moved.iter().map(|l| l.label.clone()).collect();
+        for mut layer in moved {
+            layer.priority = priority;
+            let at = (self.layers.iter())
+                .position(|l| l.priority < priority)
+                .unwrap_or(self.layers.len());
+            self.layers.insert(at, layer);
+        }
+        labels
     }
 
     /// The layer with this label, to change in place.
@@ -680,6 +702,30 @@ mod tests {
         let before = Container::fingerprint(&c);
         std::fs::write(outside.join("linked.nss"), b"void main() { int n; }").unwrap();
         assert_ne!(Container::fingerprint(&c), before, "its file changed: the folder changed");
+    }
+
+    /// Haks raised over NWSync keep their order among themselves, and the
+    /// others theirs under it.
+    #[test]
+    fn raised_layers_go_over_nwsync_in_their_order() {
+        let one = |data: &'static [u8]| {
+            let mut c = MemContainer::new();
+            c.insert(key("x", ResType::NSS), data);
+            c
+        };
+        let mut rm = ResMan::new();
+        rm.add(priority::NWSYNC, "nwsync", LayerClass::NwSync, one(b"live"));
+        for (label, data) in [("hak:a", b"a"), ("hak:b", b"b"), ("hak:c", b"c"), ("hak:d", b"d")] {
+            rm.add(priority::HAK_USER, label, LayerClass::Erf, one(data));
+        }
+        assert_eq!(rm.get(&key("x", ResType::NSS)).unwrap().as_ref(), b"live");
+        let moved =
+            rm.raise(priority::HAK_OVER_NWSYNC, |l| ["hak:d", "hak:b"].contains(&l.label.as_str()));
+        assert_eq!(moved, ["hak:b", "hak:d"]);
+        let labels: Vec<&str> = rm.layers().iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["hak:b", "hak:d", "nwsync", "hak:a", "hak:c"]);
+        assert_eq!(rm.get(&key("x", ResType::NSS)).unwrap().as_ref(), b"b");
+        assert!(rm.raise(priority::HAK_OVER_NWSYNC, |_| false).is_empty());
     }
 
     #[test]

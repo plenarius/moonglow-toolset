@@ -67,6 +67,8 @@ pub(crate) struct CliHost {
     /// reached over (none: none named).
     net_hosts: Vec<String>,
     network: Option<mg_plugin::Network>,
+    /// Where `ctx.hak:download` streams to (none in a dry run).
+    hak_dir: Option<PathBuf>,
 }
 
 impl Host for CliHost {
@@ -133,6 +135,10 @@ impl Host for CliHost {
 
     fn network(&self) -> Option<mg_plugin::Network> {
         self.network.clone()
+    }
+
+    fn hak_dir(&self) -> Option<PathBuf> {
+        self.hak_dir.clone()
     }
 }
 
@@ -1061,6 +1067,11 @@ pub(crate) fn run(
     // (The edits are shown in the module's own letters, as the plugin
     // wrote them.)
     let codepage = game.as_ref().map_or(mg_core::Codepage::WINDOWS_1252, |g| g.text_codepage());
+    let mut host = host;
+    if !dry_run {
+        host.hak_dir = (hak_dir.map(Path::to_path_buf))
+            .or_else(|| gi.and_then(mg_resman::GameInstall::user_hak_dir));
+    }
     let host = Rc::new(host);
     if !what.changed.is_some() && !matches!(what.kind, Kind::Command) {
         let kind = if matches!(what.kind, Kind::Wizard) { "wizard" } else { "importer" };
@@ -1171,13 +1182,33 @@ pub(crate) fn run(
         match hak.write_kept(dir) {
             Ok(done) => {
                 let (added, replaced) = (done.added, done.replaced);
-                notes.note(format!(
-                    "{}: {added} resources added, {replaced} replaced",
-                    file.display()
-                ));
+                if done.whole {
+                    notes.note(format!("{}: downloaded", file.display()));
+                }
+                if !done.whole || added + replaced > 0 {
+                    notes.note(format!(
+                        "{}: {added} resources added, {replaced} replaced",
+                        file.display()
+                    ));
+                }
                 written.push(done);
             }
             Err(e) => return Err(take_back(&mut written, anyhow!("{e}"))),
+        }
+    }
+    // The haks it put over NWSync go in the builder's own file.
+    if !outcome.above_nwsync.is_empty() && !dry_run {
+        let root = m.location.as_ref().and_then(mg_module::project_file::ProjectFile::root_of);
+        for hak in &outcome.above_nwsync {
+            match root {
+                Some(root) => match mg_module::project_file::ProjectFile::add_above_nwsync(root, hak) {
+                    Ok(()) => notes.note(format!("{hak} goes over the NWSync content (.moonglow/user.toml)")),
+                    Err(e) => notes.note(format!("warning: {hak} not put over NWSync: {e}")),
+                },
+                None => notes.note(format!(
+                    "warning: {hak} not put over NWSync: a module kept in one file (.mod) has no project"
+                )),
+            }
         }
     }
     for folder in &outcome.folders {

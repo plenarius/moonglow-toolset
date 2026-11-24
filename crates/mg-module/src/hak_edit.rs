@@ -867,6 +867,17 @@ pub fn remove_from(path: &Path, keys: &[ResKey]) -> Result<usize, String> {
     Ok(had)
 }
 
+/// Puts the hak file `from` (a download, checked) in the place of the
+/// hak at `path` (kept beside itself as `.bak` first, as [`write_into`]
+/// keeps it): `from` is moved, not copied.
+pub fn put_whole(from: &Path, path: &Path) -> Result<(), String> {
+    if path.exists() {
+        let bak = crate::sibling(path, ".bak");
+        crate::keep_previous(path).map_err(|e| format!("{}: {e}", bak.display()))?;
+    }
+    std::fs::rename(from, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// A hak's resources as they were when taken ([`Hak::contents`]).
 #[derive(Debug, Clone)]
 pub struct Contents {
