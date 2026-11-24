@@ -1,5 +1,8 @@
 # Update log
 
+## 2026-11-24
+* **Update** (Layonara's fork): version `5.1.0-layonara.2` (`Cargo.toml`), with plugin API 0.10 and the bundled Layonara plugin.
+
 ## 2026-11-23
 * **New** (Layonara's fork): **the Layonara plugin, bundled** (`plugins/layonara`; piece 7 of the Moonglow dev-trial design). Plugins › Layonara: Sign In…, Fetch Area…, Try on Dev, Send for Review…, Trial Status, Release…, Sign Out, against ops-api's builder routes (`builders.layonara.com/api/v1/builder`, signed in at auth.layonara.com). The revision each area came from is module.ifo's `LAYO_EXPORT_REVS`, recorded after each fetch and merge; a copy behind live's is merged 3-way (`/merge`, conflicts chosen in a form) before it is fetched, and Try on Dev's 409 `behind` asks Update first, Try anyway or Cancel. The code is generic over the routes' kinds (only `area` now). ([Plugins](manual/15-plugins.md), [Writing plugins](manual/16-writing-plugins.md), [the API's changes](plugins/CHANGES.md)).
   * **Bundled plugins**: `apps/moonglow/build.rs` embeds each folder of `plugins/` (not its `tests/`) into the program, and the first start installs each into the plugins folder and enables it (`Moonglow::install_bundled_plugins`, settings `plugins_bundled`); a newer build replaces an installed copy of a lower version, whoever installed it, keeping its enabled state, settings and allowed hosts; one the user removed, an installed copy of the same or a higher version, or a folder of the user's own is left as it is. The same in every package, with nothing in the packaging scripts. `mg_plugin::Package::from_files`.
