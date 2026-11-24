@@ -148,11 +148,14 @@ in it) into the plugins folder and press **Reload**.
 plugins of its own (Moonglow's Layonara build brings the Layonara
 plugin). At its first start each is installed into the plugins folder
 and enabled, the only plugins enabled without your tick, and the log
-says so; a later Moonglow with a newer version of one updates it. It is
-then a plugin like another: disable or remove it and it stays so (a
-plugin you removed isn't installed again), and one you installed in
-another version from a file is left as it is. What it reaches on the
-network it still asks you for before its first request.
+says so. A later Moonglow with a newer version of one replaces a lower
+version in the plugins folder, whether Moonglow installed it or you did
+from a file; it keeps the copy's enabled or disabled state, its settings
+and the hosts you allowed it. The same or a higher version you installed
+is left as it is, and so is a folder of your own (not installed from a
+file). It is then a plugin like another: disable it and it stays so, and
+one you removed isn't installed again. A host it was not yet allowed it
+still asks you for before its first request.
 
 ## Enabling
 

@@ -2798,8 +2798,9 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
 }
 
-/// The plugins a build bundles: installed and enabled once, updated while
-/// they are the version it installed, and left alone once removed.
+/// The plugins a build bundles: installed and enabled once, and a newer
+/// bundle over a lower installed copy, whoever installed it, keeping its
+/// state; the same or a higher copy is kept, and a removed one stays so.
 #[test]
 fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
     let dir = mg_testkit::scratch_dir("ui-plugin-bundled");
@@ -2809,7 +2810,15 @@ fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
         let files = ["plugin.cfg", "main.luau", "rules.luau"].map(|f| {
             let data = std::fs::read(fixture.join(f)).unwrap();
             let data = if f == "plugin.cfg" {
-                String::from_utf8(data).unwrap().replace("1.0.0", version).into_bytes()
+                (String::from_utf8(data).unwrap())
+                    .replace("1.0.0", version)
+                    .replace("api = \"0.4\"", "api = \"0.10\"")
+                    .replacen(
+                        "[command]",
+                        "[network]\nhosts = \"areas.example.org\"\n\n[command]",
+                        1,
+                    )
+                    .into_bytes()
             } else {
                 data
             };
@@ -2818,31 +2827,65 @@ fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
         mg_plugin::Package::from_files(files.to_vec()).unwrap()
     };
     let id = "example.tag-conventions";
+    let folder = plugins.join(id);
+    let version = || mg_plugin::Plugin::load(&folder).unwrap().manifest.version;
     let mut app = app_with(Vec::new());
     app.plugin_dir = Some(plugins.clone());
     app.install_bundled_plugins(&[bundle("1.0.0")]);
     app.load_plugins();
     assert!(app.plugin_enabled(id));
     assert_eq!(app.settings.plugins_bundled, vec![format!("{id} 1.0.0")]);
-    assert!(mg_plugin::from_archive(&plugins.join(id)));
+    assert!(mg_plugin::from_archive(&folder));
 
-    // Disabled by the user, then a newer build: updated, and still off.
+    // Disabled, a setting and a host allowed, then a newer build: updated,
+    // still off, the setting and the host kept.
     app.enable_plugin(id, false);
+    app.settings.plugin_settings.entry(id.into()).or_default().insert("k".into(), true.into());
+    let p = mg_plugin::Plugin::load(&folder).unwrap();
+    let name =
+        format!("{id} {} {}", p.code_digest().unwrap(), folder.canonicalize().unwrap().display());
+    app.settings.plugin_grants.push((name, "net:areas.example.org".into(), "yes".into()));
     app.install_bundled_plugins(&[bundle("1.1.0")]);
     app.load_plugins();
     assert!(!app.plugin_enabled(id));
-    let version = mg_plugin::Plugin::load(&plugins.join(id)).unwrap().manifest.version;
-    assert_eq!(version, "1.1.0");
+    assert_eq!(version(), "1.1.0");
     assert_eq!(app.settings.plugins_bundled, vec![format!("{id} 1.1.0")]);
+    assert_eq!(app.settings.plugin_settings[id]["k"], serde_json::Value::Bool(true));
+    assert_eq!(app.plugin_hosts_allowed(id), ["areas.example.org"]);
+    let p = mg_plugin::Plugin::load(&folder).unwrap();
+    assert!(
+        app.settings.plugin_grants.iter().any(|(n, _, _)| n.contains(&p.code_digest().unwrap()))
+    );
+
+    // The same version, then a higher one installed from a file: kept.
+    std::fs::write(folder.join("note.txt"), "mine").unwrap();
+    app.install_bundled_plugins(&[bundle("1.1.0")]);
+    assert!(folder.join("note.txt").exists());
+    bundle("2.0.0").install(&plugins, true).unwrap();
+    app.install_bundled_plugins(&[bundle("1.10.0")]);
+    assert_eq!(version(), "2.0.0");
+
+    // A lower one installed from a file: replaced, and still off.
+    bundle("1.9.0").install(&plugins, true).unwrap();
+    app.install_bundled_plugins(&[bundle("1.10.0")]);
+    app.load_plugins();
+    assert_eq!(version(), "1.10.0");
+    assert!(!app.plugin_enabled(id));
+    assert_eq!(app.settings.plugins_bundled, vec![format!("{id} 1.10.0")]);
 
     // Removed by the user: not brought back.
-    mg_plugin::remove(&plugins.join(id)).unwrap();
-    app.install_bundled_plugins(&[bundle("1.2.0")]);
-    assert!(!plugins.join(id).exists());
+    mg_plugin::remove(&folder).unwrap();
+    app.install_bundled_plugins(&[bundle("1.11.0")]);
+    assert!(!folder.exists());
 
-    // Another version installed from a file is left as it is.
-    bundle("0.9.0").install(&plugins, false).unwrap();
-    app.install_bundled_plugins(&[bundle("1.3.0")]);
-    let version = mg_plugin::Plugin::load(&plugins.join(id)).unwrap().manifest.version;
-    assert_eq!(version, "0.9.0");
+    // A lower copy a user installed from a file before any bundle: replaced,
+    // and left off as it was.
+    let other = dir.join("other");
+    bundle("0.9.0").install(&other, false).unwrap();
+    let mut app = app_with(Vec::new());
+    app.plugin_dir = Some(other.clone());
+    app.install_bundled_plugins(&[bundle("1.0.0")]);
+    let version = mg_plugin::Plugin::load(&other.join(id)).unwrap().manifest.version;
+    assert_eq!(version, "1.0.0");
+    assert!(!app.plugin_enabled(id));
 }

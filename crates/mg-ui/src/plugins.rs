@@ -231,6 +231,26 @@ fn grants_name(p: &Plugin) -> String {
     format!("{} {digest} {}", p.manifest.id, dir.display())
 }
 
+/// Whether version `a` is below `b`: dot-separated parts compared in
+/// turn, as numbers where both are (`1.10.0` above `1.9.0`).
+fn version_below(a: &str, b: &str) -> bool {
+    let part = |p: &str| (p.parse::<u64>().ok(), p.to_string());
+    let (a, b): (Vec<_>, Vec<_>) =
+        (a.split('.').map(part).collect(), b.split('.').map(part).collect());
+    for i in 0..a.len().max(b.len()) {
+        let zero = (Some(0), String::new());
+        let (x, y) = (a.get(i).unwrap_or(&zero), b.get(i).unwrap_or(&zero));
+        let order = match (x.0, y.0) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            _ => x.1.cmp(&y.1),
+        };
+        if order.is_ne() {
+            return order.is_lt();
+        }
+    }
+    false
+}
+
 /// What an installed plugin's grants were kept under before Moonglow
 /// 4.0.0: its id and version (none for a project's).
 fn old_grants_name(p: &Plugin) -> Option<String> {
@@ -1656,9 +1676,11 @@ impl Moonglow {
 
     /// Installs the plugins this build bundles (at start, before
     /// [`Moonglow::load_plugins`]): each one new here once, enabled, and a
-    /// newer bundle over the version it installed. One the user removed,
-    /// installed another version of, or keeps a folder of their own for
-    /// is left as it is. Its hosts are still asked for at its first request.
+    /// newer bundle over an installed copy of a lower version, whoever
+    /// installed it. One the user removed, installed in the same or a
+    /// higher version, or keeps a folder of their own for is left as it
+    /// is. A replaced copy keeps its enabled state, settings and allowed
+    /// hosts; its hosts are still asked for at its first request.
     pub fn install_bundled_plugins(&mut self, bundled: &[Package]) {
         let Some(dir) = self.plugin_dir.clone() else { return };
         if self.no_plugins {
@@ -1666,25 +1688,31 @@ impl Moonglow {
         }
         for package in bundled {
             let m = &package.manifest;
-            let ours = |v: &str| format!("{} {v}", m.id);
-            let installed_by_us = |s: &Vec<String>, v: &str| s.contains(&ours(v));
-            let seen =
-                self.settings.plugins_bundled.iter().any(|e| e.split(' ').next() == Some(&m.id));
+            let ours = format!("{} {}", m.id, m.version);
+            let of_id = |e: &String| e.split(' ').next() == Some(&m.id);
+            let seen = self.settings.plugins_bundled.iter().any(of_id);
             let replace = match package.existing(&dir) {
                 Existing::Nothing if !seen => false,
-                Existing::Installed { version }
-                    if version != m.version
-                        && installed_by_us(&self.settings.plugins_bundled, &version) =>
-                {
-                    true
+                Existing::Installed { version } if version_below(&version, &m.version) => true,
+                _ => {
+                    // Seen now: if the user removes their copy, it stays removed.
+                    if !seen {
+                        self.settings.plugins_bundled.push(ours);
+                    }
+                    continue;
                 }
-                _ => continue,
             };
+            // (The old copy's grants, kept under its code's digest.)
+            let old_name = Plugin::load(&package.folder(&dir)).ok().map(|p| grants_name(&p));
             match package.install(&dir, replace) {
-                Ok(_) => {
-                    self.forget_plugin_grants(&m.id);
-                    self.settings.plugins_bundled.retain(|e| e.split(' ').next() != Some(&m.id));
-                    self.settings.plugins_bundled.push(ours(&m.version));
+                Ok(installed) => {
+                    if replace {
+                        self.carry_plugin_hosts(&m.id, old_name.as_deref(), &installed);
+                    } else {
+                        self.forget_plugin_grants(&m.id);
+                    }
+                    self.settings.plugins_bundled.retain(|e| !of_id(e));
+                    self.settings.plugins_bundled.push(ours);
                     if !replace && !self.plugin_enabled(&m.id) {
                         self.settings.plugins_enabled.push(m.id.clone());
                     }
@@ -1697,6 +1725,27 @@ impl Moonglow {
                 Err(e) => {
                     self.log.said(Level::Warning, format!("{} (comes with Moonglow): {e}", m.name))
                 }
+            }
+        }
+    }
+
+    /// Moves the hosts a replaced plugin was allowed to its new code
+    /// (those its manifest still declares); its other grants are asked
+    /// again, and it stays signed in.
+    fn carry_plugin_hosts(&mut self, id: &str, old: Option<&str>, new: &Plugin) {
+        let name = grants_name(new);
+        let hosts = new.manifest.hosts();
+        let of = |p: &str| p.split_once(' ').is_some_and(|(i, _)| i == id);
+        self.plugins.granted.retain(|n, _| !of(n));
+        let kept = std::mem::take(&mut self.settings.plugin_grants);
+        for (p, q, a) in kept {
+            if !of(&p) {
+                self.settings.plugin_grants.push((p, q, a));
+            } else if Some(p.as_str()) == old
+                && a == "yes"
+                && q.strip_prefix(NET_GRANT).is_some_and(|h| hosts.iter().any(|x| x == h))
+            {
+                self.settings.plugin_grants.push((name.clone(), q, a));
             }
         }
     }
@@ -3443,6 +3492,16 @@ pub(crate) fn remove_window(app: &mut Moonglow, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Versions compare part by part, as numbers where they are.
+    #[test]
+    fn a_version_below_another() {
+        assert!(version_below("1.9.0", "1.10.0"));
+        assert!(version_below("1.0", "1.0.1"));
+        assert!(!version_below("1.0.0", "1.0"));
+        assert!(!version_below("2.0.0", "1.10.0"));
+        assert!(version_below("", "0.1"));
+    }
 
     /// A plugin's job asked to start while another job runs does not
     /// start, and lets what the running one waits on alone: its
