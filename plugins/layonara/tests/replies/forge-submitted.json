@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "kind": "area",
+      "key": "crypt",
+      "id": "in261124_ef56",
+      "state": "waiting",
+      "new": false,
+      "base_rev": 4,
+      "toolbox": "https://www.layonara.com/atlas/edit/crypt/area",
+      "replaced": [
+        "in261124_aa00"
+      ],
+      "check": {
+        "ok": true,
+        "problems": [],
+        "warnings": [],
+        "summary": "x"
+      },
+      "forge": {
+        "name": "fgcrypt",
+        "export": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "haks_pr": "https://github.com/layonara/nwn-haks/pull/9",
+        "replaces": "in261124_aa00"
+      }
+    }
+  ]
+}

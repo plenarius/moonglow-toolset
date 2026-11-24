@@ -1,0 +1,106 @@
+{
+  "name": "glade",
+  "area": "glade",
+  "new": true,
+  "export": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_rev": 0,
+  "folder": null,
+  "docs": {
+    "are": {
+      "__data_type": "ARE ",
+      "Tag": {
+        "type": "cexostring",
+        "value": "GLADE"
+      },
+      "ResRef": {
+        "type": "resref",
+        "value": "glade"
+      },
+      "Name": {
+        "type": "cexolocstring",
+        "value": {
+          "0": "The Glade"
+        }
+      },
+      "Tileset": {
+        "type": "resref",
+        "value": "glade"
+      },
+      "Width": {
+        "type": "int",
+        "value": 4
+      },
+      "Height": {
+        "type": "int",
+        "value": 4
+      }
+    },
+    "git": {
+      "__data_type": "GIT ",
+      "WaypointList": {
+        "type": "list",
+        "value": [
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_GLADE"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 5.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 5.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          }
+        ]
+      }
+    },
+    "gic": null
+  },
+  "blueprints": {
+    "glade_chest.utp": {
+      "__data_type": "UTP ",
+      "Tag": {
+        "type": "cexostring",
+        "value": "GLADE_CHEST"
+      },
+      "TemplateResRef": {
+        "type": "resref",
+        "value": "glade_chest"
+      },
+      "LocName": {
+        "type": "cexolocstring",
+        "value": {
+          "0": "Mossy Chest"
+        }
+      }
+    },
+    "glade_open.nss": "void main() {}\n"
+  },
+  "findings": [
+    {
+      "level": "warning",
+      "what": "glade_chest",
+      "msg": "has no inventory"
+    }
+  ],
+  "hak": {
+    "bytes": 1120,
+    "sha256": "ef5a97735ef43136ea182f1578aef73bb622b28d4426e3b3f95d4a66047be3e8"
+  },
+  "library": {
+    "bytes": 900,
+    "sha256": "8f7315eef51db02eb2a104b56c2c6962688504c88263ac11c9b6965548a25194"
+  }
+}

@@ -39,7 +39,8 @@ runs as it is. A plugin that uses what is new says `api = "0.11"`.
   wins over its released copy. Every other hak keeps the game's order.
 - **Tests.** A test's download goes into a scratch hak folder;
   `downloaded = [...]` and `above_nwsync = [...]` hold the job to what
-  it downloaded.
+  it downloaded, and `hak_folder = "..."` puts a folder's haks in the
+  scratch hak folder first (a hak there already).
 
 ## 0.10
 

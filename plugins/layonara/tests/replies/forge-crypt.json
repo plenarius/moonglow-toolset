@@ -1,0 +1,81 @@
+{
+  "name": "fgcrypt",
+  "area": "crypt",
+  "new": false,
+  "export": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "base_rev": 4,
+  "folder": "core",
+  "docs": {
+    "are": {
+      "__data_type": "ARE ",
+      "Tag": {
+        "type": "cexostring",
+        "value": "CRYPT"
+      },
+      "ResRef": {
+        "type": "resref",
+        "value": "crypt"
+      },
+      "Name": {
+        "type": "cexolocstring",
+        "value": {
+          "0": "The Crypt, Forged"
+        }
+      },
+      "Tileset": {
+        "type": "resref",
+        "value": "fgcrypt"
+      },
+      "Width": {
+        "type": "int",
+        "value": 4
+      },
+      "Height": {
+        "type": "int",
+        "value": 4
+      }
+    },
+    "git": {
+      "__data_type": "GIT ",
+      "WaypointList": {
+        "type": "list",
+        "value": [
+          {
+            "__struct_id": 5,
+            "Tag": {
+              "type": "cexostring",
+              "value": "WP_FORGED"
+            },
+            "TemplateResRef": {
+              "type": "resref",
+              "value": "nw_waypoint001"
+            },
+            "XPosition": {
+              "type": "float",
+              "value": 5.0
+            },
+            "YPosition": {
+              "type": "float",
+              "value": 5.0
+            },
+            "ZPosition": {
+              "type": "float",
+              "value": 0.0
+            }
+          }
+        ]
+      }
+    },
+    "gic": null
+  },
+  "blueprints": {},
+  "findings": [],
+  "hak": {
+    "bytes": 640,
+    "sha256": "dd8e991bb1acfb89d5c792d398ad4aff64df11cbcb025989ba0fbbaeaefbbf15"
+  },
+  "library": {
+    "bytes": 900,
+    "sha256": "8f7315eef51db02eb2a104b56c2c6962688504c88263ac11c9b6965548a25194"
+  }
+}

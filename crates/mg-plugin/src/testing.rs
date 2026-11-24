@@ -225,6 +225,9 @@ struct Test {
     downloaded: Option<Vec<String>>,
     /// The haks it puts over NWSync (`above_nwsync`), all of them.
     above_nwsync: Option<Vec<String>>,
+    /// A folder (from the test file's) whose files are in the user's hak
+    /// folder before the job: haks there already, for `ctx.hak:download`.
+    hak_folder: Option<String>,
     /// The files the job writes into folders the user chose, by their
     /// names, all of them, in any order; nothing is written.
     written: Option<Vec<String>>,
@@ -927,6 +930,18 @@ impl Scratch {
     }
 }
 
+/// The files of a folder copied into the scratch hak folder.
+fn seed(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        if e.file_type()?.is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         if let Some(parent) = self.0.parent() {
@@ -1046,6 +1061,11 @@ fn run_one(
         network,
         hak_dir: Scratch::new(),
     });
+    if let Some(from) = &t.hak_folder
+        && let Err(e) = seed(&dir.join(from), &host.hak_dir.0)
+    {
+        return (vec![format!("hak_folder {from}: {e}")], Vec::new());
+    }
     let mut problems = held(plugin, t, dir, fixture, from, &host);
     if let Some(stub) = &stub {
         sent_as_wanted(t, stub, &mut problems);

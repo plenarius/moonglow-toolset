@@ -1,0 +1,83 @@
+{
+  "__data_type": "IFO ",
+  "Mod_Name": {
+    "type": "cexolocstring",
+    "value": {
+      "0": "Layonara fixture"
+    }
+  },
+  "Mod_Area_list": {
+    "type": "list",
+    "value": [
+      {
+        "__struct_id": 6,
+        "Area_Name": {
+          "type": "resref",
+          "value": "crypt"
+        }
+      }
+    ]
+  },
+  "VarTable": {
+    "type": "list",
+    "value": [
+      {
+        "__struct_id": 0,
+        "Name": {
+          "type": "cexostring",
+          "value": "LAYO_EXPORT"
+        },
+        "Type": {
+          "type": "dword",
+          "value": 3
+        },
+        "Value": {
+          "type": "cexostring",
+          "value": "ex261120_aa11"
+        }
+      },
+      {
+        "__struct_id": 0,
+        "Name": {
+          "type": "cexostring",
+          "value": "LAYO_EXPORT_REVS"
+        },
+        "Type": {
+          "type": "dword",
+          "value": 3
+        },
+        "Value": {
+          "type": "cexostring",
+          "value": "{\"crypt\": 4}"
+        }
+      },
+      {
+        "__struct_id": 0,
+        "Name": {
+          "type": "cexostring",
+          "value": "LAYO_FORGE"
+        },
+        "Type": {
+          "type": "dword",
+          "value": 3
+        },
+        "Value": {
+          "type": "cexostring",
+          "value": "{\"crypt\": {\"name\": \"fgcrypt\", \"export\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}"
+        }
+      }
+    ]
+  },
+  "Mod_HakList": {
+    "type": "list",
+    "value": [
+      {
+        "__struct_id": 8,
+        "Mod_Hak": {
+          "type": "cexostring",
+          "value": "fgcrypt"
+        }
+      }
+    ]
+  }
+}

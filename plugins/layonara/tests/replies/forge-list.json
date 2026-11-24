@@ -1,0 +1,48 @@
+{
+  "user": "alice",
+  "items": [
+    {
+      "name": "glade",
+      "area": "glade",
+      "new": true,
+      "module": "glade",
+      "exported_at": 1795000000,
+      "export": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hak": {
+        "bytes": 1120,
+        "sha256": "ef5a97735ef43136ea182f1578aef73bb622b28d4426e3b3f95d4a66047be3e8"
+      },
+      "library": {
+        "bytes": 900,
+        "sha256": "8f7315eef51db02eb2a104b56c2c6962688504c88263ac11c9b6965548a25194"
+      },
+      "base_rev": 0,
+      "review": null
+    },
+    {
+      "name": "fgcrypt",
+      "area": "crypt",
+      "new": false,
+      "module": "fgcrypt",
+      "exported_at": 1795003600,
+      "export": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "hak": {
+        "bytes": 640,
+        "sha256": "dd8e991bb1acfb89d5c792d398ad4aff64df11cbcb025989ba0fbbaeaefbbf15"
+      },
+      "library": {
+        "bytes": 900,
+        "sha256": "8f7315eef51db02eb2a104b56c2c6962688504c88263ac11c9b6965548a25194"
+      },
+      "base_rev": 4,
+      "review": {
+        "submitted": null,
+        "published": {
+          "export": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "haks_pr": "https://github.com/layonara/nwn-haks/pull/9",
+          "at": 1795004000.0
+        }
+      }
+    }
+  ]
+}
