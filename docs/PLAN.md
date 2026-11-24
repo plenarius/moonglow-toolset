@@ -3,7 +3,7 @@ type: Reference
 title: 'Moonglow Toolset: Architecture and Record of the Phases'
 description: What Moonglow Toolset reproduces of Aurora, the landscape, its principles, crate architecture and key designs, a record of the phases it was built in with the tests that hold each, the testing strategy and licensing. The plan it began as, kept as the description of what was built.
 tags: [architecture, testing, parity, phases, plan]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-19T14:00:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T17:30:00Z }
 ---
 
 # Moonglow Toolset: Architecture and Record of the Phases
@@ -438,8 +438,8 @@ script two, and the engine tests that compare a changed module with the
 original run the original once (`common::original_world`). The corpus
 tests are six binaries (`tests/groups/`), so that tests of different
 files run side by side; at most eight servers run at once
-(`mg_testkit::engine`), and GPU tests four at a time (`mg_testkit::gpu`;
-`MG_TEST_GPUS`).
+(`mg_testkit::engine`), and GPU tests one at a time (`mg_testkit::gpu`; `MG_TEST_GPUS` for
+more: four at once crashed inside the Vulkan library in about 1 run in 20).
 How this came about, with the timings before and after, is in the
 [test review](test-review.md).
 

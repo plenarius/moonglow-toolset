@@ -9,9 +9,11 @@
 //! GPU tests wait their turn. Tests that do not use the GPU run in
 //! parallel as before.
 //!
-//! One device at a time made the UI tests one long queue (each opens and
-//! draws in about a fifth of a second: 42 s of the UI tests' 42), so a few
-//! share the GPU now: `MG_TEST_GPUS` sets how many (1 for one at a time).
+//! One device at a time makes the UI tests one long queue (each opens and
+//! draws in about a fifth of a second), but it is the default: with four
+//! sharing the GPU, about 1 run in 20 of the UI tests crashed inside the
+//! Vulkan library (a SIGSEGV in lavapipe on a GPU test's thread).
+//! `MG_TEST_GPUS` sets another count (4 is faster, where the driver holds).
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -20,12 +22,12 @@ use crate::places::{Places, Taken};
 
 static GPU: Places = Places::new();
 
-/// How many tests may hold the GPU at once: `MG_TEST_GPUS`, else 4.
+/// How many tests may hold the GPU at once: `MG_TEST_GPUS`, else 1.
 pub fn places() -> usize {
     static PLACES: OnceLock<usize> = OnceLock::new();
     *PLACES.get_or_init(|| {
         let set = std::env::var("MG_TEST_GPUS").ok().and_then(|v| v.parse().ok());
-        set.filter(|&n| n > 0).unwrap_or(4)
+        set.filter(|&n| n > 0).unwrap_or(1)
     })
 }
 

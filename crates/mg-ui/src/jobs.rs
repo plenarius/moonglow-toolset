@@ -145,6 +145,12 @@ impl Moonglow {
         self.job.is_some()
     }
 
+    /// The job was called off or its question answered, and is ending (tests).
+    #[doc(hidden)]
+    pub fn job_ending(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.progress.cancelled()) || self.question_answered()
+    }
+
     /// Asks for a frame in `after` (the end of a pause timed by the clock,
     /// not by frames): where the window keeps going
     /// ([`Moonglow::background_jobs`]) then; otherwise in a second at the

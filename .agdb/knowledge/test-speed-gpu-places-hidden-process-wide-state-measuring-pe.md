@@ -17,6 +17,7 @@ asks:
 ---
 ## Decided
 - `mg_testkit::gpu::hold()` is a semaphore of 4 places (`MG_TEST_GPUS`, 1 = one at a time), after the owner said the machine is stable for batched GPU tests (2026-10-27). 8 was stable too and 3 s faster; 4 kept. The one-device lock had made the `app` binary one 42 s queue (188 GPU tests x ~0.21 s held); now ~13 s. Everyday suite 69 s -> 27 s.
+- Since 2026-11-23 the default is 1 place (`MG_TEST_GPUS` for more): with 4, about 1 mg-ui run in 20 crashed with a SIGSEGV in libvulkan (lavapipe) on a GPU test's thread; 10 runs with 1 had none.
 - `mg_testkit::places::Places` is the one counting semaphore (GPU, `engine` servers 8 at once, `engine::timed_turn()` 3 at once for tests that start nwserver through `mg serve`/`mg test`/`mg watch` and wait by the clock; was `one_at_a_time`, a mutex).
 - A test that changes process-wide render state (`mg_render::guard::fail_on`) calls `gpu::alone()` (takes every place; new takers wait behind it; it gives back what it held before waiting, so two alone-callers don't deadlock).
 - `engine_tileset_holes`' LF test waits 3x the CRLF run (min 20 s) instead of 60 s: the corpus `engine` group 66 s -> 25 s.

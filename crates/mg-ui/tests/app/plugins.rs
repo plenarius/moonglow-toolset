@@ -2797,3 +2797,13 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     assert_eq!(got(&h), 2);
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
 }
+
+/// A test's window keeps sign-ins in memory, never in the system's keychain.
+#[test]
+fn a_test_s_window_keeps_sign_ins_in_memory() {
+    let mut app = app_with(Vec::new());
+    assert!(!app.plugin_network().sign_ins.in_system_keychain());
+    let mut app = app_with(Vec::new());
+    app.plugins.system_keychain = true;
+    assert!(app.plugin_network().sign_ins.in_system_keychain());
+}
