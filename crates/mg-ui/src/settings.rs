@@ -144,6 +144,52 @@ pub enum OpenEditors {
     Floating,
 }
 
+/// How high the Module panel's Areas group is ([`Settings::areas_height`]):
+/// its rows in a well that scrolls by itself, fitted so that the groups
+/// under it stay in sight or as high as its foot was dragged to, or opened
+/// out in the tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum AreasHeight {
+    /// As high as leaves every other group's row in sight under it.
+    #[default]
+    Fit,
+    /// This many rows high (at least the well's least, five).
+    Rows(u16),
+    /// No well: the areas laid out in the tree, which alone scrolls.
+    Open,
+}
+
+impl AreasHeight {
+    /// Whether it is the default, [`AreasHeight::Fit`] (not written).
+    pub fn is_fit(&self) -> bool {
+        *self == AreasHeight::Fit
+    }
+}
+
+/// Read as the [`Named`] settings are: a name this version doesn't know
+/// (without a value) is the default, [`AreasHeight::Fit`].
+impl<'de> Deserialize<'de> for AreasHeight {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<AreasHeight, D::Error> {
+        use serde::de::{EnumAccess, VariantAccess};
+        struct Of;
+        impl<'de> serde::de::Visitor<'de> for Of {
+            type Value = AreasHeight;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an AreasHeight")
+            }
+            fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<AreasHeight, A::Error> {
+                let (Name(name), variant) = data.variant()?;
+                match name.as_str() {
+                    "Rows" => Ok(AreasHeight::Rows(variant.newtype_variant()?)),
+                    "Open" => variant.unit_variant().map(|()| AreasHeight::Open),
+                    _ => variant.unit_variant().map(|()| AreasHeight::Fit),
+                }
+            }
+        }
+        d.deserialize_enum("AreasHeight", &[], Of)
+    }
+}
+
 /// What File › Export… does with an archive that is there already
 /// (Options › General): asks, appends to it or overwrites it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -552,6 +598,16 @@ pub struct DockLayout {
     /// [`Settings::right_dock_width_wide`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wide_width: Option<u16>,
+    /// The width of the right pane of the kind's editor in a window of its
+    /// own, as the builder dragged its edge (none: 280), and the height of
+    /// its bottom pane (none: 140): each new window of the kind opens with
+    /// them (5.2.0, Jasperre's report of a floating script's Reference and
+    /// Help, their sizes not kept; kept for every kind of window by the
+    /// owner's ruling of 2026-11-25).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_width: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_bottom: Option<u16>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -954,6 +1010,14 @@ pub struct Settings {
     /// so files stay as they were.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layers_panel_height: Option<u32>,
+    /// How high the Module panel's Areas group is (`tree::areas_well`):
+    /// fitted, in a well of its own that leaves every other group's row in
+    /// sight (the default); a height in rows its foot was dragged to; or
+    /// opened out in the tree, as before 5.1, the tree alone scrolling
+    /// (builders' request of 2026-11-24). Per installation, not per
+    /// module. Written only once chosen, so files stay as they were.
+    #[serde(skip_serializing_if = "AreasHeight::is_fit")]
+    pub areas_height: AreasHeight,
     /// The height of the Left Dock's panel over the Outliner beside a
     /// tileset, its parts (M4's U20: a seam of its own, as the Layers').
     /// `None`: not chosen, the Tileset board's (394). Written only once
@@ -1064,8 +1128,19 @@ pub struct Settings {
     /// "Show Creatures"). A builder's ask: a header of what is used.
     pub hidden_area_tools: Vec<String>,
     /// Options > General: Interface size, per cent of the usual (`None`:
-    /// 100): the whole interface, text and all, larger.
+    /// 100): the whole interface, text and all, larger. View › Interface
+    /// Size and its keys set it too.
     pub ui_scale: Option<u16>,
+    /// Options > General: Smooth scrolling unticked: a mouse wheel's notch
+    /// and a jump to a line or a row land at once, not eased over a few
+    /// frames (`mg_uikit::scrolling`). Named for the change, so that a file
+    /// without it (all before 5.2.0) scrolls smoothly, as it did.
+    pub no_smooth_scrolling: bool,
+    /// Options > General: Colored icons: each object kind's icon in a hue
+    /// of its own in the module tree, the Outliner and the palette
+    /// (`mg_uikit::hues`); off, all in one gray, as the redesign drew them
+    /// (5.2.0, a builder's ask).
+    pub colored_icons: bool,
     /// Options > General: Show areas by name: the module tree lists areas
     /// (and their tabs are titled) by their names rather than their
     /// ResRefs.
@@ -1121,6 +1196,12 @@ pub struct Settings {
     /// Options › Script Editor: Check for errors as you type, off (on by
     /// default).
     pub no_live_check: bool,
+    /// Options › Script Editor: Show declarations in tips unticked: no tip
+    /// over a function's or constant's name under the pointer or reached
+    /// by the arrow keys (5.2.0, on by default: Jasperre's ask for more
+    /// of a name's context as you write). Named for the change, so that an
+    /// older file shows them.
+    pub no_symbol_tips: bool,
     /// Options > Script Editor: Generate Debug Information When Compiling
     /// Scripts (`.ndb` next to the `.ncs`).
     pub debug_info: bool,
@@ -1738,9 +1819,9 @@ mod tests {
         assert_eq!(new, Settings::default());
     }
 
-    /// Tile Properties' window of before its panel (M4's U5): its place
-    /// and size, from an older file's text, read without error and
-    /// dropped, the others kept; run again, nothing more.
+    /// Legacy Tile Properties window placement and size: read from an older
+    /// file without error and dropped, leaving the other entries intact.
+    /// Idempotent when run again.
     #[test]
     fn shell_migrate_drops_tile_properties_window_once() {
         let old = r#"(window_places:[("tile-properties","split right 316"),("script","middle")],window_sizes:[("tile-properties",(560,640)),("dialog",(900,680))])"#;
@@ -1753,11 +1834,9 @@ mod tests {
         assert_eq!(read, once, "run again: nothing more");
     }
 
-    /// The palettes' settings of before the Right Dock (M3 T5): their own
-    /// place and size, and every kind kept in their pane (place
-    /// `palettes`), dropped; other places and sizes, and the palettes
-    /// folded (`hide_palettes`, now the Right Dock folded), kept. Run
-    /// again, nothing more; a file of today's is left as it is.
+    /// Legacy palette places before the Right Dock: drops legacy `"palette"`
+    /// entries and `"palettes"` dock places while keeping other places,
+    /// sizes, and `hide_palettes`. Idempotent when run again.
     #[test]
     fn shell_migrate_drops_the_palettes_places_once() {
         let mut s = Settings {
@@ -1839,6 +1918,43 @@ mod tests {
         let on = Settings { tile_border: true, ..Settings::default() };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert!(back.tile_border);
+    }
+
+    /// Smooth scrolling: on by default and for settings saved before it
+    /// was an option (5.2.0); off, kept, in RON and JSON. And the
+    /// interface sizes 250% and 300% (5.2.0) are kept as chosen.
+    #[test]
+    fn smooth_scrolling_is_on_by_default_and_off_is_kept() {
+        assert!(!Settings::default().no_smooth_scrolling);
+        let old: Settings = ron::from_str("(light_theme:true,ui_scale:Some(150))").unwrap();
+        assert!(!old.no_smooth_scrolling && old.light_theme, "an older file scrolls smoothly");
+        let old: Settings = serde_json::from_str(r#"{"no_grass":true}"#).unwrap();
+        assert!(!old.no_smooth_scrolling);
+        for scale in [250, 300] {
+            let s =
+                Settings { no_smooth_scrolling: true, ui_scale: Some(scale), ..Default::default() };
+            let text = s.saved_text();
+            assert_eq!(ron::from_str::<Settings>(&text).unwrap(), s, "{text}");
+            assert_eq!(Settings::read_fields(&text).unwrap(), (s.clone(), Vec::new()));
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+        }
+    }
+
+    /// Colored icons: off by default and for settings saved before it was
+    /// an option (5.2.0); on, kept, in RON and JSON.
+    #[test]
+    fn colored_icons_are_off_by_default_and_on_is_kept() {
+        assert!(!Settings::default().colored_icons);
+        let old: Settings = ron::from_str("(light_theme:true,ui_scale:Some(150))").unwrap();
+        assert!(!old.colored_icons && old.light_theme, "an older file's icons are gray");
+        let s = Settings { colored_icons: true, light_theme: true, ..Default::default() };
+        let text = s.saved_text();
+        assert!(text.contains("colored_icons:true"), "{text}");
+        assert_eq!(ron::from_str::<Settings>(&text).unwrap(), s, "{text}");
+        assert_eq!(Settings::read_fields(&text).unwrap(), (s.clone(), Vec::new()));
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
     }
 
     /// The largest textures are as they are unless a limit is chosen, and
@@ -2314,6 +2430,8 @@ mod tests {
             column: Some(420),
             folded: Some("Help".into()),
             wide_width: Some(600),
+            window_width: Some(360),
+            window_bottom: Some(220),
         };
         kept.dock_layouts.insert("script".into(), script);
         // (A newer one's kind, and a panel this version has no name for.)
@@ -2704,9 +2822,11 @@ mod tests {
             let retired = ["toolbar_icons_only", "test_without_steam"];
             let kept: Vec<_> =
                 old.into_iter().filter(|(n, _)| !retired.contains(&n.as_str())).collect();
-            // (Four fields came after the file, two from develop's
-            // Builders' asks, M5's W1's and the fork's bundled plugins:
-            // written at their defaults, the rest as it was.)
+            // (Seven fields came after the file, two from develop's
+            // Builders' asks, M5's W1's, 5.2.0's W6's Smooth scrolling,
+            // W7's Colored icons, W5's Show declarations in tips and the
+            // fork's bundled plugins: written at their defaults, the rest
+            // as it was.)
             let (added, written): (Vec<_>, Vec<_>) = fields_of(&back)
                 .expect("fields")
                 .into_iter()
@@ -2716,6 +2836,9 @@ mod tests {
                 ("tree_tags", "false"),
                 ("tree_extensions", "false"),
                 ("appearance_portrait", "false"),
+                ("no_smooth_scrolling", "false"),
+                ("colored_icons", "false"),
+                ("no_symbol_tips", "false"),
             ]
             .map(|(n, v)| (n.to_string(), v.to_string()));
             assert_eq!(added, defaults, "only the fields added since, at their defaults");
@@ -2778,6 +2901,46 @@ mod tests {
             vec![vec![vec![AreaRightPanel::Palette, AreaRightPanel::Preview]]]
         );
         assert_eq!(AreaRightLayout::default().normalized(), AreaRightLayout::two_columns());
+    }
+
+    /// The Areas group's height: not written while fitted (files stay as
+    /// they were), each other value written and read back (RON and JSON),
+    /// a name a newer version wrote read as fitted with the rest kept, and
+    /// merged with another window's as the docks' sizes are.
+    #[test]
+    fn areas_height_omits_fit_reads_back_and_merges() {
+        let started = Settings::default();
+        assert!(!started.saved_text().contains("areas_height"), "{}", started.saved_text());
+        for height in [AreasHeight::Rows(23), AreasHeight::Open] {
+            let s = Settings { areas_height: height, ..Default::default() };
+            let text = s.saved_text();
+            assert!(text.contains("areas_height:"), "{text}");
+            assert_eq!(Settings::read_fields(&text).unwrap(), (s.clone(), Vec::new()));
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+        }
+        let newer = Settings { light_theme: true, ..Default::default() }.saved_text().replacen(
+            '(',
+            "(areas_height:Halfway,",
+            1,
+        );
+        let (read, unread) = Settings::read_fields(&newer).unwrap();
+        assert!(read.light_theme && read.areas_height == AreasHeight::Fit, "{newer}");
+        assert!(unread.is_empty(), "{unread:?}");
+        // Another untouched window takes theirs; their Fit (not written)
+        // is kept over this window's unchanged height; this window's own
+        // wins.
+        let theirs = Settings { areas_height: AreasHeight::Rows(9), ..started.clone() };
+        let merged: Settings =
+            ron::from_str(&started.saved_over(&started, &theirs.saved_text())).unwrap();
+        assert_eq!(merged.areas_height, AreasHeight::Rows(9));
+        let merged: Settings =
+            ron::from_str(&theirs.saved_over(&theirs, &started.saved_text())).unwrap();
+        assert_eq!(merged.areas_height, AreasHeight::Fit);
+        let mine = Settings { areas_height: AreasHeight::Open, ..started.clone() };
+        let merged: Settings =
+            ron::from_str(&mine.saved_over(&started, &theirs.saved_text())).unwrap();
+        assert_eq!(merged.areas_height, AreasHeight::Open);
     }
 
     #[test]

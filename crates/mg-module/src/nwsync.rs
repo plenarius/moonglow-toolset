@@ -211,11 +211,20 @@ pub fn write_until(
     let mut entries = Vec::with_capacity(wanted.len());
     let (mut bytes, mut on_disk, mut new_files) = (0u64, 0u64, 0usize);
     let mut done: HashSet<[u8; 20]> = HashSet::new();
+    let mut ifo_uuid: Option<String> = None;
     for (i, (key, source)) in wanted.iter().enumerate() {
         if stop() {
             return Err(CANCELED.into());
         }
         let data = source.read(key)?;
+        if o.with_module && o.uuid.is_none() && ifo_uuid.is_none() && *key == Module::info_key() {
+            ifo_uuid = mg_gff::Gff::read(&data)
+                .ok()
+                .and_then(|g| {
+                    g.root.string("Mod_UUID").map(|b| String::from_utf8_lossy(b).into_owned())
+                })
+                .filter(|s| !s.is_empty());
+        }
         if let Some(limit) = o.limit
             && data.len() as u64 > limit
         {
@@ -270,7 +279,8 @@ pub fn write_until(
         json["group_id"] = o.group_id.into();
     }
     if o.with_module {
-        json["uuid"] = o.uuid.clone().into();
+        let uuid = o.uuid.clone().or(ifo_uuid).unwrap_or_else(new_uuid);
+        json["uuid"] = uuid.into();
     }
     if !o.dry_run {
         let manifests = root.join("manifests");
@@ -563,13 +573,26 @@ pub fn upload_parts(root: &Path, parts: &[Part]) -> Result<Vec<Part>, String> {
 /// on Windows) where it needs to be: one with a space in it, say.
 pub fn shell_quoted(path: &Path) -> String {
     let text = path.display().to_string();
-    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:+,@=".contains(c);
+    shell_quoted_for(&text, cfg!(windows))
+}
+
+fn shell_quoted_for(text: &str, windows: bool) -> String {
+    let plain =
+        |c: char| c.is_ascii_alphanumeric() || "/._-:+,@=".contains(c) || (windows && c == '\\');
     if !text.is_empty() && text.chars().all(plain) {
-        return text;
+        return text.to_string();
     }
-    if cfg!(windows) {
-        // (Windows' paths have no `"`.)
-        format!("\"{text}\"")
+    if windows {
+        // (Windows' paths have no `"`. A caret is no escape inside cmd's
+        // quotes, so a `%` is put between quoted parts as `^%`, where cmd
+        // takes the caret away and `%"…"^%` names no variable; and the
+        // backslashes ending a part are doubled before its `"`, as the
+        // program reading its arguments wants.)
+        let quoted = |part: &str| {
+            let tail = part.len() - part.trim_end_matches('\\').len();
+            format!("\"{part}{}\"", "\\".repeat(tail))
+        };
+        text.split('%').map(quoted).collect::<Vec<_>>().join("^%")
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
@@ -580,7 +603,12 @@ pub fn shell_quoted(path: &Path) -> String {
 /// to be), `{part}` the part's name (`data`, `manifests`, `latest`). It
 /// runs in the repository's folder, so `{part}` alone names it.
 pub fn upload_command(template: &str, root: &Path, part: Part) -> String {
-    template.replace("{folder}", &shell_quoted(root)).replace("{part}", part.name())
+    upload_command_for(template, &root.display().to_string(), part, cfg!(windows))
+}
+
+/// [`upload_command`] for the shell of Windows (`cmd`) or the others.
+fn upload_command_for(template: &str, root: &str, part: Part, windows: bool) -> String {
+    template.replace("{folder}", &shell_quoted_for(root, windows)).replace("{part}", part.name())
 }
 
 #[cfg(test)]
@@ -767,5 +795,63 @@ mod tests {
             format!("rsync -a {quoted}/latest h:/x/ # latest")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_until_fills_module_uuid_and_shell_quoting_handles_escapes() {
+        let dir = mg_testkit::scratch_dir("mg-nwsync-uuid-quote");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = Module::new();
+        let mut ifo = mg_gff::Gff::new(*b"IFO ");
+        ifo.root.set(
+            "Mod_UUID",
+            mg_gff::Value::String(b"11111111-2222-4333-8444-555555555555".to_vec()),
+        );
+        m.set_info(&ifo).unwrap();
+        let install = GameInstall::new(dir.join("game"), None, "en");
+        let (contents, _) = module_contents(&m, &install, &ResMan::new(), true, None).unwrap();
+        // `module_contents` wrote a fresh UUID into `module.ifo`; `write_until`
+        // must reuse that exact UUID even when `o.uuid` is `None`.
+        let ifo_bytes = contents
+            .iter()
+            .find_map(|(k, s)| (*k == Module::info_key()).then(|| s.read(k).unwrap()))
+            .unwrap();
+        let expected_uuid = String::from_utf8(
+            mg_gff::Gff::read(&ifo_bytes).unwrap().root.string("Mod_UUID").unwrap().to_vec(),
+        )
+        .unwrap();
+        let o = Options { with_module: true, uuid: None, ..Default::default() };
+        let written = write(&dir, &contents, &o, &mut |_, _| {}).unwrap();
+        let meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join("manifests").join(format!("{}.json", written.sha1))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["uuid"], expected_uuid);
+
+        // `with_module` without an IFO still produces a non-null v4 UUID.
+        let bare = vec![(key("a", ResType::TXT), Source::Bytes(Arc::from(&b"one"[..])))];
+        let dir2 = dir.join("bare");
+        let w2 = write(&dir2, &bare, &o, &mut |_, _| {}).unwrap();
+        let meta2: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir2.join("manifests").join(format!("{}.json", w2.sha1))).unwrap(),
+        )
+        .unwrap();
+        assert!(meta2["uuid"].as_str().is_some_and(|s| s.len() == 36));
+
+        // Shell quoting on Unix and Windows.
+        assert_eq!(shell_quoted_for("a\\b", false), "'a\\b'");
+        assert_eq!(shell_quoted_for("C:\\a b\\c", true), "\"C:\\a b\\c\"");
+        assert_eq!(shell_quoted_for("C:\\a b\\", true), "\"C:\\a b\\\\\"");
+        // A `%` outside the quotes, escaped, which cmd reads as the path:
+        // `"C:\100"^%" done\\"` is `C:\100% done\` (inside quotes a
+        // caret is kept, and the path was `C:\100^% done\`).
+        assert_eq!(shell_quoted_for("%TEMP%\\out", true), "\"\"^%\"TEMP\"^%\"\\out\"");
+        assert_eq!(shell_quoted_for("C:\\100% done\\", true), "\"C:\\100\"^%\" done\\\\\"");
+        assert_eq!(shell_quoted_for("C:\\a\\%b", true), "\"C:\\a\\\\\"^%\"b\"");
+        assert_eq!(
+            upload_command_for("copy {folder}\\{part} D:\\x", "C:\\100% done", Part::Data, true),
+            "copy \"C:\\100\"^%\" done\"\\data D:\\x"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

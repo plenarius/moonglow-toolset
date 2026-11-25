@@ -13,13 +13,16 @@ use crate::common::*;
 /// Chapter1 open in a window `width` by `height`, its tree as it opens
 /// (`None` without the game).
 fn chapter1(width: f32, height: f32) -> Option<Harness<'static, Moonglow>> {
+    static CH1: mg_testkit::Shared<std::path::PathBuf, Module> = mg_testkit::Shared::new();
     let Some(root) = mg_testkit::nwn_root() else {
         eprintln!("skipped: no game install");
         return None;
     };
     let mut app = game_app(&root, None);
     app.settings.no_last_area = true;
-    app.open_module(&root.join("data/nwm/Chapter1.nwm"));
+    let m = CH1.get(&root, || Module::open(&root.join("data/nwm/Chapter1.nwm")).unwrap());
+    app.use_module(m);
+    app.log.info("Opened Chapter1.nwm");
     let mut h = harness(app, width, height);
     settle(&mut h);
     // (The builder unfolds the Left Dock where the width folds it: M3 T14.)
@@ -28,7 +31,7 @@ fn chapter1(width: f32, height: f32) -> Option<Harness<'static, Moonglow>> {
 }
 
 /// The module's areas in the tree's order (by ResRef).
-fn areas(h: &Harness<'_, Moonglow>) -> Vec<ResRef> {
+pub(crate) fn areas(h: &Harness<'_, Moonglow>) -> Vec<ResRef> {
     areas_of(h.state())
 }
 
@@ -42,7 +45,7 @@ fn areas_of(app: &Moonglow) -> Vec<ResRef> {
 
 /// The row of the tree's group `name` ("Conversations"), whatever its
 /// count.
-fn group<'t>(h: &'t Harness<'_, Moonglow>, name: &str) -> egui_kittest::Node<'t> {
+pub(crate) fn group<'t>(h: &'t Harness<'_, Moonglow>, name: &str) -> egui_kittest::Node<'t> {
     let prefix = format!("{name} (");
     let tree = h.get_by_label("Module Tree Rows");
     let found =
@@ -51,10 +54,10 @@ fn group<'t>(h: &'t Harness<'_, Moonglow>, name: &str) -> egui_kittest::Node<'t>
 }
 
 /// The groups under Areas, by name.
-const BELOW: [&str; 13] = [
+pub(crate) const BELOW: [&str; 13] = [
     "Conversations",
     "Scripts",
-    "NUI windows",
+    "NUI Windows",
     "Creatures",
     "Doors",
     "Encounters",
@@ -64,28 +67,28 @@ const BELOW: [&str; 13] = [
     "Stores",
     "Triggers",
     "Waypoints",
-    "Journal and factions",
+    "Journal and Factions",
 ];
 
 /// Where each group's row is.
-fn groups_at(h: &Harness<'_, Moonglow>) -> Vec<egui::Rect> {
+pub(crate) fn groups_at(h: &Harness<'_, Moonglow>) -> Vec<egui::Rect> {
     BELOW.iter().map(|g| group(h, g).rect()).collect()
 }
 
 /// The well's bounds: under the Areas group's row, over the next group's.
-fn well(h: &Harness<'_, Moonglow>) -> std::ops::RangeInclusive<f32> {
+pub(crate) fn well(h: &Harness<'_, Moonglow>) -> std::ops::RangeInclusive<f32> {
     group(h, "Areas").rect().bottom()..=group(h, "Conversations").rect().top()
 }
 
 /// Whether the row `label` of the tree is laid out wholly inside the well.
-fn in_well(h: &Harness<'_, Moonglow>, label: &str) -> bool {
+pub(crate) fn in_well(h: &Harness<'_, Moonglow>, label: &str) -> bool {
     let Some(row) = h.get_by_label("Module Tree Rows").query_by_label(label) else { return false };
     let (r, w) = (row.rect(), well(h));
     w.contains(&(r.top() + 0.5)) && w.contains(&(r.bottom() - 0.5))
 }
 
 /// Wheels `dy` points over `at`, a frame or two each.
-fn wheel(h: &mut Harness<'_, Moonglow>, at: egui::Pos2, dy: f32, times: usize) {
+pub(crate) fn wheel(h: &mut Harness<'_, Moonglow>, at: egui::Pos2, dy: f32, times: usize) {
     h.hover_at(at);
     for _ in 0..times {
         h.event(egui::Event::MouseWheel {
@@ -180,7 +183,7 @@ fn drawn_shapes_text(h: &Harness<'_, Moonglow>) -> Vec<(String, egui::Rect)> {
 fn the_module_panel_s_header_buttons_act_on_the_tree_with_tips() {
     // (With the game and an area: the palette and its own Expand All and
     // Collapse All.)
-    let Some((mut h, _)) = area_harness("module-panel-header") else { return };
+    let Some((mut h, _)) = area_ui_harness("module-panel-header") else { return };
     // (A window wide enough that no width folds a dock: the test reads the
     // docks as the builder left them, M3 T14.)
     wide_window(&mut h);
@@ -563,7 +566,7 @@ fn an_object_selected_in_an_area_brings_its_row_into_the_well_s_view() {
 
 /// A module of `n` areas (empty AREs, `area_000`...) and 40 scripts, in
 /// a scratch folder named `name`.
-fn n_areas(name: &str, n: usize) -> std::path::PathBuf {
+pub(crate) fn n_areas(name: &str, n: usize) -> std::path::PathBuf {
     let dir = mg_testkit::scratch_dir(name);
     let mut m = Module::new();
     let mut info = Gff::new(*b"IFO ");
@@ -598,12 +601,12 @@ fn small(name: &str, n: usize, width: f32, height: f32) -> Harness<'static, Moon
 }
 
 /// The foot of the tree's view (the Status Bar's top).
-fn view_bottom(h: &Harness<'_, Moonglow>) -> f32 {
+pub(crate) fn view_bottom(h: &Harness<'_, Moonglow>) -> f32 {
     h.ctx.content_rect().bottom() - mg_uikit::metrics::STATUS_BAR
 }
 
 /// How many rows high the well is.
-fn well_rows(h: &Harness<'_, Moonglow>) -> f32 {
+pub(crate) fn well_rows(h: &Harness<'_, Moonglow>) -> f32 {
     let w = well(h);
     (w.end() - w.start()) / mg_uikit::metrics::ROW_HEIGHT
 }
@@ -775,7 +778,7 @@ fn home_and_end_go_to_the_well_s_ends_over_it_and_the_tree_s_elsewhere() {
         key(&mut h, egui::pos2(x, y), egui::Key::End);
         let at = group(&h, "Scripts").rect().top();
         assert!(at < scripts.top() - 1000.0, "at the tree's end (y {y}): Scripts at {at}");
-        let last = group(&h, "Journal and factions").rect();
+        let last = group(&h, "Journal and Factions").rect();
         assert!(last.bottom() <= view_bottom(&h) + 0.5, "the last group in sight: {last:?}");
         key(&mut h, egui::pos2(x, y), egui::Key::Home);
         assert_eq!(group(&h, "Scripts").rect(), scripts, "back at the tree's top (y {y})");
@@ -868,11 +871,11 @@ fn every_group_is_reached_in_the_least_window() {
         let (r, v) = (group(h, name).rect(), view(h));
         v.contains(&(r.top() + 0.5)) && v.contains(&(r.bottom() - 0.5))
     };
-    assert!(!in_sight(&h, "Journal and factions"), "out of sight at first");
+    assert!(!in_sight(&h, "Journal and Factions"), "out of sight at first");
     // Wheeled over Conversations' row: down to the last group.
     let at = group(&h, "Conversations").rect().center();
     wheel(&mut h, at, -100.0, 10);
-    assert!(in_sight(&h, "Journal and factions"), "wheeled to");
+    assert!(in_sight(&h, "Journal and Factions"), "wheeled to");
     wheel(&mut h, at, 100.0, 10);
     // By the keys (given to the tree by a click on Areas' row, twice:
     // closed and opened again), Home, then Down to every group.
@@ -895,7 +898,7 @@ fn every_group_is_reached_in_the_least_window() {
             assert!(in_sight(&h, name), "{name} in sight as the keys come to it");
             seen.push(name);
         }
-        if seen.last() == Some(&"Journal and factions") {
+        if seen.last() == Some(&"Journal and Factions") {
             break;
         }
     }
@@ -1326,7 +1329,7 @@ fn the_keys_go_on_past_resources_deleted() {
     assert_eq!(h.state().tree_cursor, Some(TreeAt::Resource(script(4))), "the keys the tree's");
     // The last of the group: the one before it, in sight.
     // (The keys to it: past it, and Up.)
-    h.state_mut().tree_cursor = Some(TreeAt::Group("NUI windows"));
+    h.state_mut().tree_cursor = Some(TreeAt::Group("NUI Windows"));
     key(&mut h, egui::Key::ArrowUp);
     assert_eq!(h.state().tree_cursor, Some(TreeAt::Resource(script(39))));
     delete(&mut h, &[script(39)]);

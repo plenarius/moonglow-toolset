@@ -8,6 +8,7 @@
 
 // (It runs the packaging script with python3: where the packages are
 // made, and not on Windows's CI.)
+mod common;
 mod gallery;
 mod header;
 mod header_area;
@@ -21,5 +22,6 @@ mod shell;
 mod theme;
 mod tokens;
 mod tree;
+mod wave_looks;
 mod widgets;
 mod window;

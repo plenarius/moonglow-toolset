@@ -38,12 +38,50 @@ fn written_like(table: &TwoDa, like: &Path, cp: Codepage) -> Result<Vec<u8>> {
     Ok(table.to_bytes_like(cp, &file)?)
 }
 
-fn shown(cell: &Option<String>) -> String {
+pub(crate) fn shown_cell(cell: Option<&str>) -> String {
     match cell {
         None => "****".into(),
-        Some(v) if v.is_empty() || v.contains(' ') => format!("\"{v}\""),
-        Some(v) => v.clone(),
+        Some(v) if v.is_empty() || v.contains([' ', '\t']) => format!("\"{v}\""),
+        Some(v) => v.to_string(),
     }
+}
+
+pub(crate) fn truncate_ellipsis(s: String, max_chars: usize) -> String {
+    match s.chars().count() > max_chars {
+        true => s.chars().take(max_chars.saturating_sub(1)).chain(['…']).collect(),
+        false => s,
+    }
+}
+
+fn parse_ab_prefer<T>(prefer: Option<&str>, a: T, b: T) -> Result<T> {
+    match prefer {
+        None | Some("a") => Ok(a),
+        Some("b") => Ok(b),
+        Some(other) => bail!("--prefer a or b, not {other}"),
+    }
+}
+
+pub(crate) fn mark_unsettled(
+    out: &mut Output,
+    conflicts: usize,
+    prefer_given: bool,
+    set_written_null: bool,
+    note: impl FnOnce() -> String,
+) -> bool {
+    let unsettled = conflicts > 0 && !prefer_given;
+    out.json["merged"] = json!(!unsettled);
+    if unsettled {
+        out.failed = true;
+        if set_written_null {
+            out.json["written"] = json!(null);
+        }
+        out.note(note());
+    }
+    unsettled
+}
+
+fn shown(cell: &Option<String>) -> String {
+    shown_cell(cell.as_deref())
 }
 
 /// A row as people know it: its number and its label, if the table has
@@ -139,11 +177,7 @@ pub(crate) fn twoda(args: &Args<'_>, cp: Codepage) -> Result<Output> {
         return Ok(out);
     };
     let base = table(base, cp)?;
-    let prefer = match args.prefer {
-        None | Some("a") => Prefer::Ours,
-        Some("b") => Prefer::Theirs,
-        Some(other) => bail!("--prefer a or b, not {other}"),
-    };
+    let prefer = parse_ab_prefer(args.prefer, Prefer::Ours, Prefer::Theirs)?;
     let merged = merge_tables(&base, &a, &b, prefer);
     let (ours, theirs) = (diff_tables(&base, &a), diff_tables(&base, &b));
     let mut out = Output::new(json!({
@@ -164,15 +198,13 @@ pub(crate) fn twoda(args: &Args<'_>, cp: Codepage) -> Result<Output> {
             shown(&c.theirs)
         ));
     }
-    let unsettled = !merged.conflicts.is_empty() && args.prefer.is_none();
-    out.json["merged"] = json!(!unsettled);
-    if unsettled {
-        out.failed = true;
-        out.note(format!(
+    if mark_unsettled(&mut out, merged.conflicts.len(), args.prefer.is_some(), false, || {
+        format!(
             "{} cells were changed by both, each to something else: nothing written (--prefer \
              a or b takes one side's)",
             merged.conflicts.len()
-        ));
+        )
+    }) {
         return Ok(out);
     }
     if let Some(file) = args.output {
@@ -213,11 +245,7 @@ fn line_shown(e: &Option<mg_tlk::TlkEntry>, cp: Codepage) -> String {
     match e {
         None => "(none)".into(),
         Some(e) => {
-            let text = cp.decode(&e.text).replace('\n', "\\n");
-            let text: String = match text.chars().count() > 70 {
-                true => text.chars().take(69).chain(['…']).collect(),
-                false => text,
-            };
+            let text = truncate_ellipsis(cp.decode(&e.text).replace('\n', "\\n"), 70);
             match e.sound_resref() {
                 Some(sound) => format!("\"{text}\" [{sound}]"),
                 None => format!("\"{text}\""),
@@ -280,11 +308,7 @@ pub(crate) fn tlk(args: &Args<'_>, cp: Codepage) -> Result<Output> {
         return Ok(out);
     };
     let base = talk(base)?;
-    let prefer_theirs = match args.prefer {
-        None | Some("a") => false,
-        Some("b") => true,
-        Some(other) => bail!("--prefer a or b, not {other}"),
-    };
+    let prefer_theirs = parse_ab_prefer(args.prefer, false, true)?;
     let (merged, conflicts) = mg_tlk::diff::merge(&base, &a, &b, prefer_theirs);
     let (ours, theirs) = (mg_tlk::diff::diff(&base, &a), mg_tlk::diff::diff(&base, &b));
     let mut out = Output::new(json!({
@@ -305,15 +329,13 @@ pub(crate) fn tlk(args: &Args<'_>, cp: Codepage) -> Result<Output> {
             line_shown(&c.theirs, cp)
         ));
     }
-    let unsettled = !conflicts.is_empty() && args.prefer.is_none();
-    out.json["merged"] = json!(!unsettled);
-    if unsettled {
-        out.failed = true;
-        out.note(format!(
+    if mark_unsettled(&mut out, conflicts.len(), args.prefer.is_some(), false, || {
+        format!(
             "{} lines were changed by both, each to something else: nothing written (--prefer a \
              or b takes one side's)",
             conflicts.len()
-        ));
+        )
+    }) {
         return Ok(out);
     }
     if let Some(file) = args.output {
@@ -499,4 +521,21 @@ pub(crate) fn check(
     out.json = json!({ "tables": tables, "wrong": wrong, "unread": unread });
     out.failed = wrong > 0 || unread > 0;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_cell;
+
+    /// How a cell is shown in the text of a diff: a missing one as `****`,
+    /// and one that is empty or holds a space or a tab (which would read as
+    /// two cells) in quotes.
+    #[test]
+    fn a_cell_is_quoted_where_it_would_read_as_two() {
+        assert_eq!(shown_cell(None), "****");
+        assert_eq!(shown_cell(Some("")), "\"\"");
+        assert_eq!(shown_cell(Some("a b")), "\"a b\"");
+        assert_eq!(shown_cell(Some("a\tb")), "\"a\tb\"");
+        assert_eq!(shown_cell(Some("plain")), "plain");
+    }
 }

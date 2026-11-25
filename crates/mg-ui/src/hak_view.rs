@@ -1156,14 +1156,7 @@ fn header(ui: &mut Ui, d: &mut HakDoc, in_game: bool) -> HeaderAsked {
         true => "Save: a hak of the game is saved with Save As…",
         false => "Save: write the hak to its file",
     };
-    let tips = crate::side_doc::OK_CANCEL_TIPS;
-    let buttons = [
-        mg_uikit::KitButton::new(None, "OK").tip(tips[0]),
-        mg_uikit::KitButton::new(None, "Cancel").tip(tips[1]),
-    ];
-    let gap = mg_uikit::header::HEADER_GAP;
-    let end_width = buttons.iter().map(|b| b.width(ui)).sum::<f32>() + gap;
-    let out = EditorHeader::new(HAK_HEADER)
+    let header = EditorHeader::new(HAK_HEADER)
         .left(Item::icon(Icon::Import, ADD_FILES).tip("Add Files…: add files to the hak"))
         .left(
             Item::icon(Icon::FolderOpen, ADD_FOLDER)
@@ -1241,21 +1234,9 @@ fn header(ui: &mut Ui, d: &mut HakDoc, in_game: bool) -> HeaderAsked {
                 .in_more()
                 .enabled(table)
                 .tip("Edit the selected 2DA in the 2DA editor. The hak's Save writes it."),
-        )
-        .show_with_end(ui, end_width, |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            let mut pressed = None;
-            for b in buttons {
-                let words = b.accessible_name().to_string();
-                if ui.add(b).clicked() {
-                    pressed = Some(match words.as_str() {
-                        "Cancel" => crate::blueprint::Pressed::Cancel,
-                        _ => crate::blueprint::Pressed::Ok,
-                    });
-                }
-            }
-            pressed
-        });
+        );
+    let out =
+        crate::widgets::header_with_ok_cancel(ui, header, None, crate::side_doc::OK_CANCEL_TIPS);
     d.filter = filter.into_inner();
     HeaderAsked {
         add_files: out.clicked(ADD_FILES),
@@ -1343,32 +1324,69 @@ fn columns(left: f32, width: f32) -> [std::ops::RangeInclusive<f32>; 4] {
     })
 }
 
+/// The paths cut by [`cut_start`] for one font, scale and width: kept
+/// while those stay. (By the font's size and the width rounded alone,
+/// another font, interface size or a width half a point narrower kept the
+/// cuts made for the old.)
+#[derive(Clone, Default)]
+struct CutStartCache {
+    font: Option<egui::FontId>,
+    pixels: u32,
+    width: u32,
+    map: std::collections::HashMap<String, String>,
+}
+
 /// `text` cut at its start to `width` (an ellipsis before the end kept):
 /// the board's Source, "…/test-output/screens-hak/mg_chair.mdl".
 fn cut_start(ui: &Ui, text: &str, font: &egui::FontId, width: f32) -> String {
+    let (pixels, width_key) = (ui.ctx().pixels_per_point().to_bits(), width.to_bits());
+    let id = egui::Id::new("hak-cut-start-cache");
+    let same = |c: &CutStartCache| {
+        c.font.as_ref() == Some(font) && c.pixels == pixels && c.width == width_key
+    };
+    if let Some(cached) = ui.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<CutStartCache>(id);
+        if same(cache) { cache.map.get(text).cloned() } else { None }
+    }) {
+        return cached;
+    }
+
     let wide = |s: &str| {
         ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE))
             .size()
             .x
     };
-    if wide(text) <= width {
-        return text.to_string();
-    }
-    // (Whole folders dropped first, the path's own separators kept:
-    // "…/data/hk/id_resources.hak", on Windows "…\data\hk\id_resources.hak".)
-    let windows = crate::shown_path::WINDOWS;
-    if let Some(s) = crate::shown_path::cut_folders(text, windows, |s| wide(s) <= width) {
-        return s;
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let (mut lo, mut hi) = (0, chars.len());
-    // (The fewest characters dropped from the start that fit.)
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let s: String = std::iter::once('…').chain(chars[mid..].iter().copied()).collect();
-        if wide(&s) <= width { hi = mid } else { lo = mid + 1 }
-    }
-    std::iter::once('…').chain(chars[lo..].iter().copied()).collect()
+    let result = if wide(text) <= width {
+        text.to_string()
+    } else {
+        // (Whole folders dropped first, the path's own separators kept:
+        // "…/data/hk/id_resources.hak", on Windows "…\data\hk\id_resources.hak".)
+        let windows = crate::shown_path::WINDOWS;
+        if let Some(s) = crate::shown_path::cut_folders(text, windows, |s| wide(s) <= width) {
+            s
+        } else {
+            let chars: Vec<char> = text.chars().collect();
+            let (mut lo, mut hi) = (0, chars.len());
+            // (The fewest characters dropped from the start that fit.)
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let s: String = std::iter::once('…').chain(chars[mid..].iter().copied()).collect();
+                if wide(&s) <= width { hi = mid } else { lo = mid + 1 }
+            }
+            std::iter::once('…').chain(chars[lo..].iter().copied()).collect()
+        }
+    };
+    ui.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<CutStartCache>(id);
+        if !same(cache) || cache.map.len() >= 256 {
+            cache.map.clear();
+            cache.font = Some(font.clone());
+            cache.pixels = pixels;
+            cache.width = width_key;
+        }
+        cache.map.insert(text.to_string(), result.clone());
+    });
+    result
 }
 
 /// The hak whose table was given the keys last.
@@ -1547,7 +1565,7 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
             let selected = d.selected.contains(&key);
             let name = key.to_string();
             let words = kind_words(key.restype);
-            let value = format!("{words}, {}", size(item.size));
+            let size_str = size(item.size);
             resp.widget_info(|| {
                 let mut info = egui::WidgetInfo::selected(
                     egui::WidgetType::SelectableLabel,
@@ -1555,7 +1573,7 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
                     selected,
                     &name,
                 );
-                info.current_text_value = Some(value.clone());
+                info.current_text_value = Some(format!("{words}, {size_str}"));
                 info
             });
             let state = match (selected, resp.hovered()) {
@@ -1602,7 +1620,11 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
                 egui::pos2(xs[0].start() + 8.0 + 8.0, rect.center().y),
                 egui::vec2(16.0, 16.0),
             );
-            crate::browser::kind_icon(key.restype).paint(ui.painter(), icon, quiet);
+            // (Its kind's hue with Options › General › Colored icons, unless
+            // the row is selected.)
+            let kind = crate::browser::kind_icon(key.restype);
+            let hued = if selected { quiet } else { mg_uikit::hues::tint(ui.ctx(), kind, quiet) };
+            kind.paint(ui.painter(), icon, hued);
             match d.rename.as_mut().filter(|(k, _)| *k == key) {
                 Some((_, typed)) => {
                     let cell = egui::Rect::from_x_y_ranges(xs[0].clone(), rect.y_range())
@@ -1624,10 +1646,10 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
                 None => cut(name.clone(), mono.clone(), text, &xs[0], 16.0 + 8.0, false),
             }
             cut(words.to_string(), font.clone(), quiet, &xs[1], 0.0, false);
-            cut(size(item.size), font.clone(), text, &xs[2], 0.0, true);
+            cut(size_str, font.clone(), text, &xs[2], 0.0, true);
             if let Source::File(p) = &item.source {
                 let room = (xs[3].end() - xs[3].start() - 16.0).max(1.0);
-                let shown = cut_start(ui, &p.display().to_string(), &font, room);
+                let shown = cut_start(ui, &p.to_string_lossy(), &font, room);
                 cut(shown, font.clone(), quiet, &xs[3], 0.0, false);
             }
             if resp.clicked() {
@@ -1636,13 +1658,12 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
             if resp.double_clicked() {
                 asked.view = Some(key);
             }
-            let path = match &item.source {
-                Source::File(p) => Some(p.display().to_string()),
-                _ => None,
-            };
-            let resp = match path {
-                Some(p) => resp.on_hover_text(format!("{name}, added from {p}")),
-                None => resp,
+            let resp = if let Source::File(p) = &item.source {
+                resp.on_hover_ui(|ui| {
+                    ui.label(format!("{name}, added from {}", p.display()));
+                })
+            } else {
+                resp
             };
             mg_uikit::context_menu(&resp, |ui| {
                 if ui.button("View").clicked() {
@@ -1985,6 +2006,37 @@ pub(crate) fn adding_window(app: &mut Moonglow, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A path cut for one font is not taken for another of the same size,
+    /// nor for another scale (the review's D9: kept by the size alone).
+    #[test]
+    fn a_cut_path_is_kept_for_its_font_and_scale() {
+        let ctx = egui::Context::default();
+        let text = "/home/builder/modules/a-long-name/hak/the_resources_of_the_module.hak";
+        let cut = |ctx: &egui::Context, font: &egui::FontId, fresh: bool| {
+            let mut out = String::new();
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                if fresh {
+                    ui.data_mut(|d| {
+                        d.remove::<CutStartCache>(egui::Id::new("hak-cut-start-cache"))
+                    });
+                }
+                out = cut_start(ui, text, font, 200.0);
+            })
+            .textures_delta
+            .clear();
+            out
+        };
+        let (proportional, mono) =
+            (egui::FontId::proportional(14.0), egui::FontId::monospace(14.0));
+        assert_ne!(cut(&ctx, &proportional, true), cut(&ctx, &mono, true), "the fonts differ");
+        let _ = cut(&ctx, &proportional, true);
+        assert_eq!(cut(&ctx, &mono, false), cut(&ctx, &mono, true), "the monospace font's own");
+        // Another scale.
+        let _ = cut(&ctx, &proportional, true);
+        ctx.set_pixels_per_point(2.0);
+        assert_eq!(cut(&ctx, &proportional, false), cut(&ctx, &proportional, true));
+    }
 
     /// A model's facts, as the Preview lists them, read from its text: a
     /// root and a triangle drawn with one texture, no supermodel.

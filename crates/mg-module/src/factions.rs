@@ -93,9 +93,14 @@ impl Factions {
 
     /// The module's factions (the standard ones if it has no `repute.fac`).
     pub fn of_module(m: &Module) -> Factions {
+        Factions::of_module_in(m, Codepage::WINDOWS_1252)
+    }
+
+    /// [`of_module`](Self::of_module) decoding faction names in `codepage`.
+    pub fn of_module_in(m: &Module, codepage: Codepage) -> Factions {
         let key = ResKey::new(ResRef::from_str("repute").expect("valid"), ResType::FAC);
         let g = m.gff(&key).and_then(Result::ok).unwrap_or_else(crate::new::default_factions);
-        Factions::read(&g)
+        Factions::read_in(&g, codepage)
     }
 
     /// The file, as Aurora writes it: factions and reputations in id order,
@@ -141,12 +146,6 @@ impl Factions {
         self.reputations.get(&(target, perceiver)).copied()
     }
 
-    /// How much `perceiver` likes `target`; a missing entry is written with
-    /// the default first, as Aurora does.
-    fn lookup(&mut self, perceiver: u32, target: u32) -> u32 {
-        *self.reputations.entry((target, perceiver)).or_insert(DEFAULT_REPUTATION)
-    }
-
     pub fn set_reputation(&mut self, perceiver: u32, target: u32, rep: u32) {
         self.reputations.insert((target, perceiver), rep.min(100));
     }
@@ -158,19 +157,29 @@ impl Factions {
         let new = self.factions.len() as u32;
         self.factions.push(Faction {
             name: name.to_string(),
-            parent: Some(parent),
+            parent: (parent < new).then_some(parent),
             global,
             original: Struct::new(new),
         });
+        // A parent's missing entries are written with the default as they
+        // are looked up, as Aurora does (`aurora_factions` holds it to its
+        // capture). A parent that is no faction has no entries to write.
+        let valid = parent < new;
         for f in 0..=new {
-            let rep = self.lookup(parent, f);
+            let rep = if valid { self.lookup(parent, f) } else { DEFAULT_REPUTATION };
             self.reputations.insert((f, new), rep);
         }
         for f in 0..=new {
-            let rep = self.lookup(f, parent);
+            let rep = if valid { self.lookup(f, parent) } else { DEFAULT_REPUTATION };
             self.reputations.insert((new, f), rep);
         }
         new
+    }
+
+    /// How much `perceiver` likes `target`; a missing entry is written with
+    /// the default first, as Aurora does.
+    fn lookup(&mut self, perceiver: u32, target: u32) -> u32 {
+        *self.reputations.entry((target, perceiver)).or_insert(DEFAULT_REPUTATION)
     }
 
     /// Removes a faction (not a standard one): its reputations go, and the
@@ -202,8 +211,7 @@ impl Factions {
     }
 }
 
-/// Labels of the faction fields of objects and their instances.
-const FACTION_FIELDS: [&str; 2] = ["FactionID", "Faction"];
+/// Resource types of objects and instances that hold a faction id.
 const FACTION_USERS: [ResType; 6] =
     [ResType::UTC, ResType::UTD, ResType::UTP, ResType::UTT, ResType::UTE, ResType::GIT];
 
@@ -212,7 +220,7 @@ fn walk(s: &mut Struct, f: &mut dyn FnMut(&mut Value)) {
         match &mut field.value {
             Value::Struct(c) => walk(c, f),
             Value::List(items) => items.iter_mut().for_each(|i| walk(i, f)),
-            v if FACTION_FIELDS.contains(&field.label.to_string_lossy().as_str()) => f(v),
+            v if matches!(field.label.as_bytes(), b"FactionID" | b"Faction") => f(v),
             _ => {}
         }
     }
@@ -325,5 +333,35 @@ mod tests {
         // One with no parent: its objects are Commoners.
         let map = f.remove(b).unwrap();
         assert_eq!(map(b), Some(COMMONER));
+    }
+
+    #[test]
+    fn of_module_in_decodes_codepage_and_add_writes_parent_entries_as_aurora() {
+        let mut g = crate::new::default_factions();
+        let cp = Codepage::WINDOWS_1250;
+        let list = g.root.list_mut(fac::FACTION_LIST.label).unwrap();
+        // Byte 0xA3 is 'Ł' in Windows-1250.
+        list[4].set("FactionName", Value::String(vec![b'G', b'u', b'a', b'r', b'd', 0xa3]));
+        let mut m = Module::new();
+        m.set_gff(ResKey::new(ResRef::from_str("repute").unwrap(), ResType::FAC), &g).unwrap();
+
+        let mut fac = Factions::of_module_in(&m, cp);
+        assert_eq!(fac.factions[4].name, "Guard\u{141}");
+
+        fac.reputations.remove(&(4, 4));
+        let added = fac.add("New", false, 4);
+        assert_eq!(added, 5);
+        // Aurora writes the parent's missing entries with the default as it
+        // looks them up (its capture `added-guards-bandits-edit.fac`).
+        assert_eq!(fac.reputation(4, 4), Some(DEFAULT_REPUTATION), "parent's own entry written");
+        assert_eq!(fac.reputation(added, added), Some(DEFAULT_REPUTATION));
+        assert_eq!(fac.reputation(4, added), Some(DEFAULT_REPUTATION));
+        assert_eq!(fac.reputation(added, 4), Some(DEFAULT_REPUTATION));
+        // Out-of-range parent yields `parent: None` instead of a dangling
+        // index, and writes no entries for the faction that is not there.
+        let bad = fac.add("Orphan", false, 99);
+        assert_eq!(fac.factions[bad as usize].parent, None);
+        assert!(fac.reputations.keys().all(|&(t, p)| t != 99 && p != 99));
+        assert_eq!(fac.reputation(bad, bad), Some(DEFAULT_REPUTATION));
     }
 }

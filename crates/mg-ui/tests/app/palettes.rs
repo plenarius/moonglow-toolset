@@ -1319,7 +1319,7 @@ fn palette_updates_the_instances_of_a_selection_and_a_category() {
     // The log says which were updated: the one ticked, by its area, kind,
     // tag and blueprint; not the one left out.
     let log: Vec<String> = h.state().log.entries.iter().map(|e| e.1.clone()).collect();
-    assert!(log.iter().any(|l| l == "Updated 1 object(s) from 2 blueprint(s):"), "{log:?}");
+    assert!(log.iter().any(|l| l == "Updated 1 object from 2 blueprints:"), "{log:?}");
     let listed: Vec<&String> = log.iter().filter(|l| l.starts_with("  ")).collect();
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert!(listed[0].contains("trigger") && listed[0].contains("(mg_trig_a)"), "{listed:?}");
@@ -1686,6 +1686,12 @@ fn prefabs_are_offered_on_the_toolbar_and_in_the_palette() {
     field.type_text(" Site");
     h.run_steps(2);
     h.get_by_label("Rename").click();
+    // The frame of the rename lists the new name, not the one renamed
+    // (whose file is gone: its hover would read a file not there).
+    h.step();
+    assert!(prefabs.join("Camp Site.prefab.json").is_file(), "{:?}", h.state().log.entries);
+    assert!(h.query_by_label("Camp").is_none(), "the old name listed after the rename");
+    assert!(h.query_by_label("Camp Site").is_some());
     h.run_steps(3);
     assert!(prefabs.join("Camp Site.prefab.json").is_file(), "{:?}", h.state().log.entries);
     assert!(!prefabs.join("Camp.prefab.json").exists());

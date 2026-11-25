@@ -94,6 +94,9 @@ pub fn arrow_column(ui: &Ui) -> Rect {
 struct Line {
     name: String,
     icon: Option<Icon>,
+    /// Its icon a kind's, in the kind's hue while icons are colored
+    /// ([`crate::hues`]).
+    hued: bool,
     count: Option<String>,
     label: Option<String>,
     marked: bool,
@@ -124,6 +127,7 @@ impl Line {
         Line {
             name,
             icon,
+            hued: false,
             count,
             label,
             marked,
@@ -252,6 +256,12 @@ impl Line {
             let fill = if hovered { t.hover_row } else { Color32::TRANSPARENT };
             let arrow = if hovered { t.text } else { t.text_3 };
             let (text, icon) = if self.dim { (t.text_3, t.text_3) } else { (t.text, t.text_2) };
+            // (A kind's icon in its hue while icons are colored; dimmed,
+            // `text-3` still, and marked, `on-fill` as its words.)
+            let icon = match (self.hued, self.dim, self.icon) {
+                (true, false, Some(i)) => crate::hues::tint(ui.ctx(), i, icon),
+                _ => icon,
+            };
             (fill, text, arrow, icon, t.text_3)
         } else {
             let v = ui.visuals();
@@ -345,8 +355,20 @@ fn paint_eye(ui: &Ui, response: &Response, eye: &Eye, marked: bool) {
         };
         let p = ui.painter();
         if response.hovered() || response.has_focus() {
-            let fill = if themed { t.raised } else { v.widgets.hovered.weak_bg_fill };
+            let fill = match (themed, marked) {
+                (true, true) => t.accent_fill_hover,
+                (true, false) => t.raised,
+                (false, _) => v.widgets.hovered.weak_bg_fill,
+            };
             p.rect_filled(rect, 3.0, fill);
+        }
+        if response.has_focus() {
+            let ring = if themed {
+                if marked { t.on_fill } else { t.accent }
+            } else {
+                v.selection.stroke.color
+            };
+            p.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, ring), egui::StrokeKind::Inside);
         }
         let icon = if eye.shown { Icon::Eye } else { Icon::EyeOff };
         icon.paint(p, Rect::from_center_size(rect.center(), vec2(EYE_ICON, EYE_ICON)), color);
@@ -410,6 +432,14 @@ impl TreeGroup {
     /// Its kind's icon, after the arrow.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.line.icon = Some(icon);
+        self
+    }
+
+    /// Its kind's icon, after the arrow, in the kind's hue while icons are
+    /// colored ([`crate::hues`]; `text-2` otherwise, as [`Self::icon`]).
+    pub fn kind_icon(mut self, icon: Icon) -> Self {
+        self.line.icon = Some(icon);
+        self.line.hued = true;
         self
     }
 
@@ -546,6 +576,15 @@ impl TreeRow {
     /// Its icon, after the arrow's column.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.line.icon = Some(icon);
+        self
+    }
+
+    /// A kind's icon, after the arrow's column, in the kind's hue while
+    /// icons are colored ([`crate::hues`]; `text-2` otherwise, as
+    /// [`Self::icon`]).
+    pub fn kind_icon(mut self, icon: Icon) -> Self {
+        self.line.icon = Some(icon);
+        self.line.hued = true;
         self
     }
 

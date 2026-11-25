@@ -39,10 +39,12 @@ fn a_plugin_s_command_runs_on_the_objects_selected_in_the_area() {
     let properties = h.get_all_by_label("Properties").last().unwrap().rect();
     assert!(command.bottom() <= properties.top(), "{command:?} {properties:?}");
     assert!(h.query_by_label("Count Objects").is_none(), "that one is for areas");
-    let img = h.render().expect("render");
-    let picture = mg_testkit::scratch_dir("ui-area-plugin-menu").join("menu.png");
-    img.save(&picture).unwrap();
-    eprintln!("the menu: {}", picture.display());
+    if let Some(dir) = shot_dir("ui-area-plugin-menu") {
+        let img = h.render().expect("render");
+        let picture = dir.join("menu.png");
+        img.save(&picture).unwrap();
+        eprintln!("the menu: {}", picture.display());
+    }
     h.state_mut().plugins.answers.push_back(set_local_answer());
     h.get_by_label("Set Local Variable…").click();
     h.run_steps(3);
@@ -194,7 +196,7 @@ fn a_plugin_is_off_until_enabled_and_its_command_is_one_undoable_step() {
     h.get_by_label("Plugins").click();
     h.run();
     assert!(h.query_by_label("Fix Creature Tags").is_none());
-    h.get_by_label("Manage Plugins…").click();
+    h.get_by_label("Manage Plugins").click();
     h.run();
     // The window says what each adds; enabling one is a tick.
     h.get_by_label_contains("cannot reach your files");
@@ -915,7 +917,8 @@ fn a_plugin_s_checks_run_with_verify() {
     );
     assert!(
         log.iter().any(|(_, m)| m.starts_with("Verify: ")
-            && m.ends_with("; left out, not checked (Options › Verify): Plugins' checks")),
+            && verify_summary(m)
+                .ends_with("; left out, not checked (Options › Verify): Plugins' checks")),
         "{log:#?}"
     );
     // One plugin's check left out, by its id: the other plugin's runs.
@@ -930,11 +933,17 @@ fn a_plugin_s_checks_run_with_verify() {
     assert!(log.iter().any(|(_, m)| m.contains("a check only reads")), "{log:#?}");
     assert!(
         log.iter().any(|(_, m)| m.starts_with("Verify: ")
-            && m.ends_with(
+            && verify_summary(m).ends_with(
                 "; left out, not checked (Options › Verify): example.tag-conventions/tag-case"
             )),
         "{log:#?}"
     );
+}
+
+/// Verify's line in the log without what closes it where it found
+/// anything (where its findings are listed, `problems::LISTED`).
+fn verify_summary(line: &str) -> &str {
+    line.strip_suffix(mg_ui::problems::LISTED).unwrap_or(line)
 }
 
 /// A finding's fix is a button beside its line in Verify's report: made
@@ -1326,7 +1335,7 @@ fn started_without_plugins_none_is_loaded() {
     plugins_menu(&mut h);
     h.run();
     assert!(h.query_by_label("Fix Creature Tags").is_none());
-    h.get_by_label("Manage Plugins…").click();
+    h.get_by_label("Manage Plugins").click();
     h.run();
     h.get_by_label("Started with --no-plugins: none are loaded.");
     assert!(h.query_by_label_contains("No plugins are installed").is_none());
@@ -2015,6 +2024,41 @@ fn a_setting_moved_by_tidy_up_is_kept_when_the_tidy_fails_further_on() {
     assert_eq!(kept.get("name"), Some(&mine), "and in the user's own file");
 }
 
+/// The user's settings file shared with `mg` there and unreadable: what
+/// it keeps is unknown, and nothing of Moonglow's own copy is said to be
+/// kept wrong (the review's C-11: the copy's were said).
+#[test]
+fn an_unreadable_settings_file_says_nothing_of_moonglow_s_copy() {
+    let dir = plugin_project("ui-plugin-settings-unreadable");
+    let plugins = dir.join("installed");
+    let one = plugins.join("one");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::write(
+        one.join("plugin.cfg"),
+        "[plugin]\nid = \"a.one\"\nname = \"One\"\nversion = \"1\"\napi = \"0.5\"\nlicense = \
+         \"MIT\"\n\n[setting]\nid = \"name\"\nlabel = \"Name\"\nscope = \"user\"\n",
+    )
+    .unwrap();
+    std::fs::write(one.join("main.luau"), "local mg = require(\"@moonglow\")\n").unwrap();
+    let values = dir.with_extension("values.json");
+    std::fs::write(&values, "{ not json").unwrap();
+    let mut app = app_with(Vec::new());
+    app.plugin_dir = Some(plugins);
+    app.plugin_answers = Some(dir.with_extension("answers.toml"));
+    app.plugin_values = Some(values);
+    let lost = [("lost".to_string(), serde_json::json!(1))].into_iter().collect();
+    app.settings.plugin_settings.insert("a.one".into(), lost);
+    app.load_plugins();
+    app.open_module(&dir);
+    let p = (app.plugins.installed.iter())
+        .filter_map(|i| i.plugin.as_ref().ok())
+        .find(|p| p.manifest.id == "a.one")
+        .cloned()
+        .expect("the plugin");
+    let faults = app.plugin_settings_faults(&p);
+    assert!(!faults.iter().any(|f| f.contains("\"lost\"")), "{faults:?}");
+}
+
 /// The kinds of setting API 0.5 added, in the form: a number with a
 /// fraction, a list (of choices, and free), a color, text held to a
 /// pattern and a folder chosen by Choose…; kept, those of scope `user`, in
@@ -2550,7 +2594,7 @@ fn plugins_menu(h: &mut egui_kittest::Harness<'_, mg_ui::Moonglow>) {
     h.get_all_by_label("Plugins").find(|n| n.accesskit_node().role() != link).unwrap().click();
 }
 
-/// Plugins › Manage Plugins… opens the Plugins tab (M4's U29; a dialog
+/// Plugins › Manage Plugins opens the Plugins tab (M4's U29; a dialog
 /// before), with no module open too: a document tab named Plugins, brought
 /// to the front when open, closed by Ctrl+W and by its tab's menu, and
 /// a window of its own where editors open as floating windows; closed, it
@@ -2564,7 +2608,7 @@ fn plugins_is_a_document_tab() {
     let mut h = harness(app, 1280.0, 720.0);
     settle(&mut h);
     assert!(h.state().ws.is_none());
-    menu_command(&mut h, "Plugins", "Manage Plugins…");
+    menu_command(&mut h, "Plugins", "Manage Plugins");
     let path = h.state().dock.find_tab(&Tab::Plugins).expect("the tab");
     assert!(path.surface.is_main(), "docked");
     settle(&mut h);
@@ -2580,7 +2624,7 @@ fn plugins_is_a_document_tab() {
     assert!(h.state().dock.find_tab(&Tab::Plugins).is_none(), "Ctrl+W closes it");
     // As floating windows: a window of its own.
     h.state_mut().settings.open_editors = mg_ui::OpenEditors::Floating;
-    menu_command(&mut h, "Plugins", "Manage Plugins…");
+    menu_command(&mut h, "Plugins", "Manage Plugins");
     let path = h.state().dock.find_tab(&Tab::Plugins).expect("the tab");
     assert!(!path.surface.is_main(), "a window of its own");
     settle(&mut h);
@@ -2594,7 +2638,7 @@ fn plugins_is_a_document_tab() {
 
 /// What `plugins_is_a_document_tab`'s words claim, held (M4's U29 review),
 /// with the module's tabs reopened or not (Options' Open a module with the
-/// tabs it had): Manage Plugins… with the tab open brings it to the front
+/// tabs it had): Manage Plugins with the tab open brings it to the front
 /// (one tab, beside another in front of it, and in a split's other group);
 /// its tab's menu closes it.
 #[test]
@@ -2609,7 +2653,7 @@ fn plugins_comes_to_the_front_when_open_and_its_tab_s_menu_closes_it() {
         app.open_module(&sample_module(&dir));
         let mut h = harness(app, 1280.0, 720.0);
         settle(&mut h);
-        menu_command(&mut h, "Plugins", "Manage Plugins…");
+        menu_command(&mut h, "Plugins", "Manage Plugins");
         settle(&mut h);
         // Another tab in front of it in its group.
         h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Manual));
@@ -2619,7 +2663,7 @@ fn plugins_comes_to_the_front_when_open_and_its_tab_s_menu_closes_it() {
             Some(&Tab::Manual),
             "{no_reopen}: the manual in front"
         );
-        menu_command(&mut h, "Plugins", "Manage Plugins…");
+        menu_command(&mut h, "Plugins", "Manage Plugins");
         settle(&mut h);
         assert_eq!(
             h.state().active_editor(),
@@ -2647,7 +2691,7 @@ fn plugins_comes_to_the_front_when_open_and_its_tab_s_menu_closes_it() {
             Some(&Tab::Manual),
             "{no_reopen}: the split's manual"
         );
-        menu_command(&mut h, "Plugins", "Manage Plugins…");
+        menu_command(&mut h, "Plugins", "Manage Plugins");
         settle(&mut h);
         assert_eq!(h.state().active_editor(), Some(&Tab::Plugins), "{no_reopen}: from the split");
         assert_eq!(count(&h), 1, "{no_reopen}: one tab in the split");
@@ -2691,16 +2735,20 @@ fn the_plugins_folder_s_path_takes_the_room_there_is() {
     app.load_plugins();
     app.settings.open_editors = mg_ui::OpenEditors::Tabs;
     let mut h = harness(app, 1280.0, 720.0);
-    settle(&mut h);
-    menu_command(&mut h, "Plugins", "Manage Plugins…");
-    settle(&mut h);
     let path = long.display().to_string();
-    let r = h.get_by_label(&path).rect();
     let words = h.ctx.fonts_mut(|f| {
         f.layout_no_wrap(path.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE)
             .size()
             .x
     });
+    assert!(words > 700.0, "expected path wider than form page: {words}");
+    if words + 160.0 > 1280.0 {
+        h.set_size(egui::vec2(words + 160.0, 720.0));
+    }
+    settle(&mut h);
+    menu_command(&mut h, "Plugins", "Manage Plugins");
+    settle(&mut h);
+    let r = h.get_by_label(&path).rect();
     assert!(r.width() + 1.0 >= words, "whole: {r:?} for {words} of words");
 }
 
@@ -3046,4 +3094,239 @@ fn a_plugin_s_command_makes_a_module_from_the_welcome_page() {
             if t == "bare" && root.canonicalize().ok() == target.canonicalize().ok());
     assert!(opened, "{location:?}; log {:?}", h.state().log.entries);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_plugin_settings_stay_open_disable_save_and_log_error() {
+    let dir = mg_testkit::scratch_dir("ui-plugin-settings-invalid");
+    let plug_dir = dir.join("plugins/color-check");
+    std::fs::create_dir_all(&plug_dir).unwrap();
+    std::fs::write(
+        plug_dir.join("plugin.cfg"),
+        "[plugin]\nid = \"test.color-check\"\nname = \"Color Check\"\nversion = \"1.0.0\"\n\
+         api = \"0.5\"\nlicense = \"MIT\"\n\n\
+         [setting]\nid = \"tint\"\nlabel = \"Tint\"\ntype = \"color\"\ndefault = \"#336699\"\n",
+    )
+    .unwrap();
+    std::fs::write(plug_dir.join("main.luau"), "-- settings only\n").unwrap();
+
+    let mut app = app_with(Vec::new());
+    app.plugin_dir = Some(dir.join("plugins"));
+    app.plugin_values = Some(dir.join("values.json"));
+    app.load_plugins();
+    assert!(
+        app.plugins
+            .installed
+            .iter()
+            .any(|i| i.plugin.as_ref().is_ok_and(|p| p.manifest.id == "test.color-check")),
+        "{:#?}",
+        app.log.entries
+    );
+    app.enable_plugin("test.color-check", true);
+    app.open_plugin_settings("test.color-check");
+    let mut h = harness(app, 1200.0, 900.0);
+    settle(&mut h);
+    assert!(h.state().plugins.settings_form.is_some());
+
+    // Enter invalid color on SettingKind::Color ("tint").
+    h.state_mut()
+        .plugins
+        .settings_form
+        .as_mut()
+        .unwrap()
+        .values
+        .insert("tint".into(), mg_plugin::SettingValue::Text("notacolor".into()));
+    h.run();
+    assert!(
+        apart(&h, "Save").accesskit_node().is_disabled(),
+        "Save must be disabled when settings are invalid"
+    );
+    h.get_by_label_contains("#rrggbb");
+
+    // Calling save_plugin_settings directly keeps form open and logs an Error.
+    h.state_mut().save_plugin_settings();
+    assert!(
+        h.state().plugins.settings_form.is_some(),
+        "invalid values must leave settings_form open"
+    );
+    assert!(
+        h.state().log.entries.iter().any(|(l, _)| *l == mg_ui::Level::Error),
+        "expected Error log entry for invalid settings: {:#?}",
+        h.state().log.entries
+    );
+
+    // Restoring valid hex color enables Save and closes cleanly.
+    h.state_mut()
+        .plugins
+        .settings_form
+        .as_mut()
+        .unwrap()
+        .values
+        .insert("tint".into(), mg_plugin::SettingValue::Text("#336699".into()));
+    h.run();
+    assert!(!apart(&h, "Save").accesskit_node().is_disabled());
+    apart(&h, "Save").click();
+    settle(&mut h);
+    assert!(h.state().plugins.settings_form.is_none());
+}
+
+#[test]
+fn plugin_protected_area_cancel_rolls_back_hak_and_confirm_tracks_undo() {
+    let Some(root) = mg_testkit::nwn_root() else { return };
+    let dir = project_folder(
+        "ui-plugin-protected-hak",
+        &[("moonglow.toml", "[claims]\nprotected = [\"start\"]\n")],
+    );
+    let export = dir.join("export");
+    std::fs::create_dir_all(&export).unwrap();
+    std::fs::write(export.join("note.txt"), "from the plugin").unwrap();
+    let user = user_folder(&dir, &[]);
+    let hak = user.join("hak/made.hak");
+
+    let dialogs = NoDialogs { folders: vec![export.clone(), export], ..Default::default() };
+    let mut app = game_app_with(&root, Some(user), dialogs);
+    app.open_module(&dir);
+    app.palette_dock = false;
+    app.background_jobs = true;
+    let mut h = harness(app, 1200.0, 900.0);
+    h.run();
+
+    let wait_for = |h: &mut Harness<'_, Moonglow>, label: &str| {
+        let started = std::time::Instant::now();
+        while h.query_by_label(label).is_none() {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "missing {label}");
+        }
+        h.run_steps(2);
+    };
+    let wait_idle = |h: &mut Harness<'_, Moonglow>| {
+        let started = std::time::Instant::now();
+        while h.state().busy() {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "job hung");
+        }
+        h.run_steps(2);
+    };
+    let start_tag = |h: &mut Harness<'_, Moonglow>| -> String {
+        let are = module_gff(h, "start", ResType::ARE).unwrap();
+        String::from_utf8_lossy(are.root.string("Tag").unwrap_or_default()).into_owned()
+    };
+
+    h.state_mut().plugins.console = r#"
+        local folder = ctx.ui:open_folder({ title = "The folder to take" })
+        folder:to_hak("made", "note.txt")
+        ctx.edit:set("start.are", "Tag", "BY_PLUGIN")
+    "#
+    .into();
+
+    // First run: cancel on Protected Area rolls back the written hak and keeps start.are unchanged.
+    h.state_mut().run_console();
+    wait_for(&mut h, "Choose Folder…");
+    h.get_by_label("Choose Folder…").click();
+    wait_for(&mut h, "Yes");
+    h.get_by_label("Yes").click();
+    wait_for(&mut h, "Protected Area");
+    assert!(hak.is_file(), "hak was staged on disk while awaiting confirmation");
+    h.get_all_by_label("Cancel").last().unwrap().click();
+    wait_idle(&mut h);
+    assert!(!hak.exists(), "Cancel on Protected Area must roll back written hak");
+    assert_ne!(start_tag(&mut h), "BY_PLUGIN");
+
+    // Second run: confirming applies edit and records hak write with Undo step.
+    h.state_mut().run_console();
+    wait_for(&mut h, "Choose Folder…");
+    h.get_by_label("Choose Folder…").click();
+    wait_for(&mut h, "Yes");
+    h.get_by_label("Yes").click();
+    wait_for(&mut h, "Protected Area");
+    h.get_by_label("Change It Anyway").click();
+    wait_idle(&mut h);
+    assert!(hak.is_file(), "confirmed plugin apply keeps written hak");
+    assert_eq!(start_tag(&mut h), "BY_PLUGIN");
+
+    h.state_mut().actions.push(mg_ui::Action::Undo);
+    h.run_steps(3);
+    assert_ne!(start_tag(&mut h), "BY_PLUGIN", "Undo reverts area tag");
+    assert!(!hak.exists(), "Undo removes hak recorded via FinishPluginApply");
+}
+
+/// A second plugin run while the first is held for the Protected Area
+/// window does not start (it took the first's place, whose hak stayed
+/// written past Cancel), and an event's job waits; Quit with a run held
+/// takes its hak back.
+#[test]
+fn a_second_plugin_run_waits_for_the_protected_area_answer_and_quit_rolls_back() {
+    let Some(root) = mg_testkit::nwn_root() else { return };
+    let dir = project_folder(
+        "ui-plugin-protected-second",
+        &[("moonglow.toml", "[claims]\nprotected = [\"start\"]\n")],
+    );
+    let export = dir.join("export");
+    std::fs::create_dir_all(&export).unwrap();
+    std::fs::write(export.join("note.txt"), "from the plugin").unwrap();
+    let user = user_folder(&dir, &[]);
+    let (first, second) = (user.join("hak/made.hak"), user.join("hak/second.hak"));
+
+    let dialogs = NoDialogs { folders: vec![export.clone(); 4], ..Default::default() };
+    let mut app = game_app_with(&root, Some(user), dialogs);
+    app.open_module(&dir);
+    app.palette_dock = false;
+    app.background_jobs = true;
+    let mut h = harness(app, 1200.0, 900.0);
+    h.run();
+
+    let wait_for = |h: &mut Harness<'_, Moonglow>, label: &str| {
+        let started = std::time::Instant::now();
+        while h.query_by_label(label).is_none() {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "missing {label}");
+        }
+        h.run_steps(2);
+    };
+    let run = |h: &mut Harness<'_, Moonglow>, hak: &str| {
+        h.state_mut().plugins.console = format!(
+            r#"
+            local folder = ctx.ui:open_folder({{ title = "The folder to take" }})
+            folder:to_hak("{hak}", "note.txt")
+            ctx.edit:set("start.are", "Tag", "BY_{hak}")
+        "#
+        );
+        h.state_mut().run_console();
+    };
+    let held = |h: &mut Harness<'_, Moonglow>, hak: &str| {
+        run(h, hak);
+        wait_for(h, "Choose Folder…");
+        h.get_by_label("Choose Folder…").click();
+        wait_for(h, "Yes");
+        h.get_by_label("Yes").click();
+        wait_for(h, "Protected Area");
+    };
+
+    held(&mut h, "made");
+    assert!(first.is_file(), "the first run's hak, written while it waits");
+    // The second: not started, and said.
+    run(&mut h, "second");
+    h.run_steps(3);
+    assert!(!h.state().busy(), "the second run did not start");
+    assert!(!second.exists());
+    let log: Vec<String> = h.state().log.entries.iter().map(|(_, m)| m.clone()).collect();
+    assert!(
+        log.iter().any(|m| m.contains("not run while the Protected Area window waits")),
+        "{log:?}"
+    );
+    // Cancel takes back the first's hak.
+    h.get_all_by_label("Cancel").last().unwrap().click();
+    h.run_steps(3);
+    assert!(!first.exists(), "Cancel rolls back the held run's hak");
+    assert!(h.query_by_label("Protected Area").is_none());
+
+    // Held again, and the window quit: its hak is taken back.
+    held(&mut h, "made");
+    assert!(first.is_file());
+    h.state_mut().actions.push(mg_ui::Action::Quit);
+    h.run_steps(3);
+    assert!(!first.exists(), "Quit rolls back the held run's hak");
 }

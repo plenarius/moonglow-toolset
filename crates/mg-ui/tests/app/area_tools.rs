@@ -224,7 +224,7 @@ fn terrain_is_on_with_a_tile_brush_in_hand() {
 /// takes it out too (none left: the section says how to choose them).
 #[test]
 fn x_takes_a_blueprint_out_of_the_brush() {
-    let Some((mut h, _)) = area_harness("tools-brush-x") else { return };
+    let Some((mut h, _)) = area_ui_harness("tools-brush-x") else { return };
     let statue = ResKey::parse("plc_statue1", ResType::UTP).unwrap();
     let tree = ResKey::parse("plc_tree", ResType::UTP).unwrap();
     {
@@ -502,4 +502,64 @@ fn paint_with_it_takes_terrain() {
     assert!(h.state().palette.tile_brush.is_some(), "the tile in hand");
     assert!(!h.state().area_views[&area].tile_mode);
     assert_eq!(on(&h), ["Terrain"]);
+}
+
+#[test]
+fn paint_blocks_non_placeable_fallthrough_and_select_tiles_exits_on_escape() {
+    let Some((mut h, area)) = area_harness("tools-paint-guard-tile-esc") else { return };
+    settle(&mut h);
+
+    // Paint on with a non-placeable blueprint selected: warns cleanly, doesn't place, Esc stops Paint.
+    let was_objects = h.state().area_views[&area].model.as_ref().map_or(0, |m| m.objects.len());
+    shelf_click(&mut h, "Paint");
+    h.state_mut().palette.selected = ResKey::parse("nw_waypoint001", ResType::UTW);
+    settle(&mut h);
+    let status = h.get_by_label("Status Bar");
+    assert!(
+        status.query_by_label_contains("Paint works with placeables").is_some(),
+        "Status Bar explains Paint works with placeables"
+    );
+    let spot = h.state().area_views[&area].rect.center();
+    h.hover_at(spot);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: spot,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    settle(&mut h);
+    let now_objects = h.state().area_views[&area].model.as_ref().map_or(0, |m| m.objects.len());
+    assert_eq!(now_objects, was_objects, "no non-placeable placed while Paint active");
+    h.hover_at(spot);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(!h.state().paint, "Esc exits Paint even with non-placeable selected");
+
+    // Select Tiles: first Esc clears tile selection, second Esc exits to Select Objects.
+    shelf_click(&mut h, "Select Tiles");
+    h.state_mut().area_views.get_mut(&area).unwrap().tile_selection = vec![(0, 0), (1, 0)];
+    settle(&mut h);
+    assert!(
+        h.state().status_said().iter().any(|s| s == "Esc: Clear selection"),
+        "Status Bar hints Esc clears tile selection: {:?}",
+        h.state().status_said()
+    );
+    h.hover_at(spot);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().area_views[&area].tile_mode, "first Esc keeps tile mode");
+    assert!(h.state().area_views[&area].tile_selection.is_empty(), "first Esc clears tiles");
+    assert!(
+        h.state().status_said().iter().any(|s| s == "Esc: Select objects"),
+        "Status Bar hints Esc exits tile mode: {:?}",
+        h.state().status_said()
+    );
+    h.hover_at(spot);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(!h.state().area_views[&area].tile_mode, "second Esc exits tile mode");
 }

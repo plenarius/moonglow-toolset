@@ -3,7 +3,7 @@ type: Manual Page
 title: Build, verify and test
 description: Build Module, publishing to NWSync and uploading it to the web server, a module's haks read from its NWSync server instead of hak files, long work, Verify Module and the fixes beside its findings, the Round-Trip Check, Test Module, reloading haks and 2DAs, and Area Statistics.
 tags: [manual, build, verify, test, nwsync]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T03:03:16Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:49:31Z }
 ---
 
 # Build, verify and test
@@ -44,7 +44,7 @@ findings as text (a line each, `Error: x.nss: message`), and **Done**
 does. Once it has built, the foot says how many errors and warnings it
 found, "in Problems" ([below](#build-modules-results)). With **Build module on
 save** (Options › General), every save builds first, with the window's
-defaults rather than what is ticked in it: so every save also makes the
+defaults rather than what is checked in it: so every save also makes the
 palettes anew, as Aurora's Build does.
 
 ### Build Module's results
@@ -55,7 +55,10 @@ first. Each row has its severity, its place (a link, "Go to it" in its
 tip, that opens the resource) and its message, cut where it is long
 (the tip has the whole). Click a row to choose it; the arrow keys,
 Page Up, Page Down, Home and End move the choice; Enter or a double click
-goes to the resource. While the build runs, the heading says "Build
+goes to the resource. A right click on a row (which chooses it) or
+Shift+F10 on the one chosen offers **Copy**, the finding as one line with
+its whole message, and **Copy All**, every finding listed under every
+heading; Ctrl+C copies the one chosen. While the build runs, the heading says "Build
 Module is running". Where the build finds nothing, the heading says "No
 problems found" and the log "No errors found". With **Build module on
 save**, the results go to Problems the same way; Problems comes to the front, and the Bottom
@@ -63,8 +66,11 @@ Dock opens only where something was found.
 
 When the module changes after a build, the heading says "Changed since
 the check: not counted", and its findings are no longer counted in the
-Status Bar's Problems switch. A right click on the heading (or Delete
-with it focused) offers **Remove from Problems**. Closing the module
+Status Bar's Problems switch. A right click on the heading, or its
+**Problems Actions** button (`…`) at the right, offers **Copy These
+Findings**, **Save These Findings As…** (one a line, into a text file)
+and **Remove from Problems** (Delete with the heading focused), each on
+that heading's findings alone. Closing the module
 takes them away (Verify's too): a click on one would open another
 module's resource.
 
@@ -435,9 +441,11 @@ Module** heading, each with its resource as its place (Enter, a double click
 or the link go there) and its fix button beside it where one is offered;
 Problems comes to the front when anything was found. To leave
 some of it out (a hak's tileset errors you are not going to fix),
-untick its group, or one check of it, in **Options › Verify**, or name
+uncheck its group, or one of its checks, in **Options › Verify**, or name
 the hak or the tileset there; the summary line says what was left out,
-not checked. **Clear Log**, on the log's
+not checked. Verify writes no file of its own: where it found anything,
+its summary line says the findings are in Problems, where a right click
+copies or saves them (the heading's **Save These Findings As…**). **Clear Log**, on the log's
 tab bar (or View › Clear Log), empties the log before a second run.
 
 A [project](03-modules.md)'s compiled scripts are build output, so its
@@ -455,7 +463,7 @@ the project wants unique, **Move the variables to the GIT** for an
 area's variables in its ARE, **Remove the variable** for one only the
 scripts set kept in a file (`var-runtime`), **Take the transform off**
 for a static placeable's visual transform, which the game doesn't draw
-(`static-transform`; to have it drawn transformed, untick Static in its
+(`static-transform`; to have it drawn transformed, uncheck Static in its
 Properties instead), and whatever a plugin's check offers.
 Nothing changes until you click it; then the change goes in as one step,
 which **Undo** takes back, and the button says **Fixed** (the module has
@@ -517,8 +525,8 @@ crash Aurora with an access violation that names nothing:
 | A creature, placeable, door or item naming a 2DA row that doesn't exist or whose model is missing | Aurora's area view crashes on it; in the game it has no appearance, or the game crashes (a creature with a class that doesn't exist) |
 | A waypoint whose Appearance is a `waypoint.2da` row with no flag model (a warning) | the area view draws no flag for it; the game draws no waypoint |
 | A creature, placeable, door or encounter of the PC faction, or a creature, placeable or door with no faction, which the game reads as the PC faction (a warning; not a trigger, which Aurora gives faction 0 when its blueprint has none) | the PC faction is the players' alone: the game puts such a creature in Hostile, and creatures regard the others as they regard players |
-| A static placeable whose file has a visual transform (a warning) | the game client draws a static placeable without it, merged into the area's tiles: untick Static to have it scaled, tilted or moved |
-| A static placeable, placed or a blueprint, with a tint's variable (`tdod_tint`, `tdod_tint_<mtr>`: a warning, `static-tint`) | the game client draws it as made, without the tint: untick Static to have it tinted |
+| A static placeable whose file has a visual transform (a warning) | the game client draws a static placeable without it, merged into the area's tiles: uncheck Static to have it scaled, tilted or moved |
+| A static placeable, placed or a blueprint, with a tint's variable (`tdod_tint`, `tdod_tint_<mtr>`: a warning, `static-tint`) | the game client draws it as made, without the tint: uncheck Static to have it tinted |
 | A placeable, placed or a blueprint, whose shader parameters store a `tdodTint` for a material its tint's variables also tint (a warning, `tint-stored`) | The Domains of Dread's script sets the variables' tint over the stored one as the module loads, so the stored one is never seen: take one of the two out |
 | A placeable, placed or a blueprint, whose Appearance is past row 65535 (an error, `appearance-range`) | the game carries an object's placeables.2da row as a 16-bit number: it draws row 65536 as row 0, 65537 as row 1, another model, without a word |
 | An area with variables in its ARE (as Moonglow wrote them before 1.34.3) | the game reads an area's variables from its GIT, so a script reads 0 for them; opening the area's Variables moves them, as does its fix |

@@ -43,8 +43,8 @@ fn read_copy<'a>(
 #[derive(Debug, Clone)]
 struct Row {
     key: ResKey,
-    layer: String,
-    over: Option<String>,
+    layer: std::sync::Arc<str>,
+    over: Option<std::sync::Arc<str>>,
 }
 
 /// The browser's index and filters.
@@ -55,7 +55,7 @@ pub struct Browser {
     entries: Vec<Row>,
     /// How many resources there are (the copies the game reads).
     resources: usize,
-    types: Vec<ResType>,
+    types: std::sync::Arc<Vec<ResType>>,
     pub restypes: std::collections::BTreeSet<ResType>,
     pub filter: String,
     /// The copies that others override are listed under them (a builder's
@@ -65,6 +65,8 @@ pub struct Browser {
     shown: Vec<usize>,
     /// How many of those are overridden copies.
     shown_copies: usize,
+    /// Whether any matching entry in `shown` is an MDL model.
+    shown_has_mdl: bool,
     query: Option<(std::collections::BTreeSet<ResType>, String, bool)>,
     /// The load order changed since the index was built.
     pub(crate) stale: bool,
@@ -86,6 +88,8 @@ pub struct Browser {
     /// How many views have been made (their grids' ids are counted down
     /// from the highest, apart from the editor's).
     made_views: u32,
+    /// Monotonic counter for LRU eviction of cached 2DA views.
+    table_view_use: u64,
     /// An Export as Files into a folder that has some of the files: asked
     /// about before any is written over.
     pub(crate) exporting: Option<Exporting>,
@@ -97,6 +101,9 @@ pub struct Browser {
     /// when each was last drawn: let go of a while after
     /// ([`let_go_of_pictures`]).
     pub(crate) pictures: std::collections::HashMap<(ResKey, Option<String>), f64>,
+    /// The read-only text tabs' Find bars and marked lines, by key and
+    /// layer ([`TextFind`]), kept while their tabs are open.
+    pub(crate) finds: std::collections::HashMap<(ResKey, Option<String>), TextFind>,
 }
 
 /// A 2DA's read-only view.
@@ -112,6 +119,7 @@ pub(crate) struct TableView {
     /// editor's): its grid's keys are that tab's while it is the active
     /// editor (`table_view::grid_has_keys`).
     tab: Option<Tab>,
+    last_used: u64,
 }
 
 /// How many 2DA views are kept: more are made anew.
@@ -131,14 +139,16 @@ impl Browser {
         self.query = None;
         self.entries = match app_resman {
             Some(rm) => {
-                let label = |i: usize| rm.layers()[i].label.clone();
+                let labels: Vec<std::sync::Arc<str>> =
+                    rm.layers().iter().map(|l| std::sync::Arc::from(l.label.as_str())).collect();
                 rm.every_copy()
                     .into_iter()
                     .flat_map(|(key, layers)| {
-                        let top = label(layers[0]);
+                        let top = labels[layers[0]].clone();
+                        let labels = &labels;
                         layers.into_iter().enumerate().map(move |(n, i)| Row {
                             key,
-                            layer: label(i),
+                            layer: labels[i].clone(),
                             over: (n > 0).then(|| top.clone()),
                         })
                     })
@@ -152,13 +162,17 @@ impl Browser {
         // resource of its own, listed and opened as every other.)
         if let Some(g) = game {
             let key = crate::talk_view::dialog_key();
-            self.entries.push(Row { key, layer: game_talk_layer(g.language), over: None });
+            self.entries.push(Row {
+                key,
+                layer: std::sync::Arc::from(game_talk_layer(g.language)),
+                over: None,
+            });
         }
         self.resources = self.entries.iter().filter(|r| r.over.is_none()).count();
         let mut types: Vec<ResType> = self.entries.iter().map(|r| r.key.restype).collect();
         types.sort_by_key(|t| t.extension().unwrap_or_default());
         types.dedup();
-        self.types = types;
+        self.types = std::sync::Arc::new(types);
     }
 
     /// The keys at the row `at` of those listed, the list gone to it.
@@ -176,22 +190,43 @@ impl Browser {
 
     fn filtered(&mut self) -> &[usize] {
         let needle = mg_core::text::Needle::new(&self.filter);
-        let query = (self.restypes.clone(), needle.as_str().to_string(), self.show_copies);
-        if self.query.as_ref() != Some(&query) {
-            self.shown = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| {
-                    (query.2 || r.over.is_none())
-                        && (query.0.is_empty() || query.0.contains(&r.key.restype))
-                        && needle.finds(&r.key.resref.to_string())
-                })
-                .map(|(i, _)| i)
-                .collect();
-            self.shown_copies =
-                self.shown.iter().filter(|&&i| self.entries[i].over.is_some()).count();
-            self.query = Some(query);
+        let cache_hit = self.query.as_ref().is_some_and(|(types, q, copies)| {
+            *copies == self.show_copies && q == needle.as_str() && *types == self.restypes
+        });
+        if !cache_hit {
+            let check_name = !needle.is_empty();
+            let mut shown = Vec::new();
+            let mut shown_copies = 0usize;
+            let mut has_mdl = false;
+            for (i, r) in self.entries.iter().enumerate() {
+                if !self.show_copies && r.over.is_some() {
+                    continue;
+                }
+                if !self.restypes.is_empty() && !self.restypes.contains(&r.key.restype) {
+                    continue;
+                }
+                if check_name {
+                    let matches = match r.key.resref.as_str() {
+                        Some(s) => needle.finds(s),
+                        None => needle.finds(&r.key.resref.to_string_lossy()),
+                    };
+                    if !matches {
+                        continue;
+                    }
+                }
+                if r.over.is_some() {
+                    shown_copies += 1;
+                }
+                if r.key.restype == ResType::MDL {
+                    has_mdl = true;
+                }
+                shown.push(i);
+            }
+            self.shown = shown;
+            self.shown_copies = shown_copies;
+            self.shown_has_mdl = has_mdl;
+            self.query =
+                Some((self.restypes.clone(), needle.as_str().to_string(), self.show_copies));
             // (Another list: the keys start at its top.)
             self.cursor = self.cursor.map(|_| 0);
             self.reveal = self.cursor.is_some();
@@ -266,7 +301,7 @@ pub(crate) fn run_tools(app: &mut Moonglow, asked: Asked) {
         // tab's Export writes it.)
         let keys = (browser.shown.iter().map(|&i| &browser.entries[i]))
             .filter(|r| !is_game_talk(r))
-            .map(|r| (r.key, r.over.as_ref().map(|_| r.layer.clone())))
+            .map(|r| (r.key, r.over.as_ref().map(|_| r.layer.to_string())))
             .collect();
         app.actions.push(Action::SaveResources(keys));
     }
@@ -373,6 +408,7 @@ fn middle_cut(text: &str, keep: usize) -> Option<String> {
 /// the rows drawn ([`list_row`]): the name's monospace font, the width of
 /// one of its characters and of its ellipsis, the layer's small font, and
 /// the width of a layer's stub ([`LAYER_STUB`]).
+#[derive(Clone)]
 struct RowFonts {
     mono: egui::FontId,
     small: egui::FontId,
@@ -383,15 +419,25 @@ struct RowFonts {
 
 impl RowFonts {
     fn of(ui: &Ui) -> RowFonts {
-        let mono = egui::FontId::monospace(NAME_SIZE);
         let small = egui::TextStyle::Small.resolve(ui.style());
+        let key = (small.clone(), ui.ctx().pixels_per_point().to_bits());
+        let id = egui::Id::new("browser-row-fonts");
+        if let Some((was, cached)) =
+            ui.ctx().data(|d| d.get_temp::<((egui::FontId, u32), RowFonts)>(id))
+            && was == key
+        {
+            return cached;
+        }
+        let mono = egui::FontId::monospace(NAME_SIZE);
         let width =
             |text: &str, font: &egui::FontId| cut(ui, text, font.clone(), f32::INFINITY).size().x;
         // (Ten, for a width that is the font's advance, not a glyph's.)
         let char_width = width("0000000000", &mono) / 10.0;
         let ellipsis = width("0…", &mono) - width("0", &mono);
         let stub = width(LAYER_STUB, &small);
-        RowFonts { mono, small, char_width, ellipsis, stub }
+        let fonts = RowFonts { mono, small, char_width, ellipsis, stub };
+        ui.ctx().data_mut(|d| d.insert_temp(id, (key, fonts.clone())));
+        fonts
     }
 
     /// `name` laid out in the name's font in `width` at most: whole where
@@ -462,9 +508,9 @@ fn cut_in(
 fn list_row(ui: &mut Ui, row: &Row, marked: bool, fonts: &RowFonts) -> egui::Response {
     let t = mg_uikit::tokens(ui.ctx());
     let name = row.key.to_string();
-    let layer = match &row.over {
-        Some(over) => format!("{}, overridden by {over}", row.layer),
-        None => row.layer.clone(),
+    let layer: std::borrow::Cow<'_, str> = match &row.over {
+        Some(over) => format!("{}, overridden by {over}", row.layer).into(),
+        None => std::borrow::Cow::Borrowed(&row.layer),
     };
     let height = mg_uikit::row_height(ui);
     let (rect, _) =
@@ -490,7 +536,7 @@ fn list_row(ui: &mut Ui, row: &Row, marked: bool, fonts: &RowFonts) -> egui::Res
     // (The layer's part from the gap before its words to the row's end.)
     let layer_left = layer_galley.as_ref().map(|g| end - g.size().x);
     let split = layer_left.map_or(rect.right(), |l| (l - ROW_GAP).max(rect.left() + 1.0));
-    let id = ui.id().with(("browser-row", row.key, &row.layer));
+    let id = ui.id().with(("browser-row", row.key, &*row.layer));
     let named = ui.interact(rect.with_max_x(split), id, egui::Sense::click());
     named.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, marked, &name)
@@ -510,7 +556,13 @@ fn list_row(ui: &mut Ui, row: &Row, marked: bool, fonts: &RowFonts) -> egui::Res
         } else {
             let fill = if hovered { t.hover_row } else { egui::Color32::TRANSPARENT };
             let text = if row.over.is_some() { t.text_3 } else { t.text };
-            (fill, text, t.text_3, t.text_2)
+            // (Its kind's hue with Options › General › Colored icons; an
+            // overridden copy, dimmed, keeps the gray.)
+            let icon = match row.over {
+                Some(_) => t.text_2,
+                None => mg_uikit::hues::tint(ui.ctx(), kind_icon(row.key.restype), t.text_2),
+            };
+            (fill, text, t.text_3, icon)
         };
         let p = ui.painter();
         if fill != egui::Color32::TRANSPARENT {
@@ -582,7 +634,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                         )
                         .clicked()
                     {
-                        for &t in &types {
+                        for &t in types.iter() {
                             if keys.shows(t.extension().unwrap_or("?")) {
                                 browser.restypes.insert(t);
                             }
@@ -590,7 +642,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                     }
                 });
                 mg_uikit::menu_separator(ui);
-                for t in types {
+                for &t in types.iter() {
                     let ext = t.extension().unwrap_or("?");
                     let mut on = browser.restypes.contains(&t);
                     if keys.checkbox(ui, &mut on, ext) {
@@ -629,7 +681,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
         ui.check_box(&mut browser.show_copies, "Overridden copies").on_hover_text(
             "Also list each resource's copies lower in the load order, which it overrides",
         );
-        if browser.shown.iter().any(|&i| browser.entries[i].key.restype == ResType::MDL) {
+        if browser.shown_has_mdl {
             ui.check_box(&mut browser.models_as_text, "Models as text").on_hover_text(
                 "Export as Files writes compiled models as the text they compile from",
             );
@@ -710,12 +762,14 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                 // A copy another overrides: under it, set in, its own
                 // layer's (opened as that layer has it).
                 let r = list_row(ui, row, at_cursor, &fonts);
-                let copy = over.as_ref().map(|_| layer.clone());
+                let copy_arc = over.as_ref().map(|_| layer);
                 let game_talk = is_game_talk(row);
                 // (The game's dialog.tlk: shown in the Talk Table tab.)
                 let open = || match game_talk {
                     true => Action::ShowGameTalk,
-                    false => Action::OpenTab(tab_of(*k, copy.clone(), in_module(k))),
+                    false => {
+                        Action::OpenTab(tab_of(*k, copy_arc.map(|l| l.to_string()), in_module(k)))
+                    }
                 };
                 if r.clicked() {
                     clicked = Some(at);
@@ -729,12 +783,12 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                     }
                     // (A copy's as its layer has it: a model, a blueprint.)
                     let previewable = crate::model_view::previewable(k.restype)
-                        && (copy.is_some() || k.restype != ResType::MDL);
+                        && (copy_arc.is_some() || k.restype != ResType::MDL);
                     if previewable
                         && ui.button("Preview").on_hover_text("See it in the 3D viewer").clicked()
                     {
-                        let tab = match &copy {
-                            Some(layer) => Tab::ModelCopy { key: *k, layer: layer.clone() },
+                        let tab = match copy_arc {
+                            Some(layer) => Tab::ModelCopy { key: *k, layer: layer.to_string() },
                             None => Tab::Model(*k),
                         };
                         actions.push(Action::OpenTab(tab));
@@ -742,7 +796,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                     if !game_talk
                         && ui.button("Save As…").on_hover_text("As a file, as it is").clicked()
                     {
-                        actions.push(Action::SaveResource(*k, copy.clone()));
+                        actions.push(Action::SaveResource(*k, copy_arc.map(|l| l.to_string())));
                     }
                     if k.restype == ResType::MDL
                         && ui
@@ -750,7 +804,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui, pane: egui::Rect) {
                             .on_hover_text("A compiled model as the text it compiles from")
                             .clicked()
                     {
-                        actions.push(Action::SaveModelText(*k, copy.clone()));
+                        actions.push(Action::SaveModelText(*k, copy_arc.map(|l| l.to_string())));
                     }
                 });
             }
@@ -1160,8 +1214,9 @@ impl LongText {
         self.lines.get_or_init(|| {
             let (mut spans, mut widest, mut from) = (Vec::new(), 0, 0);
             for line in self.text.split('\n') {
-                spans.push(from..from + line.len());
-                widest = widest.max(line.chars().count());
+                let trimmed = line.strip_suffix('\r').unwrap_or(line);
+                spans.push(from..from + trimmed.len());
+                widest = widest.max(trimmed.chars().count());
                 from += line.len() + 1;
             }
             (spans, widest)
@@ -1193,8 +1248,151 @@ impl LongText {
     pub(crate) fn ui(
         &self,
         ui: &mut Ui,
-        salt: impl egui::AsIdSalt,
+        salt: impl std::hash::Hash + std::fmt::Debug,
         palette: Option<&crate::script_view::Palette>,
+    ) {
+        self.draw(ui, egui::Id::new(salt), palette, None);
+    }
+
+    /// [`LongText::ui`] with its Find bar, marked line and right-click menu
+    /// (`find`, the tab's): `keys` the window's; `here` whether its tab is
+    /// the one in front of the focused pane, `any_here` whether a
+    /// read-only text's is ([`view_has_the_keys`]).
+    pub(crate) fn ui_finding(
+        &self,
+        ui: &mut Ui,
+        salt: impl std::hash::Hash + std::fmt::Debug,
+        palette: Option<&crate::script_view::Palette>,
+        find: &mut TextFind,
+        (keys, here, any_here): (&crate::keys::Keymap, bool, bool),
+    ) {
+        let id = egui::Id::new(salt);
+        let ctx = ui.ctx().clone();
+        let pointer = ui.rect_contains_pointer(ui.max_rect());
+        let takes = view_has_the_keys(&ctx, (here, any_here, pointer));
+        menu_keys(&ctx, find);
+        find_keys(self, ui, id, find, keys, takes);
+        // (A right press in the text takes egui's choice of its lines away:
+        // kept, and put back the frame after, as a field's selection is.)
+        let labels = |f: &mut dyn FnMut(&mut egui::text_selection::LabelSelectionState)| {
+            ctx.with_plugin::<egui::text_selection::LabelSelectionState, _>(|s| f(s));
+        };
+        if let Some(kept) = find.kept.take() {
+            labels(&mut |s| *s = kept.clone());
+        }
+        let right_press = ctx.input(|i| {
+            i.pointer.button_pressed(egui::PointerButton::Secondary)
+                && (i.pointer.interact_pos().zip(find.view_rect))
+                    .is_some_and(|(p, r)| r.contains(p))
+        });
+        if find.picked && ((right_press && pointer) || on_menu(&ctx, id)) {
+            labels(&mut |s| find.kept = Some(s.clone()));
+        }
+        if std::mem::take(&mut find.copy_next) {
+            ctx.input_mut(|i| i.events.push(egui::Event::Copy));
+        }
+        if find.open {
+            find_bar(ui, id, find, keys);
+            // (A slice of the text a frame, the window going on: the frames
+            // go on until it is all looked through.)
+            if find.sweep(self, FIND_BUDGET) {
+                ui.ctx().request_repaint();
+            }
+        }
+        self.draw(ui, id, palette, Some(find));
+        let right_click = ctx.input(|i| {
+            i.pointer.button_clicked(egui::PointerButton::Secondary)
+                && (i.pointer.interact_pos().zip(find.view_rect))
+                    .is_some_and(|(p, r)| r.contains(p))
+        });
+        if right_click && pointer {
+            let at = ctx.pointer_interact_pos().unwrap_or_default();
+            open_menu(&ctx, id, find, at, None);
+        }
+        if find.menu.is_some() {
+            self.menu(&ctx, id, find, keys);
+        }
+    }
+
+    /// The text's right-click menu, while open: the text fields' rows
+    /// (`widgets::text_menu`'s words, order and keys), Cut and Paste grayed
+    /// as in any text only to be read, Copy with lines chosen; then Find….
+    fn menu(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        find: &mut TextFind,
+        keys: &crate::keys::Keymap,
+    ) {
+        let Some(mut open) = find.menu else { return };
+        let menu_id = menu_id(id);
+        let selected = find.all || find.picked;
+        let rows = menu_rows(selected);
+        if open.lit.is_some_and(|i| !rows[i]) {
+            open.lit = rows.iter().position(|&on| on);
+        }
+        let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+        let shortcut = |key| {
+            crate::keys::shown(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key), mac)
+        };
+        let names = [
+            ("Cut", shortcut(egui::Key::X)),
+            ("Copy", shortcut(egui::Key::C)),
+            ("Paste", shortcut(egui::Key::V)),
+            ("Select All", shortcut(egui::Key::A)),
+            ("Find…", keys.label(crate::keys::Cmd::Find, ctx)),
+        ];
+        let mut chosen = None;
+        let layer = egui::LayerId::new(egui::Order::Foreground, menu_id);
+        let shown = egui::Popup::new(menu_id, ctx.clone(), open.at, layer)
+            .kind(egui::PopupKind::Menu)
+            .style(mg_uikit::menu_style)
+            .open_memory(None)
+            .show(|ui| {
+                mg_uikit::menu_rows(ui);
+                for (i, (name, keys)) in names.iter().enumerate() {
+                    if i == 3 || i == 4 {
+                        mg_uikit::menu_separator(ui);
+                    }
+                    let lit = open.lit == Some(i) && rows[i];
+                    let button = egui::Button::new(*name).selected(lit);
+                    let r = ui.add_enabled_ui(rows[i], |ui| {
+                        mg_uikit::menu_row_with_keys(ui, button, keys)
+                    });
+                    if rows[i] && (r.inner.clicked() || (lit && open.choose)) {
+                        chosen = Some(i);
+                    }
+                }
+            });
+        open.choose = false;
+        let closed = shown.as_ref().is_none_or(|s| s.response.should_close())
+            || !egui::Popup::is_id_open(ctx, menu_id);
+        find.menu = (chosen.is_none() && !closed).then_some(open);
+        if find.menu.is_none() {
+            egui::Popup::close_id(ctx, menu_id);
+        }
+        match chosen {
+            Some(1) if find.all => ctx.copy_text(self.text.clone()),
+            Some(1) => {
+                // (egui's Copy, sent to the lines as they are next drawn:
+                // what was chosen of them is theirs to copy.)
+                find.copy_next = true;
+                ctx.request_repaint();
+            }
+            Some(3) => find.all = true,
+            Some(4) => find.open(),
+            _ => {}
+        }
+    }
+
+    /// Draws the text, its lines in sight alone, with `find`'s matches and
+    /// marked line.
+    fn draw(
+        &self,
+        ui: &mut Ui,
+        id: egui::Id,
+        palette: Option<&crate::script_view::Palette>,
+        mut find: Option<&mut TextFind>,
     ) {
         let (spans, widest) = self.lines();
         let font = match palette {
@@ -1206,30 +1404,655 @@ impl LongText {
         // rounds them: `show_rows` counts the lines in sight by it.)
         let height = palette.map_or(height, |p| p.row_height(ui.ctx().pixels_per_point()));
         let jobs = palette.map(|p| self.colored(p));
+        let ctx = ui.ctx().clone();
+        // (The marked line's band as the script editor draws its cursor's:
+        // in the colors of the ground's lightness.)
+        let tokens = match palette.and_then(|p| p.background) {
+            Some(g) if u32::from(g.r()) + u32::from(g.g()) + u32::from(g.b()) < 384 => {
+                mg_uikit::Tokens::DARK
+            }
+            Some(_) => mg_uikit::Tokens::LIGHT,
+            None => mg_uikit::tokens(&ctx),
+        };
+        let selection = ui.visuals().selection;
         ui.scope(|ui| {
             // (A line under the last, as one text's lines are.)
             ui.spacing_mut().item_spacing.y = 0.0;
-            let rows = egui::ScrollArea::both().id_salt(salt).auto_shrink([false, false]);
-            rows.show_rows(ui, height, spans.len(), |ui, range| {
+            let mut rows = egui::ScrollArea::both().id_salt(id).auto_shrink([false, false]);
+            // (A line sent to, or a match found, brought into sight.)
+            let mut sent = None;
+            if let Some(f) = find.as_deref_mut()
+                && let Some((line, chars)) = f.reveal.take()
+            {
+                let (offset, size) = f.view.unwrap_or((egui::Vec2::ZERO, ui.available_size()));
+                let top = line as f32 * height;
+                let y = if top < offset.y || top + height > offset.y + size.y {
+                    (top - (size.y - height) / 2.0).max(0.0)
+                } else {
+                    offset.y
+                };
+                let (left, right) = (chars.start as f32 * wide, chars.end as f32 * wide);
+                let x = if left < offset.x || right > offset.x + size.x {
+                    (left - size.x / 3.0).max(0.0)
+                } else {
+                    offset.x
+                };
+                rows = rows.scroll_offset(egui::vec2(x, y));
+                sent = Some(((line, chars), y));
+            }
+            let shown = rows.show_rows(ui, height, spans.len(), |ui, range| {
                 // (On the script editor's background, where one is chosen:
                 // its colors are chosen for it.)
                 if let Some(fill) = palette.and_then(|p| p.background) {
                     ui.painter().rect_filled(ui.clip_rect(), 0.0, fill);
                 }
                 ui.set_min_width(*widest as f32 * wide);
+                let sight = ui.clip_rect().x_range();
                 for at in range {
                     let line = &self.text[spans[at].clone()];
-                    if line.is_empty() {
-                        ui.allocate_exact_size(egui::vec2(0.0, height), egui::Sense::hover());
+                    // (What is drawn under the line: its band, its matches.)
+                    let under = ui.painter().add(egui::Shape::Noop);
+                    let rect = if line.is_empty() {
+                        ui.allocate_exact_size(egui::vec2(0.0, height), egui::Sense::hover()).0
                     } else if let Some(job) = jobs.as_ref().and_then(|j| j.get(at)) {
-                        ui.add(egui::Label::new(job.clone()).extend());
+                        ui.add(egui::Label::new(job.clone()).extend()).rect
                     } else {
                         let text = egui::RichText::new(line).font(font.clone());
-                        ui.add(egui::Label::new(text).extend());
+                        ui.add(egui::Label::new(text).extend()).rect
+                    };
+                    let Some(f) = find.as_deref() else { continue };
+                    let mut shapes = Vec::new();
+                    let band = egui::Rangef::new(rect.top(), rect.top() + height);
+                    if f.marked == Some(at) {
+                        let whole = egui::Rect::from_x_y_ranges(sight, band);
+                        shapes.push(egui::Shape::rect_filled(whole, 0.0, tokens.current_line));
+                        for edge in crate::script_view::hairlines(band, ctx.pixels_per_point()) {
+                            let edge = egui::Rect::from_x_y_ranges(sight, edge);
+                            shapes.push(egui::Shape::rect_filled(
+                                edge,
+                                0.0,
+                                tokens.current_line_edge,
+                            ));
+                        }
                     }
+                    if f.all && !line.is_empty() {
+                        shapes.push(egui::Shape::rect_filled(rect, 0.0, selection.bg_fill));
+                    }
+                    let found = if f.open { f.in_line(at) } else { Vec::new() };
+                    if !found.is_empty() {
+                        // (Where its characters are as the line is laid
+                        // out: a tab is wider than a letter.)
+                        let galley = match jobs.as_ref().and_then(|j| j.get(at)) {
+                            Some(job) => ui.fonts_mut(|x| x.layout_job(job.clone())),
+                            None => ui.fonts_mut(|x| {
+                                x.layout_no_wrap(
+                                    line.to_string(),
+                                    font.clone(),
+                                    selection.stroke.color,
+                                )
+                            }),
+                        };
+                        let x = |c: usize| {
+                            let at = galley.pos_from_cursor(egui::text::CCursor::new(c));
+                            rect.left() + at.left()
+                        };
+                        for (i, m) in found {
+                            let x = egui::Rangef::new(x(m.chars.0), x(m.chars.1));
+                            let r = egui::Rect::from_x_y_ranges(x, band);
+                            if Some(i) == f.current {
+                                shapes.push(egui::Shape::rect_filled(r, 2.0, selection.bg_fill));
+                                let stroke = egui::Stroke::new(1.0, selection.stroke.color);
+                                let inside = egui::StrokeKind::Inside;
+                                shapes.push(egui::Shape::rect_stroke(r, 2.0, stroke, inside));
+                            } else {
+                                let fill = selection.bg_fill.gamma_multiply(0.45);
+                                shapes.push(egui::Shape::rect_filled(r, 2.0, fill));
+                            }
+                        }
+                    }
+                    ui.painter().set(under, egui::Shape::Vec(shapes));
                 }
             });
+            if let Some(f) = find {
+                // (Not there yet: the view had no room, as a window's first
+                // frame, which sizes it, has none. Again next frame, a few
+                // times at most.)
+                if let Some((s, y)) = sent {
+                    let room = (shown.content_size.y - shown.inner_rect.height()).max(0.0);
+                    let short = (shown.state.offset.y - y.min(room)).abs() > 1.0;
+                    if short && f.tries < 5 {
+                        f.tries += 1;
+                        f.reveal = Some(s);
+                        ctx.request_repaint();
+                    } else {
+                        f.tries = 0;
+                    }
+                }
+                f.view = Some((shown.state.offset, shown.inner_rect.size()));
+                f.view_rect = Some(shown.inner_rect);
+                f.top_line = (shown.state.offset.y / height.max(1.0)) as usize;
+                // (A press in the text: what Select All chose and the
+                // marked line let go of, as the editor's band moves.)
+                // (A press on the text's own menu is the menu's.)
+                if on_menu(&ctx, id) {
+                    return;
+                }
+                let pressed = ctx.input(|i| i.pointer.any_pressed())
+                    && ui.rect_contains_pointer(shown.inner_rect);
+                // (Lines chosen by egui: dragged over from a press in the
+                // text, or a word or line clicked twice or three times; a
+                // press, Escape or a press elsewhere lets go of them, as
+                // egui does.)
+                let (primary, dragging, twice, escape, elsewhere) = ctx.input(|i| {
+                    let p = &i.pointer;
+                    (
+                        p.primary_pressed(),
+                        p.primary_down() && p.is_decidedly_dragging(),
+                        p.button_double_clicked(egui::PointerButton::Primary)
+                            || p.button_triple_clicked(egui::PointerButton::Primary),
+                        i.key_pressed(egui::Key::Escape),
+                        p.any_pressed() && !pressed,
+                    )
+                });
+                if (pressed && primary) || escape || elsewhere {
+                    f.picked = false;
+                }
+                let inside =
+                    ctx.pointer_interact_pos().is_some_and(|p| shown.inner_rect.contains(p));
+                if inside && (twice || (dragging && f.pressed_in)) {
+                    f.picked = true;
+                }
+                if pressed && primary {
+                    f.pressed_in = true;
+                } else if elsewhere {
+                    f.pressed_in = false;
+                }
+                // (Only a right press keeps what was chosen, for its menu.)
+                if pressed && primary {
+                    f.all = false;
+                    f.marked = None;
+                }
+                if pressed {
+                    // (The keys the text's, as a click in the editor area
+                    // takes them from a list: Find's Ctrl+F the view's.)
+                    crate::palette_view::give_keys(&ctx, crate::palette_view::Keys::Area);
+                }
+            }
         });
+    }
+}
+
+/// How long Find looks through a read-only text a frame: `nwscript.nss`
+/// (700 KB) is looked through over several, the window going on, as the
+/// talk table's Find is.
+const FIND_BUDGET: std::time::Duration = std::time::Duration::from_millis(3);
+
+/// How many lines Find looks through between two looks at the clock.
+const FIND_SLICE: usize = 64;
+
+/// A read-only text's Find bar (Ctrl+F: the script editor's Find words
+/// and keys, without Replace) and the line it was sent to (Go to
+/// Definition in a game script), the tab's while it is open.
+#[derive(Debug, Default)]
+pub(crate) struct TextFind {
+    /// The bar is shown.
+    pub(crate) open: bool,
+    /// What is looked for (Find What), and how.
+    pub(crate) find: String,
+    pub(crate) options: crate::script_tools::SearchOptions,
+    /// The field is to take the keys when next drawn.
+    focus: bool,
+    /// The field had the keys as it was last drawn (egui lets go of them
+    /// at an Escape or an Enter before anything of the frame is drawn).
+    field_had: bool,
+    /// What was found for what was typed.
+    found: Option<Found>,
+    /// The match chosen, in `found`'s.
+    current: Option<usize>,
+    /// The first line in sight as last drawn: a new search's match is
+    /// chosen from it on.
+    top_line: usize,
+    /// Where a new search's match is chosen from.
+    from_line: usize,
+    /// A line to bring into sight when next drawn, and the characters of
+    /// it to show.
+    reveal: Option<(usize, std::ops::Range<usize>)>,
+    /// The line marked as the script editor marks the line it is sent to.
+    pub(crate) marked: Option<usize>,
+    /// Select All: the whole text chosen, which Copy copies.
+    all: bool,
+    /// The view's scroll and size, as last drawn.
+    view: Option<(egui::Vec2, egui::Vec2)>,
+    /// Its tab has drawn a text (not yet: a tab sent to a line, opening).
+    shown: bool,
+    /// How many frames a line to bring into sight was sent again for.
+    tries: u8,
+    /// Where the text's view was drawn last (for tests).
+    view_rect: Option<egui::Rect>,
+    /// Its right-click menu, while open.
+    menu: Option<ViewMenu>,
+    /// Lines in sight dragged over (or a word or line clicked twice or
+    /// three times): egui's own choice of the labels, which Copy copies.
+    picked: bool,
+    /// The last press of the pointer was in the text (a drag from it
+    /// chooses lines).
+    pressed_in: bool,
+    /// egui's choice of the labels as a right press began, put back the
+    /// frame after (a press takes it away, on a line or beside one).
+    kept: Option<egui::text_selection::LabelSelectionState>,
+    /// The menu's Copy, done as the next frame draws the lines: egui's
+    /// Copy sent to them.
+    copy_next: bool,
+}
+
+/// A read-only text's right-click menu: where it opened and the row the
+/// keys are at (Shift+F10 opens it at the first, Up and Down move,
+/// Enter or Space chooses).
+#[derive(Debug, Clone, Copy)]
+struct ViewMenu {
+    at: egui::Pos2,
+    lit: Option<usize>,
+    choose: bool,
+}
+
+/// A search through a read-only text: what was looked for in which text
+/// (its place and length), the matches so far (each its line and its
+/// characters in the line, in order) and the next line to look at
+/// (`None`: all looked through).
+#[derive(Debug, Clone)]
+struct Found {
+    query: String,
+    options: crate::script_tools::SearchOptions,
+    of: (usize, usize),
+    matches: Vec<Match>,
+    next: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Match {
+    line: usize,
+    chars: (usize, usize),
+}
+
+/// Every match of `needle` in `line`, each its characters, as the
+/// script editor's Find finds them (`script_tools::find`'s rules: not
+/// overlapping, from the start; without Match Case, letter by letter with
+/// case and accents aside; whole words of letters, digits and `_`), in
+/// one pass (a text of one long line, minified, is looked through once,
+/// not once a match).
+fn line_matches(
+    line: &str,
+    needle: &str,
+    o: &crate::script_tools::SearchOptions,
+) -> Vec<(usize, usize)> {
+    let pat: Vec<char> = needle.chars().collect();
+    let mut out = Vec::new();
+    if pat.is_empty() {
+        return out;
+    }
+    let hay: Vec<char> = line.chars().collect();
+    let Some(last) = hay.len().checked_sub(pat.len()) else { return out };
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let same =
+        |a: char, b: char| if o.match_case { a == b } else { mg_core::text::same_letter(a, b) };
+    let mut s = 0;
+    while s <= last {
+        let whole = !o.whole_word
+            || ((s == 0 || !ident(hay[s - 1]))
+                && hay.get(s + pat.len()).is_none_or(|&c| !ident(c)));
+        if whole && hay[s..s + pat.len()].iter().zip(&pat).all(|(&h, &p)| same(h, p)) {
+            out.push((s, s + pat.len()));
+            s += pat.len();
+        } else {
+            s += 1;
+        }
+    }
+    out
+}
+
+impl TextFind {
+    /// Opens the bar, its field with the keys.
+    pub(crate) fn open(&mut self) {
+        self.open = true;
+        self.focus = true;
+        self.all = false;
+    }
+
+    /// Marks `line` and brings it into sight when next drawn.
+    pub(crate) fn go_to_line(&mut self, line: usize) {
+        self.marked = Some(line);
+        self.reveal = Some((line, 0..0));
+    }
+
+    /// Looks on through `text` for what is typed, from where it was, for
+    /// at most `budget` (the clock asked every [`FIND_SLICE`] lines);
+    /// begun again where what is typed, its options or the text changed.
+    /// Whether there is more to look through.
+    fn sweep(&mut self, text: &LongText, budget: std::time::Duration) -> bool {
+        let of = (text.text.as_ptr() as usize, text.text.len());
+        let fresh = self
+            .found
+            .as_ref()
+            .is_some_and(|s| s.query == self.find && s.options == self.options && s.of == of);
+        if !fresh {
+            self.current = None;
+            self.from_line = self.top_line;
+            self.found = (!self.find.is_empty()).then(|| Found {
+                query: self.find.clone(),
+                options: self.options.clone(),
+                of,
+                matches: Vec::new(),
+                next: Some(0),
+            });
+        }
+        let Some(s) = &mut self.found else { return false };
+        let Some(mut at) = s.next else { return false };
+        let spans = &text.lines().0;
+        let options = crate::script_tools::SearchOptions { backwards: false, ..s.options.clone() };
+        let began = std::time::Instant::now();
+        loop {
+            let end = (at + FIND_SLICE).min(spans.len());
+            for line in at..end {
+                let found = line_matches(&text.text[spans[line].clone()], &s.query, &options);
+                s.matches.extend(found.into_iter().map(|chars| Match { line, chars }));
+            }
+            at = end;
+            if at >= spans.len() || began.elapsed() >= budget {
+                break;
+            }
+        }
+        s.next = (at < spans.len()).then_some(at);
+        // The first match from the line in sight on, as soon as found
+        // (else the first of all, once all are looked through).
+        if self.current.is_none() {
+            let from = s.matches.partition_point(|m| m.line < self.from_line);
+            let pick = match from < s.matches.len() {
+                true => Some(from),
+                false => (s.next.is_none() && !s.matches.is_empty()).then_some(0),
+            };
+            if let Some(i) = pick {
+                self.choose(i);
+            }
+        }
+        self.found.as_ref().is_some_and(|s| s.next.is_some())
+    }
+
+    /// The match `i` chosen and brought into sight.
+    fn choose(&mut self, i: usize) {
+        let Some(m) = self.found.as_ref().and_then(|s| s.matches.get(i)) else { return };
+        self.current = Some(i);
+        self.reveal = Some((m.line, m.chars.0..m.chars.1));
+    }
+
+    /// The next match (`forward`) or the previous, round from the last to
+    /// the first once all are found.
+    fn step(&mut self, forward: bool) {
+        let Some(s) = &self.found else { return };
+        let (n, done) = (s.matches.len(), s.next.is_none());
+        if n == 0 {
+            return;
+        }
+        let i = match (self.current, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) if i + 1 < n => i + 1,
+            (Some(_), true) if done => 0,
+            (Some(i), false) if i > 0 => i - 1,
+            (Some(_), false) if done => n - 1,
+            (Some(i), _) => i,
+        };
+        self.choose(i);
+    }
+
+    /// The matches in `line`, each with its place among all.
+    fn in_line(&self, line: usize) -> Vec<(usize, Match)> {
+        let Some(s) = &self.found else { return Vec::new() };
+        let from = s.matches.partition_point(|m| m.line < line);
+        let to = from + s.matches[from..].partition_point(|m| m.line == line);
+        (from..to).map(|i| (i, s.matches[i])).collect()
+    }
+
+    /// What the bar's count says: the match chosen of how many, how many
+    /// so far while it looks, or none.
+    fn count(&self) -> String {
+        let Some(s) = &self.found else { return String::new() };
+        let n = s.matches.len();
+        match (s.next.is_some(), n, self.current) {
+            (true, _, _) => format!("{n} found so far"),
+            (false, 0, _) => "No matches".into(),
+            (false, 1, _) => "1 match".into(),
+            (false, n, Some(i)) => format!("{} of {n} matches", i + 1),
+            (false, n, None) => format!("{n} matches"),
+        }
+    }
+
+    /// For tests: the matches found, whether all is looked through, the
+    /// match chosen (its line, from 0) and the marked line.
+    pub(crate) fn state(&self) -> (usize, bool, Option<usize>, Option<usize>) {
+        let found = self.found.as_ref();
+        let line = self.current.and_then(|i| Some(found?.matches.get(i)?.line));
+        let n = found.map_or(0, |s| s.matches.len());
+        (n, found.is_none_or(|s| s.next.is_none()), line, self.marked)
+    }
+}
+
+/// The Find bar's field's id, for a view's `id`.
+fn find_field_id(id: egui::Id) -> egui::Id {
+    id.with("find-field")
+}
+
+/// The right-click menu's id (an egui popup), for a view's `id`.
+fn menu_id(id: egui::Id) -> egui::Id {
+    id.with("menu")
+}
+
+/// Whether a press of the pointer landed on the view `id`'s menu.
+fn on_menu(ctx: &egui::Context, id: egui::Id) -> bool {
+    let layer = egui::LayerId::new(egui::Order::Foreground, menu_id(id));
+    ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()))
+        .flatten()
+        .is_some_and(|p| ctx.layer_id_at(p) == Some(layer))
+}
+
+/// Which of the menu's rows are on (Cut, Copy, Paste, Select All, Find…):
+/// Copy with lines chosen (`selected`), never Cut or Paste.
+fn menu_rows(selected: bool) -> [bool; 5] {
+    [false, selected, false, true, true]
+}
+
+/// Opens the view `id`'s menu at `at`; from the keys (`lit`), its first
+/// row that is on lit.
+fn open_menu(
+    ctx: &egui::Context,
+    id: egui::Id,
+    find: &mut TextFind,
+    at: egui::Pos2,
+    lit: Option<()>,
+) {
+    let rows = menu_rows(find.all || find.picked);
+    let lit = lit.and_then(|()| rows.iter().position(|&on| on));
+    find.menu = Some(ViewMenu { at, lit, choose: false });
+    egui::Popup::open_id(ctx, menu_id(id));
+    ctx.request_repaint();
+}
+
+/// While the view's menu is open, its keys: Up and Down move along its
+/// rows that are on, Enter or Space chooses, Escape or Tab closes it
+/// (not the Find bar).
+fn menu_keys(ctx: &egui::Context, find: &mut TextFind) {
+    use egui::{Event, Key};
+    let Some(open) = &mut find.menu else { return };
+    let rows = menu_rows(find.all || find.picked);
+    let mut close = false;
+    ctx.input_mut(|i| {
+        i.events.retain(|e| {
+            let Event::Key { key, pressed, .. } = e else { return true };
+            match key {
+                Key::ArrowDown | Key::ArrowUp if *pressed => {
+                    let down = *key == Key::ArrowDown;
+                    let n = rows.len();
+                    let mut at = open.lit;
+                    for _ in 0..n {
+                        let i = match (at, down) {
+                            (None, true) => 0,
+                            (None, false) => n - 1,
+                            (Some(i), true) => (i + 1) % n,
+                            (Some(i), false) => (i + n - 1) % n,
+                        };
+                        at = Some(i);
+                        if rows[i] {
+                            break;
+                        }
+                    }
+                    open.lit = at;
+                }
+                Key::Enter | Key::Space if *pressed => open.choose = open.lit.is_some(),
+                Key::Escape | Key::Tab if *pressed => close = true,
+                Key::ArrowDown | Key::ArrowUp | Key::Enter | Key::Space => {}
+                Key::Escape | Key::Tab => {}
+                _ => return true,
+            }
+            false
+        });
+        i.events.retain(|e| !matches!(e, Event::Text(t) if t == " "));
+    });
+    if close {
+        find.menu = None;
+    }
+}
+
+/// The view (a read-only text, `id`) that takes the keys of Find, Select
+/// All, Copy and its menu, when no field has them: exactly one, the
+/// first of
+/// - the one whose tab is in front of the focused pane (`here`; a press
+///   in a view brings its tab there);
+/// - with none such (`any_here`), the one the pointer is over, only while
+///   no view was ever pressed in (a window just opened).
+///
+/// A view pressed in, then a press elsewhere, then none here: none takes
+/// them (the pointer resting over a text the builder is not in takes no
+/// keys).
+fn view_has_the_keys(ctx: &egui::Context, (here, any_here, pointer): (bool, bool, bool)) -> bool {
+    let key = egui::Id::new("mg-read-only-view-pressed");
+    let pressed = ctx.input(|i| i.pointer.any_pressed());
+    if pressed && pointer {
+        ctx.data_mut(|d| d.insert_temp(key, true));
+    }
+    let ever = ctx.data(|d| d.get_temp::<bool>(key)).is_some();
+    here || (!any_here && !ever && pointer)
+}
+
+/// The keys of a read-only text with its Find: Find (Ctrl+F) opens the
+/// bar, Find Next (F3) and Shift+F3 go on, Escape closes it and gives the
+/// keys back to the text, Select All (Ctrl+A) chooses the whole text and
+/// Copy copies it. Not while another field has the keys.
+fn find_keys(
+    text: &LongText,
+    ui: &Ui,
+    id: egui::Id,
+    find: &mut TextFind,
+    keys: &crate::keys::Keymap,
+    here: bool,
+) {
+    use crate::keys::Cmd;
+    let ctx = ui.ctx();
+    let field = find_field_id(id);
+    // (The bar's field, or nothing, has the keys.)
+    let ours = find.field_had || ctx.memory(|m| m.has_focus(field));
+    // (Nor while a list drawn before the editor area has the keys: the
+    // module tree's Ctrl+F is its Filter's.)
+    let free = !ctx.egui_wants_keyboard_input() && !crate::palette_view::a_list_has_the_keys(ctx);
+    if !(ours || (here && free)) {
+        return;
+    }
+    if ctx.input_mut(|i| keys.consume(i, Cmd::Find)) {
+        find.open();
+    }
+    if find.open {
+        if ctx.input_mut(|i| keys.consume(i, Cmd::FindNext)) {
+            find.step(true);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F3)) {
+            find.step(false);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            find.open = false;
+            find.field_had = false;
+            ctx.memory_mut(|m| m.surrender_focus(field));
+        }
+    }
+    if free && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+        find.all = true;
+    }
+    // (Shift+F10: the menu, at the text's top left, its first row on lit.
+    // In the bar's field, the field's own.)
+    if free
+        && find.menu.is_none()
+        && let Some(view) = find.view_rect
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F10))
+    {
+        open_menu(ctx, id, find, view.left_top() + egui::vec2(8.0, 8.0), Some(()));
+    }
+    if find.all && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+        ctx.copy_text(text.text.clone());
+    }
+}
+
+/// The Find bar over a read-only text: Find What, the previous and next
+/// match, Match Case, Match Whole Word Only, the count and Close.
+fn find_bar(ui: &mut Ui, id: egui::Id, find: &mut TextFind, keys: &crate::keys::Keymap) {
+    use crate::keys::Cmd;
+    let ctx = ui.ctx().clone();
+    let field_id = find_field_id(id);
+    let next_keys = keys.label(Cmd::FindNext, &ctx);
+    let tip = |what: &str, keys: &str| match keys.is_empty() {
+        true => what.to_string(),
+        false => format!("{what} ({keys})"),
+    };
+    let mut forward = None;
+    let mut close = false;
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            crate::widgets::field_label(ui, "Find What");
+            let r = ui.add(mg_uikit::text_field(&mut find.find).id(field_id).desired_width(220.0));
+            r.ctx.accesskit_node_builder(r.id, |node| node.set_label("Find What"));
+            if std::mem::take(&mut find.focus) {
+                r.request_focus();
+            }
+            // (Enter and Shift+Enter: the next and the previous, the
+            // field keeping the keys.)
+            if find.field_had && r.lost_focus() {
+                let enter =
+                    ctx.input(|i| i.key_pressed(egui::Key::Enter).then_some(!i.modifiers.shift));
+                if let Some(ahead) = enter {
+                    forward = Some(ahead);
+                    r.request_focus();
+                }
+            }
+            find.field_had = r.has_focus() || forward.is_some();
+            let previous = mg_uikit::IconButton::new(mg_uikit::Icon::ChevronUp, "Find Previous");
+            let b = ui.add(previous.icon_only(true));
+            if b.on_hover_text(tip("The previous match", "Shift+F3")).clicked() {
+                forward = Some(false);
+            }
+            let next = mg_uikit::IconButton::new(mg_uikit::Icon::ChevronDown, "Find Next");
+            let b = ui.add(next.icon_only(true));
+            if b.on_hover_text(tip("The next match", &next_keys)).clicked() {
+                forward = Some(true);
+            }
+            ui.check_box(&mut find.options.match_case, "Match Case");
+            ui.check_box(&mut find.options.whole_word, "Match Whole Word Only");
+            ui.weak(find.count());
+            let b = ui.add(crate::widgets::clear_button().name("Close Find"));
+            close = b.on_hover_text(tip("Close Find", "Esc")).clicked();
+        });
+    });
+    if let Some(ahead) = forward {
+        find.step(ahead);
+    }
+    if close {
+        find.open = false;
+        find.field_had = false;
     }
 }
 
@@ -1274,6 +2097,18 @@ pub(crate) fn read_only_counts() -> (usize, usize) {
 }
 
 impl Browser {
+    /// Evicts the least-recently-used cached read-only 2DA view when at capacity.
+    fn evict_lru_table_view(&mut self) {
+        if self.table_views.len() < VIEWS_KEPT {
+            return;
+        }
+        if let Some(evict) =
+            self.table_views.iter().min_by_key(|(_, v)| v.last_used).map(|(k, _)| k.clone())
+        {
+            self.table_views.remove(&evict);
+        }
+    }
+
     /// The panel's count (the Resources board's "627 of 113538
     /// resources"), as its list was last filtered: also the Status Bar's
     /// while the panel is in use.
@@ -1355,9 +2190,15 @@ pub(crate) fn plain(key: ResKey, data: &[u8], rm: Option<&mg_resman::ResMan>) ->
             Err(e) => Plain::Error(e.to_string()),
         }
     } else if is_text(key.restype, data) {
-        // (Its bytes as Latin-1 where they aren't UTF-8.)
-        let latin = || data.iter().map(|&b| b as char).collect();
-        Plain::Text(String::from_utf8(data.to_vec()).unwrap_or_else(|_| latin()).into())
+        // (Other text UTF-8 where it is: Moonglow and NUI write JUI so,
+        // and LUA, MTR and TXT files are often saved so. Else the game's
+        // codepage.)
+        let decoded = if key.restype == ResType::NSS {
+            crate::text::decode_script(data)
+        } else {
+            std::str::from_utf8(data).map_or_else(|_| crate::text::decode(data), str::to_owned)
+        };
+        Plain::Text(crate::text::to_editor(&decoded).0.into())
     } else if let Some(text) = model_text(key, data, rm) {
         Plain::Text(text.into())
     } else {
@@ -1387,6 +2228,125 @@ pub(crate) fn plain_ui(ui: &mut Ui, key: ResKey, view: &Plain, names: crate::ro_
         Plain::Error(e) => {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
+    }
+}
+
+/// The read-only tab of `key` (the copy the game reads), or of `layer`'s
+/// copy.
+fn read_only_tab(key: ResKey, layer: Option<&str>) -> Tab {
+    match layer {
+        None => Tab::Resource(key),
+        Some(layer) => Tab::ResourceCopy { key, layer: layer.to_string() },
+    }
+}
+
+/// The key and layer of a read-only tab.
+fn shown_at(tab: &Tab) -> Option<(ResKey, Option<String>)> {
+    match tab {
+        Tab::Resource(key) => Some((*key, None)),
+        Tab::ResourceCopy { key, layer } => Some((*key, Some(layer.clone()))),
+        _ => None,
+    }
+}
+
+/// A read-only tab's text with its Find bar and marked line: the keys are
+/// its own while its tab is the one in front of the focused pane (a
+/// window's, or the main window's) and no list has them.
+fn text_ui(
+    app: &mut Moonglow,
+    ui: &mut Ui,
+    text: &LongText,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    palette: Option<&crate::script_view::Palette>,
+    tab: &Tab,
+) {
+    // (As the frame began: the dock is the editor area's while it draws.)
+    let active = crate::table_view::active_tab(app);
+    let here = active.as_ref() == Some(tab);
+    // (Whether a read-only text's tab is in front of the focused pane:
+    // then it alone takes the keys, wherever the pointer is.)
+    let any_here = (active.as_ref().and_then(shown_at))
+        .is_some_and(|at| app.browser.finds.get(&at).is_some_and(|f| f.shown));
+    let Some(at) = shown_at(tab) else { return };
+    let Moonglow { browser, keymap, panes_tabs, .. } = app;
+    // (The finds of tabs closed let go of: not one just sent to a line,
+    // whose tab opens. By the tabs as the frame began: the dock is the
+    // editor area's while it draws, and empty here.)
+    browser.finds.retain(|(k, l), f| {
+        f.reveal.is_some()
+            || (k, l) == (&at.0, &at.1)
+            || panes_tabs.iter().flatten().any(|t| *t == read_only_tab(*k, l.as_deref()))
+    });
+    let find = browser.finds.entry(at).or_default();
+    find.shown = true;
+    text.ui_finding(ui, salt, palette, find, (keymap, here, any_here));
+}
+
+impl Browser {
+    /// A read-only tab sent to a line (from 0): marked and brought into
+    /// sight when next drawn, open or not yet.
+    pub(crate) fn go_to_line(&mut self, key: ResKey, layer: Option<&str>, line: usize) {
+        let find = self.finds.entry((key, layer.map(str::to_string))).or_default();
+        find.go_to_line(line);
+    }
+}
+
+/// The read-only text in front, whose Find the Command Palette's Find
+/// opens: its key and layer.
+fn text_in_front(app: &Moonglow) -> Option<(ResKey, Option<String>)> {
+    let at = shown_at(&app.front_tab()?)?;
+    app.browser.finds.get(&at).is_some_and(|f| f.shown).then_some(at)
+}
+
+/// The key commands of a read-only text in front that the Command Palette
+/// lists (Options › Keyboard's Script group): Find, as its Ctrl+F.
+pub(crate) fn palette_commands(app: &Moonglow) -> Vec<(crate::keys::Cmd, bool)> {
+    match text_in_front(app) {
+        Some(_) => vec![(crate::keys::Cmd::Find, true)],
+        None => Vec::new(),
+    }
+}
+
+/// Runs a command of [`palette_commands`] on the read-only text in front.
+pub(crate) fn run_palette_command(app: &mut Moonglow, cmd: crate::keys::Cmd) {
+    if cmd != crate::keys::Cmd::Find {
+        return;
+    }
+    if let Some(at) = text_in_front(app)
+        && let Some(f) = app.browser.finds.get_mut(&at)
+    {
+        f.open();
+    }
+}
+
+/// Whether a read-only tab shows a text (its Find's keys are hinted in the
+/// Status Bar).
+pub(crate) fn shows_text(app: &Moonglow, key: ResKey, layer: Option<&str>) -> bool {
+    app.browser.finds.get(&(key, layer.map(str::to_string))).is_some_and(|f| f.shown)
+}
+
+impl Moonglow {
+    /// A read-only tab's Find, for tests: the matches found, whether all is
+    /// looked through, the line of the match chosen and the marked line.
+    #[doc(hidden)]
+    pub fn read_only_find_for_test(
+        &self,
+        key: ResKey,
+        layer: Option<&str>,
+    ) -> Option<(usize, bool, Option<usize>, Option<usize>)> {
+        Some(self.browser.finds.get(&(key, layer.map(str::to_string)))?.state())
+    }
+
+    /// Where a read-only tab's text was drawn last, for tests.
+    #[doc(hidden)]
+    pub fn read_only_view_rect_for_test(&self, key: ResKey) -> Option<egui::Rect> {
+        self.browser.finds.get(&(key, None))?.view_rect
+    }
+
+    /// Whether a read-only tab's Find bar is open, for tests.
+    #[doc(hidden)]
+    pub fn read_only_find_open_for_test(&self, key: ResKey, layer: Option<&str>) -> bool {
+        self.browser.finds.get(&(key, layer.map(str::to_string))).is_some_and(|f| f.open)
     }
 }
 
@@ -1500,7 +2460,7 @@ pub(crate) fn resource_ui(app: &mut Moonglow, ui: &mut Ui, key: ResKey, layer: O
     }
     match &viewed.content {
         Content::Picture(_) | Content::Sound(_) if bytes => {
-            return viewed.bytes().ui(ui, salt, None);
+            return text_ui(app, ui, viewed.bytes(), salt, None, &tab);
         }
         Content::Picture(Some(picture)) => {
             let room = ui.available_rect_before_wrap();
@@ -1526,7 +2486,7 @@ pub(crate) fn resource_ui(app: &mut Moonglow, ui: &mut Ui, key: ResKey, layer: O
                     .unwrap_or_else(|| hex(&viewed.data[..viewed.data.len().min(512)]))
                     .into()
             });
-            return text.ui(ui, salt, None);
+            return text_ui(app, ui, text, salt, None, &tab);
         }
         Content::Model(_) => {
             use crate::model_view::{Shown, Source};
@@ -1544,9 +2504,11 @@ pub(crate) fn resource_ui(app: &mut Moonglow, ui: &mut Ui, key: ResKey, layer: O
     match &viewed.content {
         Content::Script(text) => {
             let palette = crate::script_view::Palette::for_ui(&app.settings.script_style, ui);
-            return text.ui(ui, salt, Some(&palette));
+            return text_ui(app, ui, text, salt, Some(&palette), &tab);
         }
-        Content::Text(text) | Content::Binary(text) => return text.ui(ui, salt, None),
+        Content::Text(text) | Content::Binary(text) => {
+            return text_ui(app, ui, text, salt, None, &tab);
+        }
         _ => {}
     }
     match &viewed.content {
@@ -1855,18 +2817,21 @@ pub(crate) fn two_da(
         let had = v.doc.edit.table();
         v.of == of && had.len() == t.len() && had.columns() == t.columns()
     });
+    browser.table_view_use += 1;
+    let used = browser.table_view_use;
     if !kept {
-        if browser.table_views.len() >= VIEWS_KEPT {
-            browser.table_views.clear();
-        }
+        browser.evict_lru_table_view();
         browser.made_views += 1;
         let id = u32::MAX - browser.made_views;
         let doc = TableDoc::read_only(id, key, t.clone());
-        browser.table_views.insert(at.clone(), TableView { of, rows_from: None, doc, tab: None });
+        browser
+            .table_views
+            .insert(at.clone(), TableView { of, rows_from: None, doc, tab: None, last_used: used });
     }
     let rows_from = browser.rows_from.filter(|_| layered);
     let strrefs = !browser.raw_strrefs;
     let view = browser.table_views.get_mut(&at).expect("made above");
+    view.last_used = used;
     if view.rows_from != rows_from {
         view.rows_from = rows_from;
         view.doc.within = rows_from
@@ -1890,6 +2855,59 @@ pub(crate) fn two_da(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Find in a read-only text looks a slice of lines at a time: with no
+    /// time to spare, one slice a call, and on until all is looked
+    /// through, what is found the same as at one go.
+    #[test]
+    fn a_read_only_text_is_searched_a_slice_at_a_time() {
+        let text: String = (0..1000).map(|n| format!("line {n} word\n")).collect();
+        let text = LongText::from(text);
+        let mut f = TextFind { find: "WORD".into(), ..Default::default() };
+        assert!(f.sweep(&text, std::time::Duration::ZERO), "more to look through");
+        let found = f.found.as_ref().unwrap();
+        assert_eq!(found.next, Some(FIND_SLICE), "one slice");
+        assert_eq!(found.matches.len(), FIND_SLICE);
+        let mut calls = 1;
+        while f.sweep(&text, std::time::Duration::ZERO) {
+            calls += 1;
+        }
+        assert_eq!(calls + 1, 1001_usize.div_ceil(FIND_SLICE), "a slice a call");
+        assert_eq!(f.state(), (1000, true, Some(0), None));
+        let mut once = TextFind { find: "WORD".into(), ..Default::default() };
+        assert!(!once.sweep(&text, std::time::Duration::from_secs(60)));
+        assert_eq!(once.found.unwrap().matches, f.found.unwrap().matches);
+        // Each line's matches as the script editor's Find finds them.
+        let o = |match_case, whole_word| crate::script_tools::SearchOptions {
+            match_case,
+            whole_word,
+            backwards: false,
+        };
+        for (line, needle) in [
+            ("aaaa", "aa"),
+            ("Árbol arbol ARBOL", "arbol"),
+            ("foo food _foo foo", "foo"),
+            ("x", "xy"),
+        ] {
+            for opts in [o(false, false), o(true, false), o(false, true), o(true, true)] {
+                let mut by_find = Vec::new();
+                let mut from = 0;
+                while let Some((a, b)) = crate::script_tools::find(line, needle, from, &opts) {
+                    if a < from {
+                        break;
+                    }
+                    by_find.push((a, b));
+                    from = b;
+                }
+                assert_eq!(line_matches(line, needle, &opts), by_find, "{line} {needle} {opts:?}");
+            }
+        }
+        // Whole words, and case, as the script editor's Find has them.
+        let mut whole = TextFind { find: "wor".into(), ..Default::default() };
+        whole.options.whole_word = true;
+        whole.sweep(&text, std::time::Duration::from_secs(60));
+        assert_eq!(whole.state().0, 0);
+    }
 
     /// A row's name and layer share its room, the name first (the
     /// owner's ruling on the review of M3 T4): both whole where they fit;
@@ -1973,5 +2991,110 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&jobs, &text.colored(&light)), "anew for other colors");
         // (An empty text is one empty line.)
         assert_eq!(LongText::from(String::new()).lines().0.len(), 1);
+    }
+
+    #[test]
+    fn load_order_changed_clears_browser_table_views_and_pictures() {
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        let key = ResKey::parse("classes", ResType::TWODA).unwrap();
+        let table = mg_2da::TwoDa::parse(b"2DA V2.0\n\nLABEL\n0 *\n", mg_core::Codepage::default())
+            .unwrap();
+        let doc = crate::table_view::TableDoc::read_only(u32::MAX, key, table);
+        app.browser.table_views.insert(
+            (key, None),
+            TableView { of: 0, rows_from: None, doc, tab: None, last_used: 0 },
+        );
+        app.browser.pictures.insert((key, None), 1.0);
+        app.browser.bytes_shown.insert((key, None));
+
+        app.load_order_changed();
+        assert!(app.browser.table_views.is_empty());
+        assert!(app.browser.pictures.is_empty());
+        assert!(!app.browser.bytes_shown.is_empty());
+    }
+
+    /// The custom talk table read again (its Save) is no load order
+    /// change: a 2DA view in the browser keeps its Find (review U's 1,
+    /// where every talk table Save emptied the views).
+    #[test]
+    fn a_talk_table_read_again_keeps_the_browser_s_2da_views() {
+        use mg_resman::{LayerClass, MemContainer, ResMan, priority};
+        let tlk_key = ResKey::parse("mg_t", ResType::TLK).unwrap();
+        let mut tlk = mg_tlk::Tlk::new(mg_core::Language::ENGLISH);
+        tlk.entries.push(mg_tlk::TlkEntry::text("Old"));
+        let mut layer = MemContainer::new();
+        layer.insert(tlk_key, tlk.to_bytes().unwrap());
+        let mut rm = ResMan::new();
+        rm.add(priority::HAK, "hak:t", LayerClass::Erf, layer);
+        let game = mg_rules::GameData::new(rm, mg_tlk::Tlk::new(mg_core::Language::ENGLISH));
+        let mut m = mg_module::Module::new();
+        let mut ifo = mg_gff::Gff::new(*b"IFO ");
+        ifo.root.set("Mod_CustomTlk", mg_gff::Value::String(b"mg_t".to_vec()));
+        m.set_gff(ResKey::parse("module", ResType::IFO).unwrap(), &ifo).unwrap();
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        app.game = Some(std::sync::Arc::new(game));
+        app.ws = Some(mg_edit::Workspace::new(m));
+
+        let key = ResKey::parse("classes", ResType::TWODA).unwrap();
+        let table = mg_2da::TwoDa::parse(b"2DA V2.0\n\nLABEL\n0 *\n", mg_core::Codepage::default())
+            .unwrap();
+        let mut doc = crate::table_view::TableDoc::read_only(u32::MAX, key, table);
+        doc.filter = "wizard".into();
+        app.browser.table_views.insert(
+            (key, None),
+            TableView { of: 0, rows_from: None, doc, tab: None, last_used: 0 },
+        );
+        app.reload_custom_tlk();
+        assert!(app.game.as_deref().unwrap().custom_tlk().is_some(), "{:?}", app.log.entries);
+        let view = app.browser.table_views.get(&(key, None)).expect("the view kept");
+        assert_eq!(view.doc.filter, "wizard", "with its Find");
+    }
+
+    #[test]
+    fn long_text_and_plain_decode_codepage_and_strip_carriage_returns() {
+        let lt = LongText::from("ab\r\ncde\r\n".to_string());
+        let (spans, widest) = lt.lines();
+        assert_eq!(widest, &3);
+        assert_eq!(&lt.text[spans[0].clone()], "ab");
+        assert_eq!(&lt.text[spans[1].clone()], "cde");
+
+        let key = ResKey::parse("sample", ResType::TXT).unwrap();
+        let Plain::Text(p) = plain(key, b"\x93hi\x94\r\nnext", None) else {
+            panic!("expected text");
+        };
+        assert_eq!(p.text, "\u{201c}hi\u{201d}\nnext");
+        assert_eq!(p.lines().1, 4);
+        // UTF-8 text shows as UTF-8 (a NUI window's JUI, a Lua file, a
+        // material, a text file), not read through the codepage.
+        for ext in ["jui", "lua", "txt", "mtr"] {
+            let restype = ResType::from_extension(ext).expect(ext);
+            let key = ResKey::parse("sample", restype).unwrap();
+            let Plain::Text(p) = plain(key, "{\"title\": \"Café\"}".as_bytes(), None) else {
+                panic!("expected text for {ext}");
+            };
+            assert_eq!(p.text, "{\"title\": \"Café\"}", "{ext}");
+        }
+    }
+
+    #[test]
+    fn browser_table_view_cache_evicts_only_lru_entry() {
+        let mut browser = Browser::new();
+        let table = mg_2da::TwoDa::parse(b"2DA V2.0\n\nLABEL\n0 *\n", mg_core::Codepage::default())
+            .unwrap();
+        for i in 0..VIEWS_KEPT {
+            let key = ResKey::parse(&format!("tbl_{i:02}"), ResType::TWODA).unwrap();
+            let doc =
+                crate::table_view::TableDoc::read_only(u32::MAX - i as u32, key, table.clone());
+            browser.table_views.insert(
+                (key, None),
+                TableView { of: 0, rows_from: None, doc, tab: None, last_used: (i + 1) as u64 },
+            );
+        }
+        browser.evict_lru_table_view();
+        assert_eq!(browser.table_views.len(), VIEWS_KEPT - 1);
+        let oldest = ResKey::parse("tbl_00", ResType::TWODA).unwrap();
+        let recent = ResKey::parse("tbl_01", ResType::TWODA).unwrap();
+        assert!(!browser.table_views.contains_key(&(oldest, None)));
+        assert!(browser.table_views.contains_key(&(recent, None)));
     }
 }

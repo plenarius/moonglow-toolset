@@ -69,8 +69,12 @@ pub fn table_heading(ui: &mut Ui, text: impl Into<String>) -> egui::Response {
 /// without, as before the redesign: a quarter larger than the body, the
 /// rule three quarters of the pane, 6 px below.
 pub fn section_heading(ui: &mut Ui, text: impl Into<String>) -> egui::Response {
-    let applied = theme::applied(ui.ctx());
     let heading = table_heading(ui, text);
+    section_heading_rule(ui, heading)
+}
+
+fn section_heading_rule(ui: &mut Ui, heading: egui::Response) -> egui::Response {
+    let applied = theme::applied(ui.ctx());
     if applied.is_some() {
         ui.add_space(metrics::GAP_S - ui.spacing().item_spacing.y);
     }
@@ -100,6 +104,48 @@ pub fn swatch(ui: &Ui, rect: egui::Rect, tones: &[Color32; 4]) {
         );
         ui.painter().rect_filled(r, 0.0, *c);
     }
+}
+
+/// How a color swatch button is lit ([`paint_swatch_button`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwatchLook {
+    /// Under the pointer (or pressed).
+    pub hovered: bool,
+    /// Its picker open.
+    pub open: bool,
+    /// Holding the keyboard's focus.
+    pub focused: bool,
+}
+
+/// The room around a swatch button's color (the mock's `.swatch`:
+/// `padding: 3px`).
+pub const SWATCH_PADDING: f32 = 3.0;
+
+/// Paints a color swatch button in `rect` (the mock's `.swatch`): a
+/// button `raised`, `raised-hover` hovered or open, with its color
+/// [`SWATCH_PADDING`] in, painted by `color` into the rectangle it is
+/// given and lined with `swatch-line`. Open or focused, a 1 px `accent`
+/// border inside the button's own edge (a tight grid of swatches does not
+/// cover it, as one drawn outside was). The color's rectangle.
+pub fn paint_swatch_button(
+    painter: &egui::Painter,
+    t: &crate::Tokens,
+    rect: egui::Rect,
+    look: SwatchLook,
+    color: impl FnOnce(&egui::Painter, egui::Rect),
+) -> egui::Rect {
+    let fill = if look.hovered || look.open { t.raised_hover } else { t.raised };
+    let corner = egui::CornerRadius::same(metrics::RADIUS);
+    painter.rect_filled(rect, corner, fill);
+    let inner = rect.shrink(SWATCH_PADDING);
+    color(painter, inner);
+    let line = egui::Stroke::new(1.0, t.swatch_line);
+    painter.rect_stroke(inner, egui::CornerRadius::same(2), line, egui::StrokeKind::Outside);
+    if look.open || look.focused {
+        let ring = egui::Stroke::new(1.0, t.accent);
+        painter.rect_stroke(rect, corner, ring, egui::StrokeKind::Inside);
+    }
+    inner
 }
 
 /// How many colors a PLT palette has (`pal_*`: a row each).
@@ -359,22 +405,7 @@ pub fn section_heading_with(
             heading
         })
         .inner;
-    if applied.is_some() {
-        ui.add_space(metrics::GAP_S - ui.spacing().item_spacing.y);
-    }
-    let pane = ui.available_width();
-    let share = if applied.is_some() { 1.0 } else { HEADING_RULE };
-    let width = if pane.is_finite() { pane * share } else { heading.rect.width() };
-    let (rule, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-    let color = match applied {
-        Some(t) => t.tokens().line_soft,
-        None => ui.visuals().widgets.noninteractive.bg_stroke.color,
-    };
-    ui.painter().hline(rule.x_range(), rule.center().y, egui::Stroke::new(1.0, color));
-    let room =
-        if applied.is_some() { metrics::GAP_M - ui.spacing().item_spacing.y } else { HEADING_ROOM };
-    ui.add_space(room);
-    heading
+    section_heading_rule(ui, heading)
 }
 
 #[cfg(test)]

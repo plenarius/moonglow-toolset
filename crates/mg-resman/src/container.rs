@@ -49,6 +49,11 @@ pub trait Container: Send + Sync + fmt::Debug {
     fn fingerprint(&self) -> u64 {
         0
     }
+    /// Fingerprint computed when opened or rescanned, avoiding a duplicate disk walk
+    /// when adding or replacing a container.
+    fn initial_fingerprint(&self) -> u64 {
+        self.fingerprint()
+    }
     /// A number of what the container lists, where it is an archive: each
     /// resource's name, where its data starts and how long it is, in the
     /// archive's order. It tells two archives of one time and size apart
@@ -72,6 +77,69 @@ pub trait Container: Send + Sync + fmt::Debug {
     /// resources in place (a module's, read again); `None` for others.
     fn as_mem_mut(&mut self) -> Option<&mut MemContainer> {
         None
+    }
+}
+
+impl<T: Container + ?Sized> Container for Arc<T> {
+    fn contains(&self, key: &ResKey) -> bool {
+        (**self).contains(key)
+    }
+
+    fn read(&self, key: &ResKey) -> Result<Cow<'_, [u8]>, ResError> {
+        (**self).read(key)
+    }
+
+    fn read_start(&self, key: &ResKey, n: usize) -> Result<Cow<'_, [u8]>, ResError> {
+        (**self).read_start(key, n)
+    }
+
+    fn keys(&self) -> Box<dyn Iterator<Item = ResKey> + '_> {
+        (**self).keys()
+    }
+
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+
+    fn fingerprint(&self) -> u64 {
+        (**self).fingerprint()
+    }
+
+    fn initial_fingerprint(&self) -> u64 {
+        (**self).initial_fingerprint()
+    }
+
+    fn listing(&self) -> u64 {
+        (**self).listing()
+    }
+
+    fn watched(&self) -> Option<&Path> {
+        (**self).watched()
+    }
+
+    fn unreadable(&self) -> Vec<ResKey> {
+        (**self).unreadable()
+    }
+
+    /// Read again where this is the container's only holder; one shared
+    /// (the base game's layers, opened once for many stacks) can't be
+    /// changed under the others, and says so rather than staying stale.
+    fn rescan(&mut self) -> Result<(), ResError> {
+        match Arc::get_mut(self) {
+            Some(c) => c.rescan(),
+            None => Err(ResError::Container {
+                path: self.watched().map(Path::to_path_buf).unwrap_or_default(),
+                message: "shared by other resource stacks: it can't be read again in one".into(),
+            }),
+        }
+    }
+
+    fn as_mem_mut(&mut self) -> Option<&mut MemContainer> {
+        Arc::get_mut(self).and_then(|c| c.as_mem_mut())
     }
 }
 
@@ -330,35 +398,58 @@ impl Container for ErfContainer {
 /// portraits, a module folder). Files with unknown extensions or names that
 /// are not valid resrefs are ignored. The listing is taken when opened; call
 /// [`DirContainer::rescan`] to pick up changes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DirContainer {
     pub path: PathBuf,
     files: HashMap<ResKey, PathBuf>,
+    initial_fingerprint: u64,
 }
 
 impl DirContainer {
     /// Opens a directory; a missing directory is an empty container.
     pub fn open(path: &Path) -> DirContainer {
-        let mut d = DirContainer { path: path.into(), files: HashMap::new() };
+        let mut d =
+            DirContainer { path: path.into(), files: HashMap::new(), initial_fingerprint: 1 };
         d.rescan();
         d
     }
 
     pub fn rescan(&mut self) {
         self.files.clear();
-        let Ok(rd) = std::fs::read_dir(&self.path) else { return };
-        let mut entries: Vec<PathBuf> =
-            rd.flatten().filter(is_file_or_link_to_one).map(|e| e.path()).collect();
-        // Deterministic choice if two names differ only in case.
-        entries.sort();
-        for p in entries {
-            if let Some(key) =
-                p.file_name().and_then(|n| n.to_str()).and_then(ResKey::from_filename)
-            {
-                self.files.entry(key).or_insert(p);
-            }
+        let entries = dir_entries(&self.path);
+        self.initial_fingerprint = hash_dir_entries(&entries);
+        for (p, key) in entries {
+            self.files.entry(key).or_insert(p);
         }
     }
+}
+
+fn dir_entries(dir: &Path) -> Vec<(PathBuf, ResKey)> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut entries: Vec<(PathBuf, ResKey)> = rd
+        .flatten()
+        .filter(is_file_or_link_to_one)
+        .filter_map(|e| {
+            let p = e.path();
+            let key = p.file_name().and_then(|n| n.to_str()).and_then(ResKey::from_filename)?;
+            Some((p, key))
+        })
+        .collect();
+    // Deterministic choice if two names differ only in case.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+fn hash_dir_entries(entries: &[(PathBuf, ResKey)]) -> u64 {
+    use std::hash::Hash;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (p, _) in entries {
+        if let (Some(name), Ok(meta)) = (p.file_name(), std::fs::metadata(p)) {
+            name.hash(&mut h);
+            hash_file(&mut h, &meta);
+        }
+    }
+    std::hash::Hasher::finish(&h).max(1)
 }
 
 impl Container for DirContainer {
@@ -401,19 +492,11 @@ impl Container for DirContainer {
     }
 
     fn fingerprint(&self) -> u64 {
-        use std::hash::Hash;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        if let Ok(rd) = std::fs::read_dir(&self.path) {
-            let mut files: Vec<(std::ffi::OsString, std::fs::Metadata)> =
-                // (A link by what it links to: its file changed is a change.)
-                rd.flatten().filter_map(|e| Some((e.file_name(), std::fs::metadata(e.path()).ok()?))).collect();
-            files.sort_by(|a, b| a.0.cmp(&b.0));
-            for (name, meta) in files {
-                name.hash(&mut h);
-                hash_file(&mut h, &meta);
-            }
-        }
-        std::hash::Hasher::finish(&h).max(1)
+        hash_dir_entries(&dir_entries(&self.path))
+    }
+
+    fn initial_fingerprint(&self) -> u64 {
+        self.initial_fingerprint
     }
 }
 
@@ -494,5 +577,36 @@ impl ResKey {
         };
         let resref = resref.ok().filter(|r| !r.is_empty())?;
         Some(ResKey::new(resref, restype))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A container held through an `Arc` is read again and changed in
+    /// place as the container itself is, where the `Arc` is its only
+    /// holder; shared, a rescan says it can't, rather than staying stale.
+    #[test]
+    fn an_arc_s_container_rescans_and_changes_in_place() {
+        let dir = mg_testkit::scratch_dir("mg-resman-arc-container");
+        let key = ResKey::from_filename("fresh.nss").unwrap();
+        let mut c: Arc<DirContainer> = Arc::new(DirContainer::open(&dir));
+        let before = c.initial_fingerprint();
+        assert!(!c.contains(&key));
+        std::fs::write(dir.join("fresh.nss"), b"void main() {}").unwrap();
+        c.rescan().unwrap();
+        assert!(c.contains(&key), "read again through the Arc");
+        assert_ne!(c.initial_fingerprint(), before);
+        let shared = c.clone();
+        assert!(c.rescan().is_err(), "shared: not read again under the other holder");
+        drop(shared);
+        assert!(c.rescan().is_ok());
+
+        let mut m: Arc<MemContainer> = Arc::new(MemContainer::new());
+        m.as_mem_mut().unwrap().insert(key, &b"x"[..]);
+        assert!(m.contains(&key));
+        let _held = m.clone();
+        assert!(m.as_mem_mut().is_none());
     }
 }
