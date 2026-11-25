@@ -54,6 +54,13 @@ jobs:
   windows:
     name: Windows installer
     runs-on: windows-latest
+    # Tags sign with Azure Artifact Signing (packaging/windows/sign.ps1),
+    # signed in with GitHub's OIDC token; the release environment holds the
+    # Azure ids. Other runs build unsigned, as before.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,7 +70,12 @@ jobs:
       - name: Inno Setup
         run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
       - name: Build
-        run: packaging\windows\build-installer.ps1
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          if ($env:GITHUB_REF.StartsWith('refs/tags/v')) { packaging\windows\build-installer.ps1 -Sign }
+          else { packaging\windows\build-installer.ps1 }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
