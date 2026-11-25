@@ -119,9 +119,9 @@ Packages for each system are on the
 | macOS 11 and later | `Moonglow-<version>-macos.dmg` |
 
 Moonglow finds the game where Steam installs it; otherwise choose its folder
-in Tools › Options › Folders. The packages aren't signed yet: Windows'
-SmartScreen and macOS' Gatekeeper ask before the first run (the release notes
-say how to allow it).
+in Tools › Options › Folders. The Windows installer and its programs are
+code-signed (Authenticode); macOS' Gatekeeper may ask before the first run (the
+release notes say how to allow it).
 
 ### Scoop (Windows)
 
