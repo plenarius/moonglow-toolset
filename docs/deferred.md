@@ -1461,8 +1461,6 @@ File › Project. What is left:
     are swapped in (F23): on a Mac, anything that writes into the staged
     app before Moonglow closes (a `.DS_Store`) would refuse the install,
     which needs a Mac to rule out. (S, needs a Mac and a Windows machine)
-- **Windows signing:** the installer isn't code-signed, so SmartScreen
-  warns. (S, needs a certificate)
 
 ## Questions asked, unanswered
 

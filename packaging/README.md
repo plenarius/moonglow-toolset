@@ -42,7 +42,7 @@ which sets it as it starts (`mg_core::release`). A release:
 | `icons/` | The icon (`moonglow.svg`, authored for Moonglow) and what `render.sh` makes of it: PNGs from 16 to 512 pixels, `moonglow.ico`, `moonglow.icns`. The 256-pixel PNG is also the window's icon, built into the program. |
 | `linux/` | The desktop entry, AppStream metadata, the `.mod` MIME type (weaker than tracker music's, so a file's header decides between them) and `build-appimage.sh`. |
 | `flatpak/` | The Flatpak manifest, `cargo_sources.py` and `build-flatpak.sh`. |
-| `windows/` | The Inno Setup script, `build-installer.ps1`, and `dxc.ps1` with `dxc/` (the pinned DirectX Shader Compiler: [DXC](#dxc-direct3d-12s-shader-compiler)). The executable's icon and version information come from `apps/moonglow/build.rs`. |
+| `windows/` | The Inno Setup script, `build-installer.ps1`, `sign.ps1` (Authenticode signing; `build-installer.ps1 -Sign`, the release workflow on tags), and `dxc.ps1` with `dxc/` (the pinned DirectX Shader Compiler: [DXC](#dxc-direct3d-12s-shader-compiler)). The executable's icon and version information come from `apps/moonglow/build.rs`. |
 | `macos/` | `Info.plist` and `build-app.sh`. |
 | `sign-release.sh` | Signs a release's packages' checksums with the owner's minisign key and uploads them ([Signing a release](#signing-a-release)); `minisign.pub` beside it, once made, is the public key built into the app. |
 | `third_party_licenses.py` | Writes `THIRD-PARTY-LICENSES.txt`: every crate the programs are built from, its license, and the license texts, with those of what Moonglow's own crates bundle (`fonts/`, and `icons/`: mg-uikit's Ubuntu Bold and the Lucide notice of its icons) and, on Windows, DXC's (`--dxc`). `crates/mg-uikit/tests/kit/licenses.rs` runs it. |
