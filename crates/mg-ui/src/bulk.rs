@@ -48,6 +48,9 @@ pub struct UpdateDraft {
     /// their places in those lists, which are others' once an object is
     /// put in or taken out.
     listed_at: Vec<(ResRef, u64)>,
+    /// Which listing it is (counted across the window's life): the rows
+    /// shown of it are kept for it and the area chosen.
+    listing: u64,
 }
 
 impl UpdateDraft {
@@ -107,10 +110,11 @@ impl Moonglow {
     pub fn update_instances_of(&mut self, blueprints: Vec<ResKey>) {
         let Some(ws) = self.ws.as_mut() else { return };
         let wanted: HashSet<ResKey> = blueprints.iter().copied().collect();
+        let restypes: HashSet<ResType> = wanted.iter().map(|k| k.restype).collect();
         let mut objects = Vec::new();
         for area in mg_module::areas::every(&ws.module) {
             let Ok(git) = ws.doc(&ResKey::new(area, ResType::GIT)) else { continue };
-            for restype in wanted.iter().map(|k| k.restype).collect::<HashSet<_>>() {
+            for &restype in &restypes {
                 let Some(kind) = ObjectKind::from_restype(restype) else { continue };
                 let list = kind.list();
                 for (index, s) in git.root.list(list).unwrap_or(&[]).iter().enumerate() {
@@ -156,7 +160,10 @@ impl Moonglow {
         areas.dedup();
         let listed_at =
             areas.into_iter().map(|a| (a, ws.rewrites(&ResKey::new(a, ResType::GIT)))).collect();
-        self.update_draft = Some(UpdateDraft { blueprints, only: None, shown, objects, listed_at });
+        static LISTINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let listing = LISTINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.update_draft =
+            Some(UpdateDraft { blueprints, only: None, shown, objects, listed_at, listing });
     }
 
     /// Opens Update Instances for every blueprint of the module (Edit ›
@@ -248,8 +255,10 @@ impl Moonglow {
             };
             self.actions.push(Action::Apply(Command::new(what, edits)));
             self.log.info(format!(
-                "Updated {total} object(s) from {} blueprint(s):",
-                draft.blueprints.len()
+                "Updated {total} {} from {} {}:",
+                if total == 1 { "object" } else { "objects" },
+                draft.blueprints.len(),
+                if draft.blueprints.len() == 1 { "blueprint" } else { "blueprints" },
             ));
             // Which ones, as Aurora's log lists them: the area, the kind,
             // the tag and the blueprint of each (a long list is cut short).
@@ -299,9 +308,24 @@ pub(crate) fn update_window(app: &mut Moonglow, ctx: &Context) {
             });
             let only = draft.only;
             // (The rows in sight alone are laid out: Update All Instances
-            // lists tens of thousands in a large module.)
-            let shown: Vec<usize> =
-                (0..draft.objects.len()).filter(|&i| in_scope(&draft.objects[i], only)).collect();
+            // lists tens of thousands in a large module. Those of the area
+            // chosen, kept for the listing: its objects are listed once.)
+            type ShownKey = (Option<ResRef>, u64);
+            let shown_key: ShownKey = (only, draft.listing);
+            let shown_id = egui::Id::new("bulk-update-shown");
+            let shown: std::sync::Arc<Vec<usize>> = if let Some((was, cached)) =
+                ui.data(|d| d.get_temp::<(ShownKey, std::sync::Arc<Vec<usize>>)>(shown_id))
+                && was == shown_key
+            {
+                cached
+            } else {
+                let list: Vec<usize> = (0..draft.objects.len())
+                    .filter(|&i| in_scope(&draft.objects[i], only))
+                    .collect();
+                let cached = std::sync::Arc::new(list);
+                ui.data_mut(|d| d.insert_temp(shown_id, (shown_key, cached.clone())));
+                cached
+            };
             let rows = egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]);
             mg_uikit::show_rows(rows, ui, shown.len(), |ui, range| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -310,7 +334,7 @@ pub(crate) fn update_window(app: &mut Moonglow, ctx: &Context) {
                     ui.check_box(&mut o.on, &o.label);
                 }
             });
-            let n = draft.objects.iter().filter(|o| o.on && in_scope(o, only)).count();
+            let n = shown.iter().filter(|&&i| draft.objects[i].on).count();
             let stale = app.ws.as_ref().is_some_and(|ws| draft.stale(ws));
             if stale {
                 ui.colored_label(ui.visuals().warn_fg_color, format!("{UPDATE_STALE}."));
@@ -564,7 +588,10 @@ impl Moonglow {
         if !edits.is_empty() {
             let what = format!("Replace {find:?} with {:?}", draft.with);
             self.actions.push(Action::Apply(Command::new(what, edits)));
-            self.log.info(format!("Replaced {find:?} {total} time(s)"));
+            self.log.info(format!(
+                "Replaced {find:?} {total} {}",
+                if total == 1 { "time" } else { "times" },
+            ));
         }
         total
     }
@@ -625,7 +652,7 @@ pub(crate) fn go_to_hit(app: &mut Moonglow, at: usize) {
     let usage = mg_module::rename::Usage {
         from: hit.key,
         path: mg_module::refs::Location::Gff(hit.field()),
-        place: hit.place.clone(),
+        place: hit.place,
     };
     app.go_to_usage(&usage);
 }

@@ -98,6 +98,7 @@ pub mod references;
 pub mod renderer_check;
 mod report_table;
 mod ro_gff;
+pub mod row_copy;
 pub mod saved;
 mod script_layout;
 pub mod script_nav;
@@ -132,7 +133,7 @@ pub mod updates;
 pub mod viewers;
 pub use browser::RESOURCE_HEADER;
 pub use outliner::OUTLINER;
-pub use script_panels::{BOOKMARKED_LINES, COMPILER_MESSAGES};
+pub use script_panels::{BOOKMARKED_LINES, COMPILER_MESSAGES, FOUND_AS_YOU_TYPE};
 pub use script_reference::{SCRIPT_HELP, SCRIPT_REFERENCE};
 pub use script_view::SCRIPT_HEADER;
 pub use search_results::SEARCH_HITS;
@@ -166,7 +167,7 @@ pub use mg_render::dx12;
 /// Carrying on when one model fails (for the application's panic hook).
 pub use mg_render::guard as model_guard;
 pub use options::{OptionsDraft, OptionsPage, UI_SCALES};
-pub use settings::{GraphicsBackend, OpenEditors, Settings};
+pub use settings::{AreasHeight, GraphicsBackend, OpenEditors, Settings};
 pub use tabs::Tab;
 pub use text::set_edit_language;
 pub use transfer::{ExportDraft, ImportDraft};
@@ -293,6 +294,17 @@ pub enum Action {
     /// Puts a popped-out placed-object Properties tab or window back into
     /// the docked Properties panel without cancelling edits.
     PopInProperties(Tab),
+    /// A pending plugin command held for a Protected Area answer.
+    FinishPluginApply,
+    /// A pending import held for a Protected Area answer.
+    FinishImport,
+    /// A save-warning quick-fix held for a Protected Area answer.
+    ApplySaveFix {
+        plugin: String,
+        label: String,
+        cmd: mg_edit::Command,
+        then: Box<Action>,
+    },
     NewModuleDialog,
     /// Creates a module with this name (then opens the Area Wizard).
     NewModule(String),
@@ -309,6 +321,9 @@ pub enum Action {
     Recover(recovery::Copy),
     /// Opens the Export window with these resources chosen.
     ExportDialog(Vec<ResKey>),
+    /// Opens the Export window with the resources changed since the module
+    /// was opened chosen (File › Export Changed Resources…).
+    ExportChangedDialog,
     /// Writes resources as loose files (a script with its compiled script,
     /// an area with its `.git` and `.gic`; with `dependencies`, the module
     /// resources they use too): into the scratch folder (Options › Folders;
@@ -824,6 +839,10 @@ pub struct Moonglow {
     pub(crate) dialog_conversation_height: f32,
     /// The New Conversation window's name.
     pub new_dialog: Option<String>,
+    /// Where the New Conversation window's conversation goes when made from
+    /// an object's Conversation field's New: the object's documents and
+    /// paths, and the field's name.
+    pub new_dialog_for: Option<(Vec<(mg_resman::ResKey, mg_edit::GffPath)>, String)>,
     pub script_tools: script_tools::ScriptTools,
     /// Search Results' hits (M4's U13): the last search's, whatever the
     /// editor in front (`search_results`).
@@ -905,6 +924,8 @@ pub struct Moonglow {
     /// Tilesets open in the tileset editor.
     pub tilesets: Vec<tileset_view::TilesetDoc>,
     pub(crate) next_tileset: u32,
+    pub(crate) tileset_ask: Option<tileset_view::TilesetAsk>,
+    pub(crate) minimap_job: Option<tileset_view::MinimapJob>,
     /// The side editors' tabs (a hak's, a 2DA's, a tileset's) closed with
     /// unsaved changes, waiting in turn for the question to be answered
     /// (`side_doc::closing_window`).
@@ -991,6 +1012,7 @@ pub struct Moonglow {
     /// after the editor area; and those being drawn this frame.
     pub(crate) window_bars: Vec<Panel>,
     pub(crate) window_bars_drawn: Vec<Panel>,
+    pub(crate) window_previews_drawn: Vec<Tab>,
     /// The Right Dock's panels chosen in front in the run, the last one
     /// chosen last: each section's front is the last of its panels here
     /// (`shell::section_front`).
@@ -1225,7 +1247,7 @@ pub struct Moonglow {
     /// one object, and Retag.
     pub tag_clash: Option<tag_clash::TagClash>,
     /// The module's tags, area by area, for the paste's and Setup Store's
-    /// checks ([`tag_clash::index`]).
+    /// checks ([`tag_clash::view`]).
     pub(crate) tag_cache: mg_module::tags::TagCache,
     /// The Builder Code window (Edit › Builder Code…): the code typed.
     pub builder_code: Option<builder_code::Draft>,
@@ -1241,6 +1263,17 @@ pub struct Moonglow {
     pub(crate) lights_kept: std::cell::RefCell<Option<area_view::LightsKept>>,
     /// The interface size was set from the settings (to set it back).
     scaled: bool,
+    /// The zoom egui kept from the last run was looked at (once, in the
+    /// first frame: [`commands::ui_scale_kept_from_zoom`]).
+    zoom_kept_seen: bool,
+    /// The largest interface size whose least window fits the screen
+    /// ([`commands::largest_fitting_ui_scale`]): the largest offered.
+    pub(crate) largest_ui_scale: u16,
+    /// The frame of the last pass drawn and the zoom it was drawn at.
+    zoom_seen: Option<(u64, f32)>,
+    /// The zoom the screen's size of this frame was measured at: the last
+    /// pass's of the frame before ([`Moonglow::zoom_seen`]).
+    screen_zoom: Option<f32>,
     /// The scale (points to pixels) the window's least size was last
     /// given for (`shell::keep_least_size`).
     least_size_for: Option<f32>,
@@ -1337,6 +1370,11 @@ pub struct Moonglow {
     /// from) is kept for this. Reload Resources changes the game data in
     /// place, so its address tells nothing.
     pub(crate) load_order: u64,
+    /// How many times the custom talk table was read again
+    /// (`load_custom_tlk`): what is kept of the game's names (`game_names`)
+    /// is kept for this too. Not a load order change, which would cost the
+    /// browser's 2DA views their Find and selection at every talk table Save.
+    pub(crate) tlk_generation: u64,
     /// The Properties window Escape is Cancel for this frame, as Aurora's
     /// Escape is (`blueprint::window_drawn_but` presses it).
     pub(crate) escape_cancel: Option<Tab>,
@@ -1360,6 +1398,8 @@ pub struct Moonglow {
     /// no hint is shown). (A window in front with OK and Cancel takes an
     /// Escape only where no docked tab does.)
     pub(crate) escape_hint_next: Option<Tab>,
+    pub(crate) window_layers_drawn: Vec<egui::LayerId>,
+    pub(crate) window_escape_candidates: Vec<(Tab, egui::LayerId)>,
     /// The pointer over a floating model's window as the editor area was
     /// drawn: an Escape closes that window, whatever docked tab would
     /// take it otherwise (`tabs::Viewer::body`'s `model`).
@@ -1469,6 +1509,7 @@ pub struct Moonglow {
     /// once the rows are laid out.
     pub(crate) tree_to_match: bool,
     pub import: Option<ImportDraft>,
+    pub(crate) pending_import: Option<transfer::PendingImport>,
     /// An action waiting for the answer to "save changes?".
     pub confirm_discard: Option<Action>,
     /// Why the module could not be saved when that question's Save was
@@ -1522,6 +1563,11 @@ pub struct Moonglow {
     /// Each pane's tabs in their order, as this frame began (the dock is
     /// out of reach while its tabs are drawn).
     pub(crate) panes_tabs: Vec<Vec<Tab>>,
+    /// The tabs in a window of their own as this frame began, each with
+    /// whether its window is maximized (the dock is out of reach while
+    /// its tabs are drawn: their double click and their menu's Maximize
+    /// or Restore read this).
+    pub(crate) window_tabs_maximized: HashMap<Tab, bool>,
     /// Each tab's look this frame (its icon, name, modified dot and title
     /// laid out: `tabs::prepare`, before the dock is drawn).
     pub(crate) doc_tabs: HashMap<Tab, tabs::Look>,
@@ -1661,6 +1707,32 @@ impl Moonglow {
     pub fn new(install: Option<GameInstall>, dialogs: Box<dyn Dialogs>) -> Moonglow {
         let mut log = Log::default();
         let game = load_game(install.as_ref(), &mut log);
+        Self::new_with_log(install, game, log, dialogs)
+    }
+
+    /// The application with an already-opened [`GameData`] (used by tests to
+    /// share immutable base install layers while still keeping `Arc::strong_count == 1`).
+    #[doc(hidden)]
+    pub fn new_with_game(
+        install: Option<GameInstall>,
+        game: Option<GameData>,
+        dialogs: Box<dyn Dialogs>,
+    ) -> Moonglow {
+        let mut log = Log::default();
+        if let Some(gi) = &install
+            && game.is_some()
+        {
+            log_game_loaded(gi, &mut log);
+        }
+        Self::new_with_log(install, game.map(Arc::new), log, dialogs)
+    }
+
+    fn new_with_log(
+        install: Option<GameInstall>,
+        game: Option<Arc<GameData>>,
+        log: Log,
+        dialogs: Box<dyn Dialogs>,
+    ) -> Moonglow {
         Moonglow {
             install,
             game,
@@ -1710,6 +1782,7 @@ impl Moonglow {
             dialog_panel_focus: None,
             dialog_conversation_height: 0.0,
             new_dialog: None,
+            new_dialog_for: None,
             script_tools: script_tools::ScriptTools::default(),
             search_results: search_results::SearchResults::default(),
             problems: problems::Problems::default(),
@@ -1744,6 +1817,8 @@ impl Moonglow {
             publish: None,
             tilesets: Vec::new(),
             next_tileset: 0,
+            tileset_ask: None,
+            minimap_job: None,
             side_closing: Default::default(),
             side_then: None,
             side_failed: None,
@@ -1770,6 +1845,7 @@ impl Moonglow {
             right_places: Vec::new(),
             window_bars: Vec::new(),
             window_bars_drawn: Vec::new(),
+            window_previews_drawn: Vec::new(),
             right_fronts: Vec::new(),
             bottom_panel: None,
             window_bottoms: HashMap::new(),
@@ -1837,6 +1913,10 @@ impl Moonglow {
             model_export: None,
             open_models: Vec::new(),
             scaled: false,
+            zoom_kept_seen: false,
+            zoom_seen: None,
+            screen_zoom: None,
+            largest_ui_scale: options::UI_SCALES[options::UI_SCALES.len() - 1],
             least_size_for: None,
             area_chooser: None,
             text_replace: None,
@@ -1891,12 +1971,15 @@ impl Moonglow {
             options_applied: 0,
             area_tool_at: 0,
             load_order: 0,
+            tlk_generation: 0,
             escape_cancel: None,
             escape_docked_seen: None,
             escape_taken: false,
             escape_docked: None,
             escape_docked_next: None,
             escape_hint_next: None,
+            window_layers_drawn: Vec::new(),
+            window_escape_candidates: Vec::new(),
             model_under_pointer_next: false,
             options_hovered_next: false,
             window_tabs_next: Vec::new(),
@@ -1931,6 +2014,7 @@ impl Moonglow {
             tree_fold: None,
             tree_to_match: false,
             import: None,
+            pending_import: None,
             confirm_discard: None,
             module_failed: None,
             discard_asked: None,
@@ -1951,6 +2035,7 @@ impl Moonglow {
             area_hovered: false,
             tab_places: HashMap::new(),
             panes_tabs: Vec::new(),
+            window_tabs_maximized: HashMap::new(),
             doc_tabs: HashMap::new(),
             look_cache: tabs::LookCache::default(),
             fronts: Default::default(),
@@ -2088,6 +2173,10 @@ impl Moonglow {
 
     /// Draws the whole application.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // (A text field's right-click menu: what its row asked, sent to
+        // the field as its keys send it, and its keys, before anything
+        // reads the events.)
+        widgets::text_menus_begin(ui.ctx());
         // (Tab is a 2DA grid's with its keys, before any control can take
         // it: M4's U16.)
         self.active_tab_now = table_view::front_of_focused(self);
@@ -2120,9 +2209,12 @@ impl Moonglow {
         // (The Status Bar's Esc and Enter hints, as the editor area was
         // drawn last.)
         self.escape_hint_next = None;
+        self.window_layers_drawn.clear();
+        self.window_escape_candidates.clear();
         self.model_under_pointer_next = false;
         self.options_hovered_next = false;
         self.window_tabs_next.clear();
+        self.window_previews_drawn.clear();
         let pressed = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()));
         if let Some(at) = pressed.flatten() {
             self.last_press = Some((at, ui.ctx().layer_id_at(at)));
@@ -2191,6 +2283,8 @@ impl Moonglow {
         // The Shaders switch, for every 3D view (they share one renderer),
         // and the game's programs that couldn't be drawn, said once each.
         renderer_check::lit_check(self);
+        self.poll_live_check(ui.ctx(), false);
+        self.script_tools.poll_symbol_job(ui.ctx(), false);
         let shaders = self.game_shaders();
         // (The lit check having turned them off: the pictures made with
         // them let go, as the switch does.)
@@ -2207,6 +2301,9 @@ impl Moonglow {
             }
             self.thumbnails.forget(self.viewport.as_ref());
             for view in self.area_views.values_mut() {
+                view.redraw_picture();
+            }
+            for view in self.model_views.values_mut() {
                 view.redraw_picture();
             }
         }
@@ -2250,9 +2347,51 @@ impl Moonglow {
         if ui.ctx().global_style().visuals.resize_corner_size > 0.0 {
             ui.ctx().all_styles_mut(|s| s.visuals.resize_corner_size = 0.0);
         }
-        // Options › General › Interface size (when chosen; else the size is
-        // egui's own, which Ctrl with + and - change).
-        match self.settings.ui_scale {
+        // Options › General › Smooth scrolling: off, a wheel's notch and a
+        // jump in code land at once (`mg_uikit::scrolling`).
+        mg_uikit::scrolling::smooth_scrolling(ui.ctx(), !self.settings.no_smooth_scrolling);
+        // Options › General › Colored icons: each kind's icon in its hue
+        // in the module tree, the Outliner and the palette.
+        mg_uikit::hues::colored_icons(ui.ctx(), self.settings.colored_icons);
+        // Options › General › Interface size, which View › Interface Size
+        // and its keys (Ctrl with +, - and 0) set too (when chosen; else
+        // the size is egui's own, 100%). egui's own keys for its zoom are
+        // off: they would change the size without the setting.
+        if ui.ctx().options(|o| o.zoom_with_keyboard) {
+            ui.ctx().options_mut(|o| o.zoom_with_keyboard = false);
+        }
+        // (A zoom egui kept from a run before the setting drove it, made
+        // with egui's own keys: the setting's nearest size, once, so the
+        // builder keeps the size they had and the menu ticks it.)
+        if !std::mem::replace(&mut self.zoom_kept_seen, true) && self.settings.ui_scale.is_none() {
+            self.settings.ui_scale = commands::ui_scale_kept_from_zoom(ui.ctx().zoom_factor());
+        }
+        // (No larger than the screen holds the least window at, and in
+        // the sizes offered whatever a settings file says.)
+        // (egui-winit measures the screen before the frame, at the zoom
+        // the frame before ended at: a zoom set takes only as the next
+        // pass begins, perhaps within this frame, which a comparison with
+        // this pass's zoom would get wrong, and the sizes would swing. In
+        // the first frame nothing was set yet: measured at once, before a
+        // size too large is ever applied or the least size sent for it.)
+        let frame = ui.ctx().cumulative_frame_nr();
+        let zoom = ui.ctx().zoom_factor();
+        match self.zoom_seen {
+            Some((seen, last)) if seen != frame => self.screen_zoom = Some(last),
+            None => self.screen_zoom = Some(zoom),
+            Some(_) => {}
+        }
+        self.zoom_seen = Some((frame, zoom));
+        let monitor = ui.ctx().input(|i| i.viewport().monitor_size);
+        self.largest_ui_scale = commands::largest_fitting_ui_scale(
+            monitor,
+            self.screen_zoom.unwrap_or(zoom),
+            LEAST_WINDOW_SIZE,
+        );
+        // (For Options' Interface size row, which has no `Moonglow`.)
+        let largest = self.largest_ui_scale;
+        ui.ctx().data_mut(|d| d.insert_temp(commands::largest_ui_scale_id(), largest));
+        match self.settings.ui_scale.map(|_| commands::ui_scale(self)) {
             Some(scale) => {
                 let zoom = f32::from(scale) / 100.0;
                 if (ui.ctx().zoom_factor() - zoom).abs() > 0.001 {
@@ -2398,6 +2537,13 @@ impl Moonglow {
                 .cloned()
                 .collect();
             self.panes_tabs = self.dock.iter_leaves().map(|(_, l)| l.tabs.clone()).collect();
+            self.window_tabs_maximized = (self.dock.iter_leaves())
+                .filter(|(p, _)| !p.surface.is_main())
+                .flat_map(|(p, l)| {
+                    let maximized = self.surface_maximized(p.surface);
+                    l.tabs.iter().map(move |t| (t.clone(), maximized))
+                })
+                .collect();
             self.docked_instance_tabs = (self.dock.iter_all_tabs())
                 .filter(|(p, t)| {
                     p.surface.is_main() && matches!(t, Tab::Instance { .. } | Tab::Instances { .. })
@@ -2466,14 +2612,27 @@ impl Moonglow {
         // (What a NUI designer's panels changed where its editor was not
         // drawn after them, M4's U18.)
         nui_view::follow(self, ui.ctx());
-        // (What the Status Bar shows, made once a frame from the editor
-        // area as this frame left it; the bar was drawn before it, so where
-        // it changed, the next frame shows it.)
-        shell::update_shown(self, ui.ctx());
         // (Where the user worked, as the dock was drawn: the active editor
         // the Top Bar's Undo falls back to.)
         self.note_worked(ui.ctx());
-        trace::changed("panes", || self.panes());
+        if trace::on() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for (path, leaf) in self.dock.iter_leaves() {
+                path.surface.0.hash(&mut h);
+                path.node.0.hash(&mut h);
+                leaf.rect.min.x.to_bits().hash(&mut h);
+                leaf.rect.min.y.to_bits().hash(&mut h);
+                leaf.rect.max.x.to_bits().hash(&mut h);
+                leaf.rect.max.y.to_bits().hash(&mut h);
+                leaf.active.0.hash(&mut h);
+                leaf.tabs.len().hash(&mut h);
+                for t in &leaf.tabs {
+                    t.hash(&mut h);
+                }
+            }
+            trace::changed_key("panes", &h.finish(), || self.panes());
+        }
         // (A window put again, where it had landed beside its place: the
         // frame that moves it asked for.)
         if self.remember_window_sizes() {
@@ -2542,7 +2701,12 @@ impl Moonglow {
         plugins::project_window(self, ui.ctx());
         plugins::settings_window(self, ui.ctx());
         plugins::remove_window(self, ui.ctx());
+        tileset_view::windows(self, ui.ctx());
         jobs::window(self, ui.ctx());
+        // (What the Status Bar shows, made once a frame after the editor area
+        // and all dialog windows have drawn so dialog closing does not lag by
+        // a frame.)
+        shell::update_shown(self, ui.ctx());
         // The pictures the frame's views asked for and lack: a few now.
         model_view::make_thumbnails(self, ui.ctx());
         // The 3D views not drawn lately: their targets let go of (and a
@@ -2570,6 +2734,8 @@ impl Moonglow {
                     true => Action::ApplyTyped(command),
                     false => Action::Apply(command),
                 });
+            } else if let Some(action) = held.action {
+                self.actions.push(action);
             }
             self.buffers.remove(&held.id);
         }
@@ -2591,6 +2757,9 @@ impl Moonglow {
             ui.ctx().request_repaint();
         }
         self.open_tabs_frame(ui.ctx());
+        // (The right-click menu of the text field with the keys, once
+        // every field is drawn.)
+        widgets::text_menus_end(ui.ctx());
         widgets::dialogs_end(ui.ctx());
         self.focus_was = ui.ctx().memory(|m| m.focused());
     }
@@ -2603,45 +2772,75 @@ impl Moonglow {
         if !trace::on() {
             return;
         }
-        trace::changed("graphics", || {
-            let info = self.render_info.as_deref().unwrap_or("none");
-            match &self.graphics_choice {
-                Some(why) => format!("{info}; taken by {why}"),
-                None => info.to_string(),
-            }
-        });
-        trace::changed("settings", || {
+        if trace::on() {
+            trace::changed_key(
+                "graphics",
+                &(self.render_info.as_deref(), self.graphics_choice.as_deref()),
+                || {
+                    let info = self.render_info.as_deref().unwrap_or("none");
+                    match &self.graphics_choice {
+                        Some(why) => format!("{info}; taken by {why}"),
+                        None => info.to_string(),
+                    }
+                },
+            );
             let s = &self.settings;
-            format!(
-                "game {:?}, user folder {:?} (this run {:?}), last area {}, areas by name {}, \
-                 scale {:?}, still objects {}, unlit {}, plugins {:?}; install {:?}",
-                s.game_root,
-                s.user_dir,
-                s.user_dir_this_run,
-                !s.no_last_area,
+            let settings_key = (
+                s.game_root.as_deref(),
+                s.user_dir.as_deref(),
+                s.user_dir_this_run.as_deref(),
+                s.no_last_area,
                 s.area_names,
                 s.ui_scale,
                 s.still_objects,
                 s.unlit_areas,
-                s.plugins_enabled,
-                self.install.as_ref().map(|i| i.root.clone()),
-            )
-        });
-        trace::changed("window", || {
-            format!(
-                "{:?}, {} points per pixel, zoom {}; tree {:?} wide, panes {:?} wide; job {:?}; \
-                 module {:?}; game data {}; 3D viewport {}",
-                ui.ctx().content_rect(),
-                ui.ctx().pixels_per_point(),
-                ui.ctx().zoom_factor(),
-                self.tree_width,
-                self.dock_width,
-                self.job.as_ref().map(|j| j.title.clone()),
+                &s.plugins_enabled,
+                self.install.as_ref().map(|i| i.root.as_path()),
+            );
+            trace::changed_key("settings", &settings_key, || {
+                format!(
+                    "game {:?}, user folder {:?} (this run {:?}), last area {}, areas by name \
+                     {}, scale {:?}, still objects {}, unlit {}, plugins {:?}; install {:?}",
+                    s.game_root,
+                    s.user_dir,
+                    s.user_dir_this_run,
+                    !s.no_last_area,
+                    s.area_names,
+                    s.ui_scale,
+                    s.still_objects,
+                    s.unlit_areas,
+                    s.plugins_enabled,
+                    self.install.as_ref().map(|i| i.root.clone()),
+                )
+            });
+            let r = ui.ctx().content_rect();
+            let window_key = (
+                [r.min.x.to_bits(), r.min.y.to_bits(), r.max.x.to_bits(), r.max.y.to_bits()],
+                ui.ctx().pixels_per_point().to_bits(),
+                ui.ctx().zoom_factor().to_bits(),
+                self.tree_width.map(f32::to_bits),
+                self.dock_width.map(f32::to_bits),
+                self.job.as_ref().map(|j| j.title.as_str()),
                 self.module_path(),
                 self.game.is_some(),
                 self.viewport.is_some(),
-            )
-        });
+            );
+            trace::changed_key("window", &window_key, || {
+                format!(
+                    "{:?}, {} points per pixel, zoom {}; tree {:?} wide, panes {:?} wide; job \
+                     {:?}; module {:?}; game data {}; 3D viewport {}",
+                    ui.ctx().content_rect(),
+                    ui.ctx().pixels_per_point(),
+                    ui.ctx().zoom_factor(),
+                    self.tree_width,
+                    self.dock_width,
+                    self.job.as_ref().map(|j| j.title.clone()),
+                    self.module_path(),
+                    self.game.is_some(),
+                    self.viewport.is_some(),
+                )
+            });
+        }
     }
 
     /// The panes and their tabs, for the debug log: each pane's surface
@@ -3421,6 +3620,8 @@ impl Moonglow {
         self.settings.bookmarks_panel_height = None;
         self.settings.columns_panel_height = None;
         self.settings.layers_panel_height = None;
+        // (The Areas group's well fitted again.)
+        self.settings.areas_height = settings::AreasHeight::Fit;
         self.settings.parts_panel_height = None;
         self.settings.types_panel_height = None;
         self.settings.factions_panel_height = None;
@@ -3613,6 +3814,8 @@ impl Moonglow {
         panes.push(self.editor_keys());
         marks.push(None);
         // (Each floating editor's window's other panes after it.)
+        // (The Appearance Gallery's Appearance panel among them, M4's
+        // U26: F6 there takes the keys from the panes.)
         for p in self.window_bars.iter().filter(|p| **p != Panel::OUTLINER) {
             panes.push((p.keys(), None));
             marks.push(None);
@@ -3997,7 +4200,7 @@ impl Moonglow {
         let mut grips: Vec<(egui::LayerId, egui::Rect)> = Vec::new();
         for (path, leaf) in self.dock.iter_leaves() {
             let Some(tab) = leaf.tabs.get(leaf.active.0).or(leaf.tabs.first()) else { continue };
-            if path.surface.is_main() || tab.docks() {
+            if path.surface.is_main() {
                 continue;
             }
             let own: Vec<_> = buttons.iter().filter(|(t, ..)| leaf.tabs.contains(t)).collect();
@@ -4124,10 +4327,18 @@ impl Moonglow {
     /// it is known by its first tab.
     fn windows_maximized(&self, tabs: &[Tab]) -> bool {
         let Some(path) = tabs.first().and_then(|t| self.dock.find_tab(t)) else { return false };
-        (self.dock.iter_leaves())
-            .find(|(p, _)| p.surface == path.surface)
-            .and_then(|(_, leaf)| leaf.tabs.first())
-            .is_some_and(|first| self.maximized.contains_key(first))
+        self.surface_maximized(path.surface)
+    }
+
+    /// Whether floating `surface` is maximized (known by its first leaf tab).
+    /// Not while the dock's tabs are drawn, the dock being empty then:
+    /// [`Moonglow::window_tabs_maximized`].
+    pub(crate) fn surface_maximized(&self, surface: egui_dock::SurfaceIndex) -> bool {
+        !surface.is_main()
+            && (self.dock.iter_leaves())
+                .find(|(p, _)| p.surface == surface)
+                .and_then(|(_, leaf)| leaf.tabs.first())
+                .is_some_and(|first| self.maximized.contains_key(first))
     }
 
     /// Where each window is: its first tab, and the room its panes take.
@@ -4194,7 +4405,7 @@ impl Moonglow {
                     if let Some(aim) = track.aim.take()
                         && (aim - panes.min).length() > 0.5
                     {
-                        again.push((tab.clone(), track.put));
+                        again.push((tab, track.put));
                         continue;
                     }
                     *track.first.insert(panes)
@@ -4289,19 +4500,35 @@ impl Moonglow {
         // The keys as Options › Keyboard last set them.
         // (And the open project's commands' own keys, as they read: a
         // project opened, or its file changed, takes the keys anew.)
-        let project = project_commands::commands(self).map(|(_, c)| c).unwrap_or_default();
-        let project_keys: Vec<(String, Option<String>)> =
-            project.iter().map(|c| (c.name.clone(), c.key.clone())).collect();
+        let empty: &[mg_module::project_file::ProjectCommand] = &[];
+        let project = self
+            .ws
+            .as_ref()
+            .filter(|ws| {
+                ws.module
+                    .location
+                    .as_ref()
+                    .and_then(mg_module::project_file::ProjectFile::root_of)
+                    .is_some()
+            })
+            .map_or(empty, |ws| ws.module.project_file.commands.as_slice());
+        let project_changed = self.project_keys_from.len() != project.len()
+            || self
+                .project_keys_from
+                .iter()
+                .zip(project)
+                .any(|((n, k), c)| n != &c.name || k != &c.key);
         if std::mem::take(&mut self.keymap_stale)
             || self.keymap_from != self.settings.key_bindings
-            || self.project_keys_from != project_keys
+            || project_changed
         {
+            let commands = self.plugin_commands_cached();
             self.keymap = keys::Keymap::new(&self.settings.key_bindings);
-            let commands = self.plugin_commands();
             plugins::register_keys(&mut self.keymap, &commands);
-            project_commands::register_keys(&mut self.keymap, &project);
+            project_commands::register_keys(&mut self.keymap, project);
             self.keymap_from = self.settings.key_bindings.clone();
-            self.project_keys_from = project_keys;
+            self.project_keys_from =
+                project.iter().map(|c| (c.name.clone(), c.key.clone())).collect();
         }
         // (Find's keys, for the search fields.)
         self.keymap.share_find(ui.ctx());
@@ -4373,10 +4600,14 @@ impl Moonglow {
                 // (Fix All beside the first fix of a check with several
                 // to make.)
                 let mut firsts: Vec<(usize, String, usize)> = Vec::new();
+                let mut by_check: HashMap<&str, usize> = HashMap::new();
                 for o in self.log.fixes.iter().filter(|o| !o.made && o.fix.asks.is_none()) {
-                    match firsts.iter_mut().find(|(_, c, _)| *c == o.check) {
-                        Some(f) => f.2 += 1,
-                        None => firsts.push((o.line, o.check.clone(), 1)),
+                    if let Some(&idx) = by_check.get(o.check.as_str()) {
+                        firsts[idx].2 += 1;
+                    } else {
+                        let idx = firsts.len();
+                        by_check.insert(o.check.as_str(), idx);
+                        firsts.push((o.line, o.check.clone(), 1));
                     }
                 }
                 // Only the lines in sight are laid out (a Verify of a large
@@ -4549,7 +4780,8 @@ impl Moonglow {
 
     /// Makes a module the open one, with its haks and itself layered into
     /// the game data.
-    fn use_module(&mut self, m: Module) {
+    #[doc(hidden)]
+    pub fn use_module(&mut self, m: Module) {
         // (The side editors open now stay open with their documents: a
         // hak is no module's, and one opened with the module, in the same
         // frame, was let go with the last one's tabs.)
@@ -4595,7 +4827,7 @@ impl Moonglow {
         // (The project's plugins first: those allowed act on its opening.)
         self.load_project_plugins();
         self.plugins_module_opened();
-        self.outside = Default::default();
+        self.outside.forget_module();
         self.area_names = Default::default();
         self.area_contents.clear();
         self.dock = DockState::new(vec![Tab::ModuleProperties]);
@@ -4627,12 +4859,21 @@ impl Moonglow {
         self.load_order += 1;
         self.nui_assets.invalidate();
         self.browser.stale = true;
+        self.browser.table_views.clear();
+        self.browser.pictures.clear();
         self.viewed.clear();
         // (A hak's being edited, the load order its models are drawn
         // from: made again from the new one.)
         for doc in &mut self.haks {
             doc.resources = None;
         }
+    }
+
+    /// Cancels any pending plugin or import command held for a Protected
+    /// Area prompt, rolling back written haks cleanly.
+    pub(crate) fn cancel_pending_protected(&mut self) {
+        self.cancel_pending_plugin_apply();
+        self.pending_import = None;
     }
 
     /// Reads the module's custom talk table again (after it was saved).
@@ -4663,6 +4904,7 @@ impl Moonglow {
         self.area_contents.clear();
         let Some(name) = name else {
             game.set_custom_tlk(None);
+            self.tlk_generation += 1;
             return;
         };
         let dirs = self.install.as_ref().map(|i| i.tlk_dirs()).unwrap_or_default();
@@ -4693,6 +4935,16 @@ impl Moonglow {
         }
         game.invalidate();
         text::set_game_codepage(Some(game.codepage()));
+        // (And what is kept of the game's names: the palette's Find, the
+        // base items' names. A line renamed and saved was found by its old
+        // name until the haks changed.)
+        self.tlk_generation += 1;
+    }
+
+    /// What names read from the game data are kept for: the load order and
+    /// the custom talk table read.
+    pub(crate) fn game_names(&self) -> (u64, u64) {
+        (self.load_order, self.tlk_generation)
     }
 
     /// What the module uses of its haks, worked out as a job and shown
@@ -4866,6 +5118,7 @@ impl Moonglow {
     /// [`Moonglow::close`], the side editors' tabs `side` kept open with
     /// their documents (another module is being opened).
     fn close_keeping(&mut self, side: &[Tab]) {
+        self.cancel_pending_protected();
         // Its tabs, for the next time it is opened.
         self.keep_open_tabs();
         self.open_tabs = Default::default();
@@ -4881,8 +5134,10 @@ impl Moonglow {
         }
         self.sound_said.clear();
         self.tag_cache = Default::default();
+        self.area_holds.clear();
         // (The project's plugins were its own.)
         self.plugins.settings_form = None;
+        self.clear_module_plugin_state();
         self.load_project_plugins();
         // (Another module's blueprints of these names look different.)
         self.thumbnails.forget(self.viewport.as_ref());
@@ -4893,9 +5148,14 @@ impl Moonglow {
         // (`nwscript.nss` too: Options' reload closes the module, and
         // another install has its own.)
         self.script_tools.spec = None;
-        self.script_tools.symbols.clear();
+        self.script_tools.clear_symbols();
         self.script_tools.seen.clear();
         self.buffers.clear();
+        self.held_text = None;
+        self.closed_tabs.clear();
+        self.tabs_recent.clear();
+        self.tab_cycle = None;
+        self.panes_dropped.clear();
         self.properties_changed.clear();
         self.closing_cancels.clear();
         self.props_popped_out.clear();
@@ -4912,18 +5172,38 @@ impl Moonglow {
         self.nui_views.clear();
         self.nui_build_error = None;
         self.new_nui = None;
+        self.nui_import = None;
+        self.nui_checks_forward.clear();
+        self.nui_widened.clear();
         self.laid_out.clear();
         self.tile_props = None;
         self.tile_mode_areas.clear();
         self.tile_props_aside.clear();
         self.area_stats = None;
+        self.used_rows = None;
         self.hak_report = None;
-        self.claims.table = None;
+        self.claims = Default::default();
         self.resize_area = None;
         self.rotate_area = None;
         self.change_tileset = None;
         self.adjust = None;
+        self.light_draft = None;
         self.find_instance = None;
+        self.outside.forget_module();
+        self.bake = Default::default();
+        self.copy_as = None;
+        self.rename = None;
+        self.builder_code = None;
+        self.new_dialog = None;
+        self.new_dialog_for = None;
+        self.new_script = None;
+        self.script_save_as = None;
+        self.update_draft = None;
+        self.area_chooser = None;
+        self.publish = None;
+        self.attach = None;
+        self.build = None;
+        self.project_commands.ask = None;
         if let Some(d) = &mut self.text_replace {
             d.forget_hits();
         }
@@ -4934,9 +5214,12 @@ impl Moonglow {
         self.area_focus = None;
         self.start_focus = None;
         self.heard = None;
+        self.tree_reveal = None;
         self.tree_area = None;
         self.tree_marked = None;
+        self.tree_front = Default::default();
         self.tree_object = None;
+        self.tree_object_pending = false;
         self.tree_selected.clear();
         self.tree_anchor = None;
         self.tree_went = None;
@@ -4944,12 +5227,27 @@ impl Moonglow {
         self.tree_objects = None;
         self.tree_objects_anchor = None;
         self.tree_seen_selection = None;
+        self.tree_cursor = None;
+        self.tree_cursor_moved = false;
+        self.tree_fold = None;
+        self.tree_to_match = false;
         self.area_select = None;
         self.area_adjust = None;
+        self.confirm_delete = None;
         // (Windows that hold a place in the module, or a command made of
         // it: left open, their OK was applied to the next module, where
         // it has a resource of that name.)
         self.var_edit = None;
+        self.var_preview.clear();
+        self.var_preview_next.clear();
+        self.blueprint_pages = Default::default();
+        self.window_ids.clear();
+        self.faction_view = Default::default();
+        self.references = Default::default();
+        self.search_results = Default::default();
+        self.journal_view = Default::default();
+        self.welcome.clear_module();
+        self.browser.bytes_shown.clear();
         self.loc_edit = None;
         self.var_pages.clear();
         self.picker = None;
@@ -5324,6 +5622,8 @@ impl Moonglow {
                                 }
                             }
                         }
+                    } else if let Some(action) = held.action {
+                        self.actions.push(action);
                     }
                     self.buffers.remove(&held.id);
                 }
@@ -5386,6 +5686,7 @@ impl Moonglow {
                     });
                 }
             }
+            Action::ExportChangedDialog => self.open_export_changed(),
             Action::Export(draft) => self.run_export(draft),
             Action::ExportFiles { keys, dependencies, scratch } => {
                 self.run_export_files(keys, dependencies, scratch);
@@ -5393,6 +5694,11 @@ impl Moonglow {
             Action::ExportConversations { keys, format } => self.export_conversations(keys, format),
             Action::ExportAreaFiles(area) => model_view::export_area_files(self, area),
             Action::ExportObject { area, kind, index } => self.run_export_object(area, kind, index),
+            Action::FinishPluginApply => self.finish_plugin_apply(),
+            Action::FinishImport => self.finish_import(),
+            Action::ApplySaveFix { plugin, label, cmd, then } => {
+                plugin_events::apply_save_fix(self, plugin, label, cmd, *then);
+            }
             Action::ImportDialog => self.open_import(),
             Action::ImportFilesDialog => self.open_import_files(false),
             Action::ImportFolderDialog => self.open_import_files(true),
@@ -5403,10 +5709,10 @@ impl Moonglow {
                 // (Looked for once: it reads Steam's library files.)
                 draft.detected = GameInstall::detect();
                 // The plugins' commands take keys like the rest.
-                let commands = self.plugin_commands();
+                let commands = self.plugin_commands_cached();
                 plugins::register_keys(&mut draft.keymap, &commands);
                 draft.plugin_commands = commands
-                    .into_iter()
+                    .iter()
                     .map(|c| (c.key_id.clone(), format!("{}: {}", c.plugin_name, c.path_title())))
                     .collect();
                 // The enabled plugins' checks, for Options › Verify.
@@ -5832,6 +6138,9 @@ impl Moonglow {
                 self.run_now(Action::Quit);
             }
             Action::Quit => {
+                // (What a plugin held for the Protected Area window wrote
+                // into haks is taken back, as its Cancel would.)
+                self.cancel_pending_protected();
                 // Saved or discarded by now: no recovery copy.
                 self.forget_recovery();
                 self.keep_open_tabs();
@@ -6870,6 +7179,10 @@ impl Moonglow {
     /// whose tags the module's scripts name), and says in the log what was
     /// left, and why.
     fn static_placeables(&mut self, areas: &[mg_core::ResRef]) {
+        let cp = self
+            .game
+            .as_deref()
+            .map_or(mg_core::Codepage::WINDOWS_1252, mg_rules::GameData::text_codepage);
         let Some(ws) = self.ws.as_mut() else { return };
         let rules = ws.module.project_file.make_static.clone().with_scripts(&ws.module);
         let mut edits = Vec::new();
@@ -6880,7 +7193,7 @@ impl Moonglow {
         for &area in areas {
             let key = ResKey::new(area, ResType::GIT);
             let Ok(git) = ws.doc(&key) else { continue };
-            let plan = mg_module::areas::static_plan(&git.root, &rules);
+            let plan = mg_module::areas::static_plan_in(&git.root, &rules, cp);
             let list = git.root.list("Placeable List").unwrap_or(&[]);
             for &i in &plan.convert {
                 let path = mg_edit::GffPath::root().item("Placeable List", i);
@@ -7179,10 +7492,12 @@ impl Moonglow {
     /// Makes every fix offered of check `check` (that edits), as one step
     /// of Undo.
     fn apply_fixes_of(&mut self, check: &str) {
-        let lines: Vec<usize> = (self.log.fixes.iter())
-            .filter(|o| o.check == check && !o.made && o.fix.asks.is_none())
-            .map(|o| o.line)
-            .collect();
+        let mut lines = Vec::new();
+        for o in &self.log.fixes {
+            if o.check == check && !o.made && o.fix.asks.is_none() {
+                lines.push(o.line);
+            }
+        }
         let made: Vec<usize> = lines.into_iter().filter(|l| self.make_fix(*l)).collect();
         let Some(ws) = self.ws.as_mut() else { return };
         if made.len() > 1 && ws.join_last(made.len(), format!("Fix All: {check}")) {
@@ -7420,8 +7735,11 @@ impl Moonglow {
                     0 => String::new(),
                     n => format!("; {n} object(s) placed from blueprints the module no longer has"),
                 };
+                // (Verify writes no file: where its findings are, said,
+                // 5.2's W4.)
+                let listed = if found_any { problems::LISTED } else { "" };
                 app.log.info(format!(
-                    "Verify: {errors} error(s), {warnings} warning(s) ({} missing reference(s), {} content problem(s){gone}){}",
+                    "Verify: {errors} error(s), {warnings} warning(s) ({} missing reference(s), {} content problem(s){gone}){}{listed}",
                     missing.len(),
                     findings.len(),
                     left_out(&left),
@@ -7823,14 +8141,7 @@ fn load_game(install: Option<&GameInstall>, log: &mut Log) -> Option<Arc<GameDat
     match install {
         Some(gi) => match GameData::open(gi) {
             Ok(g) => {
-                log.info(format!("Game data loaded from {}", gi.root.display()));
-                if let Some(user) = gi.user_dir.as_ref().filter(|u| !u.is_dir()) {
-                    log.warn(format!(
-                        "The NWN user folder {} doesn't exist: no hak, talk table or override \
-                         is found there (Tools › Options › Folders)",
-                        user.display()
-                    ));
-                }
+                log_game_loaded(gi, log);
                 Some(Arc::new(g))
             }
             Err(e) => {
@@ -7842,6 +8153,17 @@ fn load_game(install: Option<&GameInstall>, log: &mut Log) -> Option<Arc<GameDat
             log.warn("No Neverwinter Nights installation found; choose it in Tools › Options.");
             None
         }
+    }
+}
+
+fn log_game_loaded(gi: &GameInstall, log: &mut Log) {
+    log.info(format!("Game data loaded from {}", gi.root.display()));
+    if let Some(user) = gi.user_dir.as_ref().filter(|u| !u.is_dir()) {
+        log.warn(format!(
+            "The NWN user folder {} doesn't exist: no hak, talk table or override \
+             is found there (Tools › Options › Folders)",
+            user.display()
+        ));
     }
 }
 
@@ -7961,5 +8283,72 @@ mod tests {
         m.set(key("roof", ResType::DDS), b"new".to_vec());
         assert!(drawn_with_changed(&was, &m));
         assert!(!drawn_with_changed(&m.container(), &m));
+    }
+
+    #[test]
+    fn close_keeping_and_load_order_changed_clear_module_and_browser_caches() {
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        let key = ResKey::parse("hello", ResType::NSS).unwrap();
+
+        app.closed_tabs.push(Tab::ModuleProperties);
+        app.confirm_delete = Some(vec![key]);
+        app.claims.held = true;
+        app.browser.bytes_shown.insert((key, None));
+        app.browser.pictures.insert((key, None), 1.0);
+        app.log.info("existing entry");
+
+        app.load_order_changed();
+        assert!(app.browser.pictures.is_empty());
+        assert!(!app.browser.bytes_shown.is_empty());
+
+        app.close_keeping(&[]);
+        assert!(app.closed_tabs.is_empty());
+        assert!(app.confirm_delete.is_none());
+        assert!(!app.claims.held);
+        assert!(app.browser.bytes_shown.is_empty());
+    }
+
+    #[test]
+    fn faction_view_and_references_distinguish_swapped_workspaces() {
+        let script_key = ResKey::parse("target_sc", ResType::NSS).unwrap();
+        let fac_key = ResKey::parse("repute", ResType::FAC).unwrap();
+        let make_ws = |faction_name: &str, referer: &str| {
+            let mut m = mg_module::Module::new();
+            let mut fac = mg_module::factions::Factions::of_module(&m).to_gff();
+            if let Some(mg_gff::Value::List(list)) = fac.root.get_mut("FactionList") {
+                let mut row = list[0].clone();
+                row.set("FactionName", mg_gff::Value::String(faction_name.as_bytes().to_vec()));
+                list.push(row);
+            }
+            m.set(fac_key, fac.to_bytes().unwrap());
+            m.set(script_key, b"void main() {}".to_vec());
+            m.set(
+                ResKey::parse(referer, ResType::NSS).unwrap(),
+                b"#include \"target_sc\"\nvoid main() {}".to_vec(),
+            );
+            mg_edit::Workspace::new(m)
+        };
+
+        let ws_a = make_ws("AlphaGuild", "caller_a");
+        let ws_b = make_ws("BetaGuild", "caller_b");
+        assert_ne!(ws_a.identity(), ws_b.identity());
+
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        app.ws = Some(ws_a);
+        let (names_a, _) = crate::faction_view::outline(&mut app).expect("factions A");
+        assert!(names_a.iter().any(|n| n == "AlphaGuild"), "{names_a:?}");
+        assert!(app.names_of(&[script_key]));
+        let named_a = app.references.named.clone().expect("named A");
+        assert!(named_a.usages.iter().any(|u| u.from.resref.as_str() == Some("caller_a")));
+
+        // Replace workspace with another fresh workspace at revision == 0 without close_keeping.
+        app.ws = Some(ws_b);
+        let (names_b, _) = crate::faction_view::outline(&mut app).expect("factions B");
+        assert!(names_b.iter().any(|n| n == "BetaGuild"), "{names_b:?}");
+        assert!(!names_b.iter().any(|n| n == "AlphaGuild"), "{names_b:?}");
+        assert!(app.names_of(&[script_key]));
+        let named_b = app.references.named.clone().expect("named B");
+        assert!(named_b.usages.iter().any(|u| u.from.resref.as_str() == Some("caller_b")));
+        assert!(!named_b.usages.iter().any(|u| u.from.resref.as_str() == Some("caller_a")));
     }
 }

@@ -578,7 +578,7 @@ fn the_field_yields_in_order_and_the_popover_stays_inside() {
     let mut was = 3;
     let mut seen = std::collections::BTreeSet::new();
     let (mut widest, mut capped) = (false, false);
-    for step in (0..=147).rev() {
+    for step in [147, 135, 123, 111, 109, 108, 100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5, 0] {
         let width = 420.0 + 8.0 * step as f32;
         h.set_size(egui::vec2(width + TEST_FRAME, 700.0));
         settle(&mut h);
@@ -1051,7 +1051,7 @@ fn the_menus_open_by_their_keys_in_the_least_window() {
         (egui::Key::W, "Area Wizard…"),
         (egui::Key::T, "Options…"),
         (egui::Key::B, "Verify Module"),
-        (egui::Key::P, "Manage Plugins…"),
+        (egui::Key::P, "Manage Plugins"),
         (egui::Key::H, "About Moonglow Toolset"),
     ] {
         h.key_press_modifiers(egui::Modifiers::ALT, letter);

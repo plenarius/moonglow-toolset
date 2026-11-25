@@ -570,6 +570,7 @@ impl Module {
                     self.project = made;
                 }
                 self.location = Some(location);
+                self.folder = None;
                 self.archive = None;
                 self.dirty = false;
                 self.reread_project_file();
@@ -732,10 +733,28 @@ impl Module {
         // Whether a resource's file (under its own name) is already the
         // module's, where it was read here: not read again to be written.
         let mut on_disk: std::collections::HashMap<ResKey, bool> = Default::default();
+        let now_time = std::time::SystemTime::now();
+        let mut reuse_stamps: std::collections::HashMap<ResKey, outside::Stamp> =
+            Default::default();
         if let Some(known) = known {
             for (k, v) in &self.resources {
                 match (known.as_read(k), known.path(k)) {
                     (Some(read), Some(path)) => {
+                        // A resource as it was read, in its own file whose
+                        // time and size are as they were: not read again.
+                        // (One the module changed is compared byte by byte:
+                        // an outside edit of the same size that kept the
+                        // file's time is a conflict, not written over.)
+                        let unchanged = known.as_read_arc(k).is_some_and(|r| Arc::ptr_eq(r, v))
+                            || read == &v[..];
+                        if unchanged
+                            && k.path_in(dir).is_ok_and(|own| own == path)
+                            && let Some(st) = known.settled_stamp_matches(path)
+                        {
+                            on_disk.insert(*k, true);
+                            reuse_stamps.insert(*k, st);
+                            continue;
+                        }
                         let now = disk(path);
                         if k.path_in(dir).is_ok_and(|own| own == path) {
                             on_disk.insert(*k, now.as_deref() == Some(&v[..]));
@@ -818,8 +837,10 @@ impl Module {
         for (k, v) in &self.resources {
             if left.contains(k) {
                 // (As it was read: still to be taken.)
-                if let Some((known, path)) = known.and_then(|f| Some((f.as_read(k)?, f.path(k)?))) {
-                    files.note_as(*k, path.to_path_buf(), Arc::from(known));
+                if let Some((known, path)) =
+                    known.and_then(|f| Some((f.as_read_arc(k)?, f.path(k)?)))
+                {
+                    files.note_as(*k, path.to_path_buf(), known.clone());
                 }
                 continue;
             }
@@ -832,8 +853,12 @@ impl Module {
             };
             if !same {
                 write_replacing_one_of_many(&p, &v[..]).map_err(io(&p))?;
+                files.note(*k, p, v.clone());
+            } else if let Some(st) = reuse_stamps.remove(k) {
+                files.note_stamped(*k, p, v.clone(), Some(st), now_time);
+            } else {
+                files.note(*k, p, v.clone());
             }
-            files.note(*k, p, v.clone());
         }
         Ok(files)
     }
@@ -1525,6 +1550,32 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("script.nss")).unwrap(), b"the editor's again");
     }
 
+    /// An outside edit of the same size that kept the file's time (a tool
+    /// that restores times, a copy with `cp -p`), of a resource the module
+    /// changed too, stops the save: the time and size alone don't say the
+    /// file is as it was read once the module's own bytes differ.
+    #[test]
+    fn an_outside_edit_keeping_time_and_size_is_a_conflict_where_the_module_changed_it() {
+        let dir = mg_testkit::scratch_dir("mg-module-folder-same-stamp");
+        let mut m = sample();
+        m.set(key("script", ResType::NSS), &b"void main() { int a; }"[..]);
+        m.save_as(&ModuleLocation::Folder(dir.clone())).unwrap();
+        let path = dir.join("script.nss");
+        // (Settled: its time well before it was read.)
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(hour_ago).unwrap();
+        let mut m = Module::open(&dir).unwrap();
+        std::fs::write(&path, b"void main() { int b; }").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(hour_ago).unwrap();
+        m.set(key("script", ResType::NSS), &b"void main() { int c; }"[..]);
+        let e = m.save().unwrap_err();
+        assert!(
+            matches!(&e, ModuleError::ChangedOnDisk(p) if p == std::slice::from_ref(&path)),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"void main() { int b; }");
+    }
+
     /// A module kept in one file changed outside (Aurora saved it): what
     /// changed in it, was added and removed is found, by resource, until
     /// it is taken; a file written again as it was, and Moonglow's own
@@ -1696,5 +1747,26 @@ mod tests {
         let back = Module::open(&dir.join("m")).unwrap();
         assert_eq!(back.get(&ResKey::new(ResRef::EMPTY, ResType::RES)), Some(&b"junk"[..]));
         assert_eq!(folder_key(".hidden"), None);
+    }
+
+    #[test]
+    fn save_as_project_from_folder_clears_folder_state() {
+        let dir = mg_testkit::scratch_dir("mg-module-folder-to-project");
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = dir.join("folder");
+        let project = dir.join("project");
+        let mut m = Module::new();
+        m.set_info(&mg_gff::Gff::new(*b"IFO ")).unwrap();
+        m.set_gff(
+            ResKey::new(ResRef::from_str("area001").unwrap(), ResType::ARE),
+            &mg_gff::Gff::new(*b"ARE "),
+        )
+        .unwrap();
+        m.save_as(&ModuleLocation::Folder(folder.clone())).unwrap();
+        assert!(m.folder.is_some());
+        m.save_as(&ModuleLocation::Project { root: project, target: "module".into() }).unwrap();
+        assert!(m.project.is_some());
+        assert!(m.folder.is_none());
+        assert!(m.archive.is_none());
     }
 }

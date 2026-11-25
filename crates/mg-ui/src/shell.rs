@@ -106,7 +106,11 @@ pub(crate) fn keep_least_size(app: &mut Moonglow, ctx: &egui::Context) {
     let scale = ctx.input(|i| i.pixels_per_point);
     // (Not while the interface size is on its way: its zoom set, or set
     // this frame, and the frame's scale still the old one.)
-    let wanted = app.settings.ui_scale.map_or(ctx.zoom_factor(), |s| f32::from(s) / 100.0);
+    // (The size in use: the setting's, clamped and held to the screen.)
+    let wanted = app
+        .settings
+        .ui_scale
+        .map_or(ctx.zoom_factor(), |_| f32::from(crate::commands::ui_scale(app)) / 100.0);
     let settled = (ctx.zoom_factor() - wanted).abs() < 0.001
         && (ctx.pixels_per_point() - scale).abs() < 0.001;
     if !settled || app.least_size_for == Some(scale) {
@@ -433,7 +437,6 @@ impl Panel {
             | Panel::TileProperties
             | Panel::Properties
             | Panel::Reference
-            | Panel::Help
             | Panel::NodeData
             | Panel::NodeSearch
             | Panel::Conversation
@@ -454,8 +457,11 @@ impl Panel {
             | Panel::AreasTogether
             | Panel::LightMaker
             | Panel::Bake => Dock::Right,
+            // (A script's Help under its text, as 4.2.1 had it: 5.2.0, the
+            // owner's ruling on Jasperre's report.)
             Panel::Log
             | Panel::Compiler
+            | Panel::Help
             | Panel::Bookmarks
             | Panel::SearchResults
             | Panel::Checks
@@ -1064,19 +1070,19 @@ const AREA_TILES_FOLDED: &[Panel] = &[Panel::Palette, Panel::Preview, Panel::Til
 /// in a dragged out area's window).
 const TILES_SECTION: Section = &[Panel::TileProperties];
 const TILES_ALONE: &[Section] = &[TILES_SECTION];
-/// A script's Right Dock (M4's U12, the Script board's): Reference over
-/// Help, each a section of its own with its header; one tab bar of the
-/// two under 1400; with the script into its window where it floats
-/// (Floating.png). The board's shares, Reference 56, Help 44.
-const SCRIPT_RIGHT: &[Section] = &[&[Panel::Reference], &[Panel::Help]];
-const SCRIPT_FOLDED: &[Panel] = &[Panel::Reference, Panel::Help];
-const SCRIPT_SHARES: &[u16] = &[1120, 880];
-const SCRIPT_WINDOW_SHARES: &[u16] = &[880, 1120];
+/// A script's Right Dock (M4's U12, the Script board's): Reference, with
+/// the script into its window where it floats (Floating.png). Help, under
+/// Reference on the boards, went back under the text in 5.2.0 (the owner's
+/// ruling on Jasperre's report: a narrow box at the right was worse than
+/// 4.2.1's pane as wide as the text).
+const SCRIPT_RIGHT: &[Section] = &[&[Panel::Reference]];
+const SCRIPT_FOLDED: &[Panel] = &[Panel::Reference];
 /// A script's own Bottom Dock panels (M4's U13, the Script board's tabs
-/// before Search Results and the Log), and the global one that follows it
-/// into its window's bottom pane (Floating.png: Compiler, Bookmarks,
-/// Search Results).
-const SCRIPT_BOTTOM: &[Panel] = &[Panel::Compiler, Panel::Bookmarks];
+/// before Search Results and the Log; Help among them since 5.2.0, after
+/// Compiler as 4.2.1's pane under the text had it), and the global one that
+/// follows it into its window's bottom pane (Floating.png: Compiler,
+/// Bookmarks, Search Results).
+const SCRIPT_BOTTOM: &[Panel] = &[Panel::Compiler, Panel::Help, Panel::Bookmarks];
 const SCRIPT_WINDOW_BOTTOM: &[Panel] = &[Panel::SearchResults];
 /// A conversation's Right Dock (M4's U14, the Conversation board's): the
 /// Node section, its title before Data and Search, and the Conversation
@@ -1267,8 +1273,6 @@ pub(crate) fn brings_of(app: &Moonglow, tab: &crate::Tab) -> Brings {
         crate::Tab::Script(_) => Brings {
             right: SCRIPT_RIGHT,
             folded: SCRIPT_FOLDED,
-            shares: SCRIPT_SHARES,
-            window_shares: SCRIPT_WINDOW_SHARES,
             bottom: SCRIPT_BOTTOM,
             window_bottom: SCRIPT_WINDOW_BOTTOM,
             floats: true,
@@ -2341,9 +2345,13 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
             }
             false => (RIGHT_DOCK_LEAST, (room * 0.6).max(RIGHT_DOCK_LEAST)),
         };
+        // (As wide as the kind's last was dragged to, in a window of its
+        // own: 5.2.0, Jasperre's report.)
+        let kept = window_kept(app, kind, false);
+        seed_window_pane(ui, pane.with("window-right"), kept);
         let shown = egui::Panel::right(pane.with("window-right"))
             .resizable(true)
-            .default_size(RIGHT_DOCK_LEAST)
+            .default_size(kept.unwrap_or(RIGHT_DOCK_LEAST))
             .size_range(least.min(most)..=most)
             .frame(egui::Frame::new().fill(t.panel))
             .show(ui, |ui| {
@@ -2390,6 +2398,9 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
                         crate::dialog_view::node_tool(app, Some(tab), tool);
                     }
                     app.window_bars_drawn.push(front);
+                    if front == Panel::Preview {
+                        app.window_previews_drawn.push(tab.clone());
+                    }
                     let on = (front, section.len() == 1);
                     panel_body(app, &mut part, on, Host::Window, pane, Some(tab));
                 }
@@ -2405,6 +2416,10 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
         if least < most {
             let edge = RightEdge { dock: shown.response.rect, least, most };
             ui.ctx().data_mut(|d| d.insert_temp(window_edge_id(pane), edge));
+            let edges =
+                [pane.with("window-right").with("__resize"), window_edge_id(pane).with("seam")];
+            let now = shown.response.rect.width();
+            keep_window_size(app, ui, (kind, false), &edges, kept, now);
         }
         if let Some(panel) = shown.inner {
             // (A tab chosen in the window: the window's own front no more.)
@@ -2480,13 +2495,17 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
         // editor keeping two thirds, and at least its tab bar and a line:
         // in a small window the pane no longer crowds the code, M4's U13.)
         let (least, most) = window_bottom_range(ui, ui.available_height());
+        // (As high as the kind's last was dragged to: 5.2.0.)
+        let kept = window_kept(app, kind, true);
         // (Cut at the room the right pane leaves: its edge to drag is not
         // over the right pane, nor is what it holds.)
         let room = ui.available_rect_before_wrap();
         ui.set_clip_rect(ui.clip_rect().intersect(room));
-        let shown = egui::Panel::bottom(egui::Id::new(("window-bottom", &owner)))
+        let bottom_id = egui::Id::new(("window-bottom", &owner));
+        seed_window_pane(ui, bottom_id, kept);
+        let shown = egui::Panel::bottom(bottom_id)
             .resizable(true)
-            .default_size(WINDOW_BOTTOM_HIGH.clamp(least, most))
+            .default_size(kept.unwrap_or(WINDOW_BOTTOM_HIGH).clamp(least, most))
             .size_range(least..=most)
             .frame(egui::Frame::new().fill(t.panel))
             .show(ui, |ui| {
@@ -2538,6 +2557,11 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
                 }
                 (bar.changed.then(|| bottom[at]), bar.inner)
             });
+        if least < most {
+            let edges = [bottom_id.with("__resize")];
+            let now = shown.response.rect.height();
+            keep_window_size(app, ui, (kind, true), &edges, kept, now);
+        }
         let (picked, to_line) = shown.inner;
         if let Some((key, line)) = to_line {
             let text = app.script_source(&key).unwrap_or_default();
@@ -2551,6 +2575,75 @@ pub(crate) fn window_panes(app: &mut Moonglow, ui: &mut Ui, tab: &crate::Tab) {
                     Some(panel.name().to_string());
             }
         }
+    }
+}
+
+/// The width of a kind's window's right pane (`bottom`: the height of its
+/// bottom pane) as the builder last dragged it, in any window of the kind
+/// (`DockLayout::window_width`, `window_bottom`): a new window opens with it.
+fn window_kept(app: &Moonglow, kind: Option<&str>, bottom: bool) -> Option<f32> {
+    let kind = kind?;
+    let layout = app.settings.dock_layouts.get(kind)?;
+    let kept = if bottom { layout.window_bottom } else { layout.window_width };
+    kept.map(f32::from)
+}
+
+/// Lets the kind's kept size ([`window_kept`]) apply to a window's pane
+/// `panel` that was not drawn in the pass before (its window opened, its
+/// tab brought to the front, the first pass of a run): egui keeps a
+/// panel's size by its id, which goes by the editor's tab, so a script
+/// opened again would take the size its pane had before, from this run or
+/// (egui's memory kept) the last, not the kept one. Drawn pass after pass,
+/// the pane keeps its own size.
+fn seed_window_pane(ui: &Ui, panel: egui::Id, kept: Option<f32>) {
+    let slot = panel.with("window-drawn");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let last = ui.ctx().data(|d| d.get_temp::<u64>(slot));
+    if last == Some(pass) {
+        return;
+    }
+    let anew = last != Some(pass.wrapping_sub(1));
+    ui.ctx().data_mut(|d| {
+        if anew && kept.is_some() {
+            d.remove::<egui::containers::panel::PanelState>(panel);
+        }
+        d.insert_temp(slot, pass);
+    });
+}
+
+/// Keeps a window's pane's size `now` for its kind ([`window_kept`],
+/// the bottom pane's where `bottom`) while the builder drags one of its
+/// `edges` (their ids) to another, and the passes after its release (the
+/// pane follows the pointer a pass late: a drag let go as it moves would
+/// keep the size from before): not where the window's own size moved it
+/// (the pane held to its range), which is no choice of the builder's.
+fn keep_window_size(
+    app: &mut Moonglow,
+    ui: &Ui,
+    (kind, bottom): (Option<&str>, bool),
+    edges: &[egui::Id],
+    kept: Option<f32>,
+    now: f32,
+) {
+    let Some(kind) = kind else { return };
+    let pass = ui.ctx().cumulative_pass_nr();
+    // (The window's own, by its edges: not the kind's, or another window
+    // of the kind drawn after it would keep its own untouched size.)
+    let slot = egui::Id::new(("window-size-dragged", edges));
+    if edges.iter().any(|id| ui.ctx().is_being_dragged(*id)) {
+        ui.ctx().data_mut(|d| d.insert_temp(slot, pass));
+    }
+    let last = ui.ctx().data(|d| d.get_temp::<u64>(slot));
+    let dragged = last.is_some_and(|last| pass.wrapping_sub(last) <= 3);
+    let now = now.round();
+    if !dragged || kept.is_some_and(|k| (k - now).abs() < 0.5) {
+        return;
+    }
+    let layout = app.settings.dock_layouts.entry(kind.to_string()).or_default();
+    let size = Some(now.clamp(0.0, f32::from(u16::MAX)) as u16);
+    match bottom {
+        true => layout.window_bottom = size,
+        false => layout.window_width = size,
     }
 }
 
@@ -3411,6 +3504,10 @@ pub(crate) fn status_bar(app: &mut Moonglow, ui: &mut Ui) {
                     format!("Show the log, or close it{}", key_note(app, &ctx, Id::ViewLog))
                 }
                 Panel::Compiler => "Show what the script's latest compile said, or close it".into(),
+                Panel::Help => {
+                    "Show the comment and declaration of the name under the cursor, or close it"
+                        .into()
+                }
                 Panel::Bookmarks => "Show the script's bookmarks, or close them".into(),
                 Panel::SearchResults => "Show what the last search found, or close it".into(),
                 Panel::Checks => {
@@ -3457,6 +3554,16 @@ pub(crate) fn status_bar(app: &mut Moonglow, ui: &mut Ui) {
     };
     let newer = (!log_on).then(|| last_line(log)).flatten().filter(|(i, _)| alarm(*i));
     let message = shown.note.clone().filter(|_| newer.is_none());
+    // (A script's live error is shown whole wherever the bar has room for
+    // it, 5.2.0: the owner's rulings on Jasperre's report and at review.
+    // No cap; the others give way only as far as its width needs: the
+    // folder, then the hints from the last, then the switches' words, then
+    // the module's name is cut short down to `ERROR_LEAVES`, then the
+    // counts (the cursor's line and column last: the builder reads it
+    // against the error's line); only then is the message cut, whole in
+    // its tip.)
+    let error_line = message.is_some();
+    let cap = if error_line { f32::INFINITY } else { cap };
     let last = match &message {
         Some(n) => Some((None, n.text.clone(), Some(t.error))),
         None => (!log_on).then(|| last_line(log)).flatten().map(|(i, line)| {
@@ -3578,13 +3685,46 @@ pub(crate) fn status_bar(app: &mut Moonglow, ui: &mut Ui) {
                 switches.into_iter().map(|s| s.icon_only(icons)).collect();
             let left = switches_width(ui, &switches) + gaps;
             let room = ui.available_width() - left;
+            // (The folder only where it fits beside the middle at its
+            // fullest, a live error's too: it gives way first, before the
+            // hints (the coordinator's ruling at W5's review: a wider
+            // window never shows fewer hints). Beside a live error the
+            // hints then give way in the middle as far as it needs, and
+            // the right-hand items have what the whole message leaves.)
+            let error_need = line_full.map_or(0.0, |l| status::SEPARATOR_WIDTH + gaps + l);
             let show_folder = yields.game_folder && full <= room;
+            let room = if error_line { room - error_need } else { room };
             // (Where a count goes, the middle has gone before it: what the
             // count leaves is no room for the line.)
             let mut middle_on = true;
-            if !show_folder {
+            if error_line && !show_folder {
+                // (The name and the others cut first, the name to
+                // `ERROR_LEAVES` at the least; then the counts go from the
+                // first, the editor's own last (the Resources panel's goes
+                // before it), a script's line and column the last of all;
+                // what is left of the room is the message's, cut where it
+                // is still wider.)
+                let least = core.min(ERROR_LEAVES + note_width + note_gap + job_width + job_gap);
+                let n = count_widths.len();
+                let mut kept = n;
+                while kept > 0 && least + count_widths[n - kept..].iter().sum::<f32>() > room {
+                    kept -= 1;
+                }
+                counts.drain(..n - kept);
+                let core_room = (room - count_widths[n - kept..].iter().sum::<f32>()).max(least);
+                if core > core_room {
+                    let others = item.width(ui) + note_width + note_gap + job_gap;
+                    job = job.map(|j| j.max_width(core_room - others));
+                    let job_width = job.as_ref().map_or(0.0, |j| j.width(ui));
+                    let rest = core_room - note_gap - job_width - job_gap;
+                    let (name_max, note_max) = share(rest, item.width(ui), note_width);
+                    item = item.max_width(name_max);
+                    note = note.map(|n| n.max_width(note_max));
+                }
+            } else if !show_folder {
                 // (The middle yields before the counts: they go only where
-                // the right-hand items alone are wider than the bar.)
+                // the right-hand items alone are wider than the bar. Not a
+                // live error, before which the counts go.)
                 let mut kept = count_widths.len();
                 while kept > 0 && core + count_widths[..kept].iter().sum::<f32>() > room {
                     kept -= 1;
@@ -3801,6 +3941,12 @@ fn last_line_tip(log: &crate::Log, i: usize) -> String {
     tip
 }
 
+/// How short a script's live error cuts the module's name on the Status
+/// Bar (5.2.0) before the counts give way and the error itself is cut:
+/// the name is given this much (its text, cut at a letter with an
+/// ellipsis, can be a few points less).
+pub(crate) const ERROR_LEAVES: f32 = 120.0;
+
 /// The least room the log's last line is shown in (a short word and its
 /// ellipsis); in less, it is not shown.
 pub(crate) const LAST_LINE_LEAST: f32 = 48.0;
@@ -3813,7 +3959,8 @@ pub(crate) const LAST_LINE_CAP_AREA: f32 = 96.0;
 /// boards: the Creature board's 160).
 pub(crate) const LAST_LINE_CAP: f32 = 160.0;
 /// The most it takes beside a script's (the Script board's `.sb-log`,
-/// 170): the live error's message there too (M4's U13).
+/// 170). Not the live error's message (M4's U13), which has no cap since
+/// 5.2.0 ([`ERROR_LEAVES`]).
 pub(crate) const LAST_LINE_CAP_SCRIPT: f32 = 170.0;
 
 /// The most of the bar the log's last line (or the Status Bar's message)
@@ -3982,8 +4129,7 @@ impl<'a> HintKeys<'a> {
 /// Options); where it differs from what the bar showed, that frame is
 /// asked for.
 pub(crate) fn update_shown(app: &mut Moonglow, ctx: &egui::Context) {
-    let escape = app.escape_hint_next.clone().filter(|_| !app.model_under_pointer_next);
-    let named = escape.as_ref().map(|t| (t.clone(), crate::tabs::name(app, t)));
+    let mut escape = app.escape_hint_next.clone().filter(|_| !app.model_under_pointer_next);
     let hovered = app.options_hovered_next;
     // (A floating window's editor in place of the docked one: under the
     // pointer, or with the last press while the pointer is over no docked
@@ -4000,8 +4146,23 @@ pub(crate) fn update_shown(app: &mut Moonglow, ctx: &egui::Context) {
     let pressed = (app.window_tabs_next.iter())
         .find(|(_, l, _)| app.last_press.is_some_and(|(_, p)| p == Some(*l)))
         .filter(|_| pointer.is_none_or(|p| !over_docked(p)));
-    let window = under.or(pressed).map(|(tab, _, _)| tab);
-    let next = shown(app, ctx, named.as_ref().map(|(t, n)| (t, n.as_str())), hovered, window);
+    let window = under.or(pressed).map(|(tab, _, _)| tab.clone());
+    let front_dock_layer = app.window_layers_drawn.iter().copied().max_by_key(|l| order(l));
+    if escape.is_none()
+        && let Some(w) = &window
+        && let Some(front_layer) = front_dock_layer
+        && app.window_escape_candidates.iter().any(|(t, l)| t == w && *l == front_layer)
+        && !app.model_under_pointer_next
+        && !crate::widgets::dialog_drawn(ctx)
+        && ctx.memory(|m| m.top_modal_layer()).is_none()
+        && !egui::Popup::is_any_open(ctx)
+        && !mg_uikit::popover::Popover::any_open(ctx)
+    {
+        escape = Some(w.clone());
+    }
+    let named = escape.as_ref().map(|t| (t.clone(), crate::tabs::name(app, t)));
+    let next =
+        shown(app, ctx, named.as_ref().map(|(t, n)| (t, n.as_str())), hovered, window.as_ref());
     if next.said() != app.bar_shown.said() {
         ctx.request_repaint();
     }
@@ -4018,10 +4179,13 @@ const MODEL_VIEW_HINTS: [(&[&str], &str); 5] = [
     (&["Shift", "Wheel"], "Zoom finer"),
 ];
 
-/// Whether the Right Dock's Preview is drawn for the active docked
-/// editor: the dock unfolded and the panel available.
-fn preview_unfolded(app: &Moonglow) -> bool {
-    !right_folded(app) && Panel::Preview.available(app)
+/// Whether Preview is drawn for the active editor (`tab`), floating or docked.
+fn preview_shown(app: &Moonglow, tab: &crate::Tab, floating: bool) -> bool {
+    if floating {
+        app.window_previews_drawn.contains(tab)
+    } else {
+        !right_folded(app) && Panel::Preview.available(app)
+    }
 }
 
 /// Whether something in front takes the keys and presses the views'
@@ -4145,7 +4309,14 @@ pub(crate) fn shown(
         // (Any other resource only looked at, M4's U23: which it is, where
         // it is read from and its size, the Resources board's; no keys, as
         // nothing in it changes.)
+        // (A text's: its Find's keys, v5.2's W3.)
         Some(Tab::Resource(key)) => Shown {
+            hints: crate::browser::shows_text(app, *key, None)
+                .then(|| [k.hint(Cmd::Find, "Find"), k.hint(Cmd::FindNext, "Find next")])
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect(),
             counts: crate::browser::resource_count(app, *key, None)
                 .map(Count::new)
                 .into_iter()
@@ -4153,6 +4324,12 @@ pub(crate) fn shown(
             ..Shown::default()
         },
         Some(Tab::ResourceCopy { key, layer }) => Shown {
+            hints: crate::browser::shows_text(app, *key, Some(layer))
+                .then(|| [k.hint(Cmd::Find, "Find"), k.hint(Cmd::FindNext, "Find next")])
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect(),
             counts: crate::browser::resource_count(app, *key, Some(layer))
                 .map(Count::new)
                 .into_iter()
@@ -4163,7 +4340,10 @@ pub(crate) fn shown(
         // shown, M4's U11: the 3D view's ways, the Creature board's, after
         // Esc where an Escape would be its own; not Tab's, which the board
         // leaves out.)
-        Some(tab) if own_preview(app, Some(tab)).is_some() && preview_unfolded(app) => {
+        Some(tab)
+            if own_preview(app, Some(tab)).is_some()
+                && preview_shown(app, tab, window.is_some()) =>
+        {
             let mut hints = Vec::new();
             if esc_mine {
                 hints.push(Hint::keys(["Esc"], "Cancel"));
@@ -4335,17 +4515,12 @@ pub(crate) fn chosen_size(kept: Option<u32>, default: f32) -> f32 {
     kept.map_or(default, |s| s as f32)
 }
 
-/// Each dock's sizes at first, (tree, Right Dock, log), that versions
-/// before this one kept as though chosen while nothing was dragged: the
-/// module tree's 260 (this branch, M3 T5 to T13: its default stored on
-/// the first frame the dock was drawn) or 240 (every release to 4.2.0:
-/// the default its egui panel kept, which this branch then stored in
-/// place of its own); the Right Dock's 320 (this branch alone: no release
-/// had it); the log's 180 (this branch) or 120 (every release). Each was
-/// written apart, where the dock was drawn on that first frame, so an
-/// untouched file holds any of them in any mix, (240, 320, 180) and (260,
-/// 320, 120) among them, or one alone (the tree folded, no area open for
-/// the Right Dock, and since M3 T7 a new installation's log closed).
+/// Each dock's legacy default sizes, `(tree, Right Dock, log)`, that
+/// older versions stored as if user-chosen before edge drags were tracked:
+/// the module tree's `260` or `240` (legacy 4.2.0 default), the Right
+/// Dock's `320`, and the log's `180` or `120`. Because each dock wrote its
+/// size on first draw, an untouched settings file may hold any mix of
+/// these values, or only a subset if another dock stayed folded or closed.
 const SIZES_AT_FIRST: [&[u32]; 3] = [&[260, 240], &[320], &[180, 120]];
 
 /// Once for good (`Settings::dock_sizes_taken`), on the first frame: the
@@ -4807,7 +4982,6 @@ fn fold_tip(app: &Moonglow, ctx: &egui::Context, side: Side, open: bool) -> Stri
 /// as a press in the palettes' tab did ([`plugin_pane`]).
 pub(crate) fn right_dock(app: &mut Moonglow, ui: &mut Ui) {
     follow_editor(app);
-    help_forward(app);
     crate::dialog_view::search_forward(app);
     // (Where it and the panels' late bodies are drawn, this frame's alone:
     // a dock that folds or goes leaves none behind.)
@@ -4946,8 +5120,11 @@ pub(crate) fn right_dock(app: &mut Moonglow, ui: &mut Ui) {
                 if bar_panels.contains(&front) { front } else { section_front(app, bar_panels) };
             // (A form's own Preview alone, M4's U11: its header, its title
             // and the model's info line, as a stacked section of one has
-            // it. Every other bar keeps its tabs and the dock's name.)
-            let titled = matches!(bar_panels.as_slice(), [Panel::Preview])
+            // it. So does a script's Reference, alone since Help went under
+            // the text in 5.2.0: its header and "nwscript and includes", as
+            // the Script board has it. Every other bar keeps its tabs and
+            // the dock's name.)
+            let titled = matches!(bar_panels.as_slice(), [Panel::Preview] | [Panel::Reference])
                 && front.detail(app, editor.as_ref()).is_some();
             let (chosen, inner) = if titled {
                 let on = (bar_panels.as_slice(), front, editor.as_ref());
@@ -5177,23 +5354,32 @@ pub(crate) fn right_dock(app: &mut Moonglow, ui: &mut Ui) {
 }
 
 /// Help asked to the front (`ScriptTools::help_forward`: a double click
-/// on a name in a script, Go to Definition): where a script is the active
-/// docked editor and its Help shares the Right Dock's one tab bar with
-/// Reference behind it (under 1400), Help is brought in front by the
-/// dock's panel alone, nothing kept in the settings ([`focus_right`]);
-/// where Reference and Help stand one over the other, or the script
-/// floats, Help is in sight already. Asked while no script is in front
-/// (Go to Definition opening one), it waits for the script's tab, unless
-/// nothing is left to bring one.
+/// on a name in a script, Go to Definition, a click in Reference's list):
+/// Help is under the script's text since 5.2.0, a tab of the Bottom Dock
+/// beside Compiler and Bookmarks (the owner's ruling on Jasperre's
+/// report). Where the script floats, its window's bottom pane brings Help
+/// to the front, for each of the window's tabs (the pane is drawn for the
+/// one in front); docked, the Bottom Dock does, opened where it was closed
+/// (a name asked for by hand is to be read), nothing kept in the settings
+/// beyond the dock opened ([`focus_bottom`]). Asked while no script is in
+/// front (Go to Definition opening one), it waits for the script's tab,
+/// unless nothing is left to bring one.
 fn help_forward(app: &mut Moonglow) {
     let Some(from) = app.script_tools.help_forward else { return };
-    // (A floating script's window shows Help in its pane already, Reference
-    // over it: the docked script's Right Dock is left as it is. A script
-    // closed since: nothing.)
-    let docked =
-        app.dock.find_tab(&crate::Tab::Script(from)).is_some_and(|at| at.surface.is_main());
-    if !docked {
+    // (A script closed since: nothing.)
+    let Some(at) = app.dock.find_tab(&crate::Tab::Script(from)) else {
         app.script_tools.help_forward = None;
+        return;
+    };
+    if !at.surface.is_main() {
+        app.script_tools.help_forward = None;
+        let tabs: Vec<crate::Tab> = (app.dock.iter_leaves())
+            .filter(|(p, _)| p.surface == at.surface)
+            .flat_map(|(_, leaf)| leaf.tabs.iter().cloned())
+            .collect();
+        for tab in tabs {
+            app.window_bottoms.insert(tab, Panel::Help);
+        }
         return;
     }
     // (Asked while another editor came to the front, Go to Definition of
@@ -5203,8 +5389,9 @@ fn help_forward(app: &mut Moonglow) {
         return;
     }
     app.script_tools.help_forward = None;
-    if panels(app, Dock::Right).contains(&Panel::Help) && right_shown(app) != Some(Panel::Help) {
-        focus_right(app, Panel::Help);
+    if panels(app, Dock::Bottom).contains(&Panel::Help) && !bottom_shows(app, Panel::Help) {
+        focus_bottom(app, Panel::Help);
+        app.settings.hide_log = false;
     }
 }
 
@@ -5231,6 +5418,8 @@ pub(crate) fn bottom_forward(app: &mut Moonglow) {
     }
     nui_forward(app);
     problems_forward(app);
+    // (A script's Help, a Bottom Dock panel since 5.2.0.)
+    help_forward(app);
     let asks = std::mem::take(&mut app.script_tools.forward);
     if asks.is_empty() {
         return;
@@ -6026,7 +6215,8 @@ pub(crate) fn panel_body(
     let margin = match panel {
         // (Compiler's inset ground fills the panel, its own margin in it:
         // the Script board's `.compiler-out`.)
-        Panel::Properties | Panel::Compiler => Margin::ZERO,
+        // (Help's ground too, the editor's, 4.2.1's.)
+        Panel::Properties | Panel::Compiler | Panel::Help => Margin::ZERO,
         // (A conversation's: their scroll's own room, its bar at the
         // panel's edge.)
         Panel::NodeData | Panel::NodeSearch | Panel::Conversation => Margin::ZERO,
@@ -6049,75 +6239,53 @@ pub(crate) fn panel_body(
         // wider than the dock never widens it, which would push its edge
         // past the window's and draw the editor area over it.)
         let room = ui.available_rect_before_wrap();
+        let child = |ui: &mut Ui, salt: &'static str| -> egui::Ui {
+            let builder = LateSlot::salted(egui::UiBuilder::new().max_rect(room), host, salt, pane);
+            let mut body = ui.new_child(builder);
+            body.set_clip_rect(room.intersect(ui.clip_rect()));
+            body
+        };
         match panel {
             Panel::Palette => {
                 let mut body = ui.new_child(egui::UiBuilder::new().max_rect(room));
                 body.set_clip_rect(room.intersect(ui.clip_rect()));
                 crate::palette_view::ui(app, &mut body);
             }
-            // (Drawn here, where it comes in Tab's order after the tab
-            // bar; where an editor's tab may show the same model, after
-            // the editor area in this room, so that the tab keeps its
-            // view.)
-            // (A tileset's: its tile's diagram, the door sentence and the
-            // model, M4's U20.)
+            // Drawn in Tab order after the tab bar; where an editor tab may show
+            // the same model, after the editor area so that the tab keeps its view.
             Panel::Preview
                 if room.is_positive() && crate::tileset_view::tileset_of(editor).is_some() =>
             {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, "tileset-preview", pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, "tileset-preview");
                 crate::tileset_view::preview(app, &mut body, editor);
             }
-            // (The Appearance Gallery's: the row chosen, M4's U26.)
             Panel::Preview
                 if room.is_positive() && crate::appearance_gallery::is_gallery(editor) =>
             {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, "gallery-preview", pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, "gallery-preview");
                 crate::appearance_gallery::preview(app, &mut body, editor);
             }
             Panel::Appearance => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 crate::appearance_gallery::facts(app, &mut body, editor);
             }
-            // (A hak's: the resource chosen, M4's U21.)
             Panel::Preview if room.is_positive() && crate::hak_view::hak_of(editor).is_some() => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, "hak-preview", pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, "hak-preview");
                 crate::hak_view::preview(app, &mut body, editor);
             }
             Panel::Details => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 crate::hak_view::details(app, &mut body, editor);
             }
-            // (A journal's and the faction editor's, M4's U22.)
             Panel::Entry | Panel::Category => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::Entry => crate::journal_view::entry_panel(app, &mut body, editor),
                     _ => crate::journal_view::category_panel(app, &mut body, editor),
                 }
             }
             Panel::Faction | Panel::Reaction | Panel::Reactions => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::Faction => crate::faction_view::faction_panel(app, &mut body, editor),
                     Panel::Reaction => crate::faction_view::reaction_panel(app, &mut body, editor),
@@ -6125,10 +6293,7 @@ pub(crate) fn panel_body(
                 }
             }
             Panel::Textures => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 crate::tileset_view::textures(app, &mut body, editor);
             }
             Panel::Preview if room.is_positive() => {
@@ -6139,36 +6304,23 @@ pub(crate) fn panel_body(
                 if let Some(source) = own {
                     // (Drawn in its place: its form draws no model, and
                     // where its model has a tab of its own, it says so.)
-                    let builder = egui::UiBuilder::new().max_rect(room);
-                    let builder = LateSlot::salted(builder, host, "preview-panel", pane);
-                    let mut body = ui.new_child(builder);
-                    body.set_clip_rect(room.intersect(ui.clip_rect()));
+                    let mut body = child(ui, "preview-panel");
                     crate::area_tools::own_preview_body(app, &mut body, room, source, titled);
                 } else if chosen.is_some_and(|s| crate::model_view::a_tab_may_show(app, &s)) {
                     let layer = ui.layer_id();
                     let editor = editor.cloned();
                     app.late_slots.push(LateSlot { panel, rect: room, layer, pane, host, editor });
                 } else {
-                    let builder = egui::UiBuilder::new().max_rect(room);
-                    let builder = LateSlot::salted(builder, host, "preview-panel", pane);
-                    let mut body = ui.new_child(builder);
-                    body.set_clip_rect(room.intersect(ui.clip_rect()));
+                    let mut body = child(ui, "preview-panel");
                     crate::area_tools::preview_body(app, &mut body, room);
                 }
             }
             Panel::TileProperties => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, "tile-properties", pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, "tile-properties");
                 crate::tile_select::panel(app, &mut body, editor);
             }
             Panel::Properties => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, "properties", pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
-                // (A NUI designer's, M4's U18.)
+                let mut body = child(ui, "properties");
                 match crate::nui_view::panels::nui_of(editor) {
                     Some(_) => crate::nui_view::panels::properties(app, &mut body, editor, titled),
                     None => {
@@ -6177,20 +6329,12 @@ pub(crate) fn panel_body(
                     }
                 }
             }
-            // (The area editor's tools, M4's U29.)
             Panel::AreasTogether | Panel::LightMaker | Panel::Bake => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 crate::tool_sections::body(app, &mut body, panel, titled);
             }
-            // (A NUI designer's, M4's U18.)
             Panel::Components | Panel::Bindings => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::Components => {
                         crate::nui_view::panels::components(app, &mut body, editor)
@@ -6198,36 +6342,21 @@ pub(crate) fn panel_body(
                     _ => crate::nui_view::panels::bindings(app, &mut body, editor, titled),
                 }
             }
-            Panel::Reference | Panel::Help => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
-                match panel {
-                    Panel::Reference => crate::script_reference::reference(app, &mut body, editor),
-                    _ => crate::script_reference::help(app, &mut body, editor),
-                }
+            Panel::Reference => {
+                let mut body = child(ui, panel.name());
+                crate::script_reference::reference(app, &mut body, editor);
             }
-            // (A conversation's, M4's U14.)
             Panel::NodeData | Panel::NodeSearch | Panel::Conversation => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::NodeData => crate::dialog_view::node_data(app, &mut body, editor),
                     Panel::NodeSearch => crate::dialog_view::node_search(app, &mut body, editor),
                     _ => crate::dialog_view::conversation_panel(app, &mut body, editor, titled),
                 }
             }
-            // (A table's, M4's U16.)
             Panel::Cell | Panel::References | Panel::String | Panel::TalkFile => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
-                // (A talk table's, M4's U17: its References too.)
                 let talk = talk_of(app, editor).is_some();
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::Cell => crate::table_view::panels::cell(app, &mut body, editor),
                     Panel::References if talk => {
@@ -6238,8 +6367,9 @@ pub(crate) fn panel_body(
                     _ => crate::table_view::panels::references(app, &mut body, editor),
                 }
             }
-            // (The Bottom Dock's, or a script's window's bottom pane's.)
+            // Panels hosted in the Bottom Dock or a script window's bottom pane.
             Panel::Compiler
+            | Panel::Help
             | Panel::Bookmarks
             | Panel::SearchResults
             | Panel::Checks
@@ -6247,12 +6377,10 @@ pub(crate) fn panel_body(
             | Panel::HakConflicts
             | Panel::ResourcesUsed
             | Panel::ClaimsTable => {
-                let builder = egui::UiBuilder::new().max_rect(room);
-                let builder = LateSlot::salted(builder, host, panel.name(), pane);
-                let mut body = ui.new_child(builder);
-                body.set_clip_rect(room.intersect(ui.clip_rect()));
+                let mut body = child(ui, panel.name());
                 match panel {
                     Panel::Compiler => crate::script_panels::compiler(app, &mut body, editor),
+                    Panel::Help => crate::script_reference::help(app, &mut body, editor),
                     Panel::Bookmarks => crate::script_panels::bookmarks(app, &mut body, editor),
                     Panel::Checks => crate::nui_view::checks::panel(app, &mut body, editor),
                     Panel::Problems => crate::problems::body(app, &mut body),
@@ -6261,10 +6389,9 @@ pub(crate) fn panel_body(
                     Panel::ClaimsTable => crate::dock_reports::claims_body(app, &mut body),
                     _ => crate::search_results::body(app, &mut body),
                 }
-                // (U28's tabs, whose forms and headers are over their rows:
-                // where nothing is listed yet, what they drew ends. Not
-                // Problems', whose empty state fills its room, nor a
-                // script's panels', which hold the dock to nothing.)
+                // Report panels' forms and headers draw over their rows: when
+                // empty, keep drawn-height tight rather than filling room like
+                // Problems or script panels.
                 let formed = matches!(
                     panel,
                     Panel::SearchResults
@@ -6815,6 +6942,8 @@ mod dock_tests {
             column: None,
             folded: None,
             wide_width: None,
+            window_width: None,
+            window_bottom: None,
         };
         app.settings.dock_layouts.insert("welcome".into(), layout);
         app.sample_brings = Some(("welcome", second_kind()));

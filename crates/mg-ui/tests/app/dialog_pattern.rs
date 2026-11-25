@@ -30,7 +30,7 @@ mod openers_editors;
 mod openers_module;
 pub(crate) mod openers_shared;
 mod openers_wizards;
-mod openers_world;
+pub(crate) mod openers_world;
 pub(crate) mod table;
 
 /// A state of a dialog beyond the one it opens in (a wizard's later page):
@@ -179,6 +179,7 @@ pub(crate) const SHARED_MAKERS: &[(&str, &str, &[&str])] = &[
             "hak_view.rs:extracting_window#1",
             "model_view.rs:export_window#1",
             "nui_view.rs:windows#1",
+            "tileset_view.rs:windows#1",
         ],
     ),
     (
@@ -207,9 +208,7 @@ pub(crate) const SHARED_MAKERS: &[(&str, &str, &[&str])] = &[
         &[
             "blueprint/mod.rs:locstring_memo#1",
             "blueprint/mod.rs:locstring_memo_to#1",
-            "blueprint/mod.rs:locstring_then#1",
-            "blueprint/mod.rs:locstring_whole#1",
-            "blueprint/mod.rs:narrow_locstring#1",
+            "blueprint/mod.rs:open_loc_edit_on_click#1",
             "dialog_view.rs:text_panel#1",
         ],
     ),
@@ -935,8 +934,10 @@ pub(crate) fn opened(
     op: &Opener,
     size: egui::Vec2,
     zoom: f32,
-) -> Option<Harness<'static, Moonglow>> {
-    let mut h = (op.setup)()?;
+) -> Option<Box<Harness<'static, Moonglow>>> {
+    // Boxed: a test holds several of these at once, and a debug build keeps
+    // each on the stack whole (Windows' test threads overflowed theirs).
+    let mut h = Box::new((op.setup)()?);
     h.state_mut().settings.ui_scale = Some((zoom * 100.0).round() as u16);
     h.set_size(size);
     settle(&mut h);
@@ -986,17 +987,31 @@ fn hold_one(op: &Opener) {
             enter(&mut h, op, None, "its main action off");
         }
     }
-    // Whole at each size and zoom, in each of its states.
-    for (size, zoom) in
-        [(screen, 1.0), (mg_ui::LEAST_WINDOW_SIZE, 1.0), (screen, 1.25), (screen, 1.5)]
-    {
-        let at = format!("at {size:?}, zoom {zoom}");
-        let mut h = opened(op, size, zoom).expect("opened before");
-        holds_the_pattern(&mut h, op, &at);
-        for (state, step) in &op.states {
-            step(&mut h);
+    // Whole at each size and zoom, in each of its states. ((screen, 1.0) is
+    // already checked above when op.states is empty.)
+    if op.states.is_empty() {
+        let mut h = opened(op, mg_ui::LEAST_WINDOW_SIZE, 1.0).expect("opened before");
+        for (size, zoom) in
+            [(mg_ui::LEAST_WINDOW_SIZE, 1.0_f32), (screen, 1.25_f32), (screen, 1.5_f32)]
+        {
+            let at = format!("at {size:?}, zoom {zoom}");
+            h.state_mut().settings.ui_scale = Some((zoom * 100.0).round() as u16);
+            h.set_size(size);
             rested(&mut h, title, op.job);
-            holds_the_pattern(&mut h, op, &format!("{state}, {at}"));
+            holds_the_pattern(&mut h, op, &at);
+        }
+    } else {
+        for (size, zoom) in
+            [(screen, 1.0), (mg_ui::LEAST_WINDOW_SIZE, 1.0), (screen, 1.25), (screen, 1.5)]
+        {
+            let at = format!("at {size:?}, zoom {zoom}");
+            let mut h = opened(op, size, zoom).expect("opened before");
+            holds_the_pattern(&mut h, op, &at);
+            for (state, step) in &op.states {
+                step(&mut h);
+                rested(&mut h, title, op.job);
+                holds_the_pattern(&mut h, op, &format!("{state}, {at}"));
+            }
         }
     }
 }
@@ -1384,7 +1399,7 @@ fn tab_brings_a_scrolled_body_s_control_into_sight() {
 
 /// What the window says names a menu, a tab or a section as they are drawn:
 /// a menu path with "›" as the menus show it, the Plugins tab (Plugins ›
-/// Manage Plugins… opens it), the NUI Creator's Row Data section. (The
+/// Manage Plugins opens it), the NUI Creator's Row Data section. (The
 /// user manual's chapters were read against the program in M5's V2; these
 /// were the strings it found naming them otherwise.)
 #[test]

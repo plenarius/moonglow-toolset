@@ -640,8 +640,9 @@ pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
             }
             return ui.add(slider);
         }
-        // (The thumb each state's fill, `slider-thumb` at rest too, ringed in
-        // its text stroke, which is the value's text too. egui fills the
+        // (The thumb each state's fill, `slider-thumb` at rest too, ringed
+        // in `slider-thumb-ring` (none in dark) once painted; the text
+        // stroke is the value's text, `text`. egui fills the
         // rail with the resting state's fill as well: the rail, the first
         // shape the slider paints, is filled again as the `inset` well
         // once painted. M4's U25 settled the thumb at rest, which had
@@ -650,13 +651,14 @@ pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
         w.hovered.bg_fill = t.slider_thumb;
         w.active.bg_fill = t.slider_thumb;
         for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
-            state.fg_stroke = Stroke::new(1.0, t.text_2);
+            state.fg_stroke = Stroke::new(1.0, t.text);
         }
         v.selection.bg_fill = t.accent_fill;
         let layer = ui.layer_id();
         let first = ui.ctx().graphics_mut(|g| g.entry(layer).next_idx());
         let r = ui.add(slider);
-        rail_as_well(ui.ctx(), layer, first, t.slider_thumb, t.inset);
+        let end = ui.ctx().graphics_mut(|g| g.entry(layer).next_idx());
+        rail_as_well(ui.ctx(), layer, first, end, t.slider_thumb, t.inset, t.slider_thumb_ring);
         r
     })
     .inner
@@ -664,23 +666,45 @@ pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
 
 /// The slider's rail, the first shape painted on `layer` from `first`, a
 /// rectangle filled `thumb` (egui fills the rail as the thumb at rest),
-/// filled `well` instead; nothing where the slider painted nothing (out
-/// of sight).
+/// filled `well` instead, and its thumb (the theme's `HandleShape::Rect`,
+/// a rectangle filled `thumb` after the rail; a circle under egui's own
+/// handle shape) stroked with `ring`, or with nothing where `ring` is
+/// transparent (egui strokes it in the value's text color, which made a
+/// near-white ring in the dark theme and a near-black one in the light);
+/// nothing where the slider painted nothing (out of sight).
 fn rail_as_well(
     ctx: &egui::Context,
     layer: egui::LayerId,
     first: egui::layers::ShapeIdx,
+    end: egui::layers::ShapeIdx,
     thumb: egui::Color32,
     well: egui::Color32,
+    ring: egui::Color32,
 ) {
+    let thumb_stroke =
+        if ring == Color32::TRANSPARENT { Stroke::NONE } else { Stroke::new(1.0, ring) };
     ctx.graphics_mut(|g| {
-        g.entry(layer).mutate_shape(first, |s| {
-            if let egui::Shape::Rect(rail) = &mut s.shape
-                && rail.fill == thumb
-            {
-                rail.fill = well;
+        let Some(list) = g.get_mut(layer) else { return };
+        if first.0 < end.0 {
+            list.mutate_shape(first, |s| {
+                if let egui::Shape::Rect(rail) = &mut s.shape
+                    && rail.fill == thumb
+                {
+                    rail.fill = well;
+                }
+            });
+            for idx in first.0 + 1..end.0 {
+                list.mutate_shape(egui::layers::ShapeIdx(idx), |s| match &mut s.shape {
+                    egui::Shape::Rect(handle) if handle.fill == thumb => {
+                        handle.stroke = thumb_stroke;
+                    }
+                    egui::Shape::Circle(handle) if handle.fill == thumb => {
+                        handle.stroke = thumb_stroke;
+                    }
+                    _ => {}
+                });
             }
-        });
+        }
     });
 }
 
@@ -1068,29 +1092,58 @@ fn shapes_where(
 }
 
 fn focused_field_border(ctx: &egui::Context, t: &Tokens, style: &Style) {
-    // (Only while a text field has the keys. Its rectangle is not asked
-    // of egui: `Context::read_response` counts as the widget asking for
-    // the keys, and kept them on a field no longer drawn.)
     let Some(id) = ctx.memory(|m| m.focused()) else { return };
     if egui::text_edit::TextEditState::load(ctx, id).is_none() {
         return;
     }
-    // A frame drawn as egui draws a focused field's: its fill the fields'
-    // and its border the selection's stroke. (A field with a frame of its
-    // own, `TextEdit::frame`, has egui draw neither: a code editor's,
-    // [`code_frame`].)
-    // (A field's own fill, or a read-only form's: the panel's. In a
-    // table's rows, [`row_style`], the selection's stroke is no wider than
-    // their fields' borders, none: given the field's 1 px.)
     let selection = style.visuals.selection.stroke.color;
     let fills = [style.visuals.text_edit_bg_color(), style.visuals.panel_fill];
+    // Path 1 (no pointer press/click/release this pass): `read_response`
+    // has zero side effects on focus or `used_ids` in egui 0.36 and yields
+    // the exact layer and outer rect of the focused TextEdit (including empty
+    // fields and first-frame AccessKit/Tab focus).
+    let pointer_acted =
+        ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_click() || i.pointer.any_released());
+    if !pointer_acted {
+        let Some(response) = ctx.read_response(id) else { return };
+        let target = response.rect;
+        shapes_where(
+            ctx,
+            response.layer_id,
+            |r| {
+                r.stroke.color == selection
+                    && fills.contains(&r.fill)
+                    && (r.rect.min - target.min).abs().max_elem() <= 2.5
+                    && (r.rect.max - target.max).abs().max_elem() <= 2.5
+            },
+            |r| {
+                r.stroke = Stroke::new(1.0, t.accent);
+            },
+        );
+        return;
+    }
+    // Path 2 (pointer press/click/release pass): do not call `read_response`
+    // because its `get_response` would surrender focus requested by a click
+    // elsewhere. Use `output.ime`'s inner rect (whose width is the galley's
+    // width and may be 0 for an empty field, while its height matches the
+    // field's inner height).
+    let Some(ime) = ctx.output(|o| o.ime) else { return };
+    if !ime.rect.is_finite() || ime.rect.height() <= 0.0 {
+        return;
+    }
     let mut layers: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().collect());
     layers.push(egui::LayerId::background());
     for layer in layers {
+        let local_ime = ctx.layer_transform_from_global(layer).unwrap_or_default() * ime.rect;
         shapes_where(
             ctx,
             layer,
-            |r| r.stroke.color == selection && fills.contains(&r.fill),
+            |r| {
+                r.stroke.color == selection
+                    && fills.contains(&r.fill)
+                    && r.rect.expand(2.0).contains_rect(local_ime)
+                    && (r.rect.height() - local_ime.height()) <= 24.0
+            },
             |r| {
                 r.stroke = Stroke::new(1.0, t.accent);
             },
@@ -1099,6 +1152,9 @@ fn focused_field_border(ctx: &egui::Context, t: &Tokens, style: &Style) {
 }
 
 fn tooltip_fill(ctx: &egui::Context, t: &Tokens, style: &Style) {
+    if !ctx.memory(|m| m.layer_ids().any(|l| l.order == egui::Order::Tooltip)) {
+        return;
+    }
     let layers: Vec<egui::LayerId> =
         ctx.memory(|m| m.layer_ids().filter(|l| l.order == egui::Order::Tooltip).collect());
     let (fill, stroke) = (style.visuals.window_fill, style.visuals.window_stroke);
@@ -1200,6 +1256,44 @@ mod tests {
             let thumb = thumb.expect("the thumb");
             assert_eq!(thumb.fill, t.slider_thumb, "{theme:?}: the thumb at rest");
             assert_ne!(thumb.fill, rail.fill, "{theme:?}");
+        }
+    }
+
+    /// The slider's thumb (a rectangle, the theme's handle shape) is ringed
+    /// as the proposal's section 4.2 has it: none in the dark theme, 1 px
+    /// `#8d949e` in the light (kept by the owner's ruling though it is
+    /// under 3:1 on the well); not in the value's text color, which made a
+    /// near-white ring in dark and a near-black one in light. The value's
+    /// text is `text`.
+    #[test]
+    fn a_slider_s_thumb_is_ringed_as_the_proposal_has_it() {
+        assert_eq!(crate::Tokens::LIGHT.slider_thumb_ring, Color32::from_rgb(0x8d, 0x94, 0x9e));
+        for theme in crate::Theme::ALL {
+            let t = theme.tokens();
+            let mut v = 40.0_f32;
+            let out = frame(Some(theme), |ui| {
+                slider(ui, egui::Slider::new(&mut v, 0.0..=100.0).suffix(" %"));
+            });
+            let mut thumbs = Vec::new();
+            let mut texts = Vec::new();
+            for c in &out.shapes {
+                match &c.shape {
+                    Shape::Rect(r) if r.fill == t.slider_thumb => thumbs.push(r.clone()),
+                    Shape::Text(s) if s.galley.text().contains('%') => texts.push(s.fallback_color),
+                    _ => {}
+                }
+            }
+            assert_eq!(thumbs.len(), 1, "{theme:?}: the thumb, a rectangle: {thumbs:?}");
+            let ring = thumbs[0].stroke;
+            match theme {
+                crate::Theme::Dark => {
+                    assert!(ring.width == 0.0 || ring.color.a() == 0, "dark: no ring, {ring:?}")
+                }
+                crate::Theme::Light => {
+                    assert_eq!(ring, Stroke::new(1.0, t.slider_thumb_ring), "light: the ring")
+                }
+            }
+            assert_eq!(texts, vec![t.text], "{theme:?}: the value");
         }
     }
 

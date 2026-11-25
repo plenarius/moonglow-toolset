@@ -30,14 +30,14 @@ fn a_nui_window_the_include_leaves_out_is_said_and_taken_in() {
     h.run();
     let log = format!("{:?}", h.state().log.entries);
     assert!(log.contains("src/scripts/chat-commands/test.jui"), "{log}");
-    assert!(h.query_by_label("NUI windows (0)").is_some());
+    assert!(h.query_by_label("NUI Windows (0)").is_some());
     h.get_by_label("Build").click();
     h.run();
     h.get_by_label("Add Left-Out Files to nasher.cfg").click();
     h.run_steps(3);
     let jui = ResKey::parse("test", ResType::JUI).unwrap();
     assert!(h.state().ws.as_ref().unwrap().module.contains(&jui), "{:?}", h.state().log.entries);
-    assert!(h.query_by_label("NUI windows (1)").is_some());
+    assert!(h.query_by_label("NUI Windows (1)").is_some());
     let cfg = std::fs::read_to_string(project.join("nasher.cfg")).unwrap();
     assert!(cfg.contains("include = \"src/**/*.{jui,txt}\""), "{cfg}");
 }
@@ -462,7 +462,7 @@ fn store_project(
 #[test]
 fn the_project_file_is_read_again_with_reloading_off() {
     let Some((install, dir, area, _, _)) = store_project("ui-project-file-again") else { return };
-    let mut app = Moonglow::new(Some(install), Box::new(NoDialogs::default()));
+    let mut app = game_app(&install.root, install.user_dir);
     app.settings.no_auto_reload = true;
     app.open_module(&dir);
     app.palette_dock = false;
@@ -491,7 +491,7 @@ fn setup_store_follows_the_project_file() {
     let Some((install, dir, area, area_tag, git)) = store_project("ui-setup-store-project") else {
         return;
     };
-    let mut app = Moonglow::new(Some(install), Box::new(NoDialogs::default()));
+    let mut app = game_app(&install.root, install.user_dir);
     app.open_module(&dir);
     app.palette_dock = false;
     assert!(app.log.entries.iter().any(|e| e.1.contains("read from moonglow.toml")));

@@ -48,6 +48,34 @@ pub(crate) use bar::status;
 /// How far from a door hook a click places a door on it, metres.
 const DOOR_REACH: f32 = 4.0;
 
+/// Where a door put down with the pointer somewhere goes: on the door
+/// hook within [`DOOR_REACH`] of the ground there, facing as it does
+/// (Aurora's only place for one), else freely, where a placeable would
+/// go, turned as Q and E turned it. `held_off`: a hook was in reach and
+/// Alt kept the door off it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DoorAt {
+    Hook(mg_area::DoorHook),
+    Free { at: Vec3, held_off: bool },
+}
+
+/// Whether the doors' Alt is held: a door placed, dropped or dragged then
+/// goes where the pointer is, on no door hook.
+fn hooks_off(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.modifiers.alt)
+}
+
+/// Where a door put down with the pointer at `pos` goes ([`DoorAt`]), Alt
+/// held or not (`off`); `None` off the area.
+fn door_at(view: &AreaView, pos: Pos2, off: bool) -> Option<DoorAt> {
+    let model = view.model.as_ref()?;
+    let hook = view.ground_at(pos, 0.0).and_then(|g| model.hook_near(g, DOOR_REACH)).copied();
+    match hook {
+        Some(h) if !off => Some(DoorAt::Hook(h)),
+        _ => Some(DoorAt::Free { at: view.placed_at(pos)?, held_off: hook.is_some() }),
+    }
+}
+
 /// The steepest the camera looks down (just short of straight down, where
 /// "up" on screen would be undefined).
 const MAX_PITCH: f32 = 1.5695;
@@ -490,7 +518,7 @@ impl TurnRing {
 }
 
 /// A brush cursor's outlines (their points on the ground) and colours.
-pub type CursorShapes = Vec<(Vec<Vec3>, Color32)>;
+pub type CursorShapes = std::sync::Arc<[(Vec<Vec3>, Color32)]>;
 
 /// An open area's view.
 #[derive(Debug)]
@@ -583,9 +611,8 @@ pub struct AreaView {
     walk_mesh: Option<(OverlayKey, std::sync::Arc<egui::Mesh>)>,
     /// The objects' walkmesh overlay as last made (its faces and their
     /// edges), and what for.
-    #[allow(clippy::type_complexity)]
     object_walk_mesh:
-        Option<(ObjectOverlayKey, std::sync::Arc<egui::Mesh>, Vec<(Vec<Pos2>, Color32)>)>,
+        Option<(ObjectOverlayKey, std::sync::Arc<egui::Mesh>, std::sync::Arc<[egui::Shape]>)>,
     /// How many times the ground's and the objects' walkmesh overlays
     /// have been made (the tests' count of a kept one).
     pub overlay_builds: [u64; 2],
@@ -593,7 +620,7 @@ pub struct AreaView {
     /// workspace's revision and the selection they were read at: read
     /// again only when either changes ([`sound_ranges_of`]).
     #[allow(clippy::type_complexity)]
-    sound_ranges_kept: Option<((u64, Vec<(ObjectKind, usize)>), Vec<SoundRange>)>,
+    sound_ranges_kept: Option<((u64, Vec<(ObjectKind, usize)>), std::sync::Arc<Vec<SoundRange>>)>,
     /// Sound Ranges' spheres and circles in the last picture made: each
     /// one's middle, size (its distance) and opacity.
     pub sound_rings: Vec<(Vec3, f32, f32)>,
@@ -726,6 +753,12 @@ pub struct AreaView {
     ghost: Option<(ResKey, Option<u64>, Option<mg_area::AreaObject>)>,
     /// The blueprint about to be placed as the last frame showed it.
     pub ghost_shown: Option<mg_area::AreaObject>,
+    /// Where the door about to be placed goes, as its ghost shows it (on
+    /// a hook or free); `None` for other blueprints.
+    pub(crate) ghost_door: Option<DoorAt>,
+    /// Alt is held ([`hooks_off`], read each frame): a door placed,
+    /// dropped or dragged goes on no door hook.
+    hooks_off: bool,
     /// How far Q and E have turned the blueprint about to be placed
     /// (radians, anticlockwise); it is placed so.
     ghost_turn: f32,
@@ -824,22 +857,25 @@ struct Drawn {
     background: Option<[u8; 3]>,
     merchant_signs: bool,
     follows: bool,
+    /// Opaque stamp of the current Paint brush ghosts (`0` when none).
+    paint_stamp: u64,
     /// The Shaders switch.
     shaders: bool,
     /// Options › Area › Shadows quality is High: stencil shadow volumes.
     high_shadows: bool,
     /// The placed sounds' ranges drawn (Sound Ranges).
-    sound_ranges: Vec<SoundRange>,
+    sound_ranges: std::sync::Arc<Vec<SoundRange>>,
 }
 
 /// A positional sound's distances as Sound Ranges draws them in the
 /// picture ([`sound_range_shapes`]): its place in the GIT's list, its
-/// `MinDistance` and `MaxDistance`, and whether it is selected.
+/// `MinDistance` and `MaxDistance`, random-position reach, and whether it is selected.
 #[derive(Debug, Clone, PartialEq)]
 struct SoundRange {
     index: usize,
     min: f32,
     max: f32,
+    reach: Option<glam::Vec2>,
     chosen: bool,
 }
 
@@ -1116,6 +1152,11 @@ impl AreaView {
         self.walkable = None;
         self.object_walks = Default::default();
         self.object_faces = None;
+        self.map = None;
+        self.cursor_cache = None;
+        self.preview_cache = None;
+        self.ghost = None;
+        self.paint.clear_caches();
         self.overlay_generation += 1;
         self.drawn = None;
     }
@@ -1308,6 +1349,8 @@ impl AreaView {
             particles_shown: 0,
             ghost: None,
             ghost_shown: None,
+            ghost_door: None,
+            hooks_off: false,
             ghost_turn: 0.0,
             ghost_step: 0,
             menu_at: None,
@@ -1318,7 +1361,7 @@ impl AreaView {
             turn_together: false,
             onto_objects: false,
             pointer: None,
-            brush_cursor: Vec::new(),
+            brush_cursor: std::sync::Arc::from([]),
             terrain_drag: None,
             camera_press: false,
             object_press: false,
@@ -1394,6 +1437,11 @@ impl AreaView {
     /// How far Q and E have turned what is about to be placed (radians).
     pub(crate) fn ghost_turn(&self) -> f32 {
         self.ghost_turn
+    }
+
+    /// The grid step placed objects snap to (meters), if they do.
+    pub(crate) fn snap_grid(&self) -> Option<f32> {
+        self.snap.0
     }
 
     /// The angle turned objects snap to (degrees), if they do.
@@ -2109,11 +2157,6 @@ impl AreaView {
             .collect()
     }
 
-    /// The scale handle `pos` is on: its object's place.
-    fn scale_handle_at(&self, pos: Pos2) -> Option<Vec3> {
-        self.scale_handle_of_at(pos).map(|h| h.1)
-    }
-
     /// The scale handle `pos` is on: its object and its place.
     fn scale_handle_of_at(&self, pos: Pos2) -> Option<((ObjectKind, usize), Vec3)> {
         let handles = self.scale_handles_of(self.model.as_ref()?);
@@ -2529,6 +2572,39 @@ impl AreaView {
         }
     }
 
+    /// The door hook a door dragged by `offset` goes onto: the selection
+    /// one door, a hook within [`DOOR_REACH`] of where the drag leads it,
+    /// Alt not held. With the door's place in the model's objects.
+    fn door_drag_hook(
+        &self,
+        model: &AreaModel,
+        offset: Vec2,
+    ) -> Option<(usize, mg_area::DoorHook)> {
+        if self.hooks_off {
+            return None;
+        }
+        let mut chosen = self.selected_indices();
+        let (Some(i), None) = (chosen.next(), chosen.next()) else { return None };
+        let o = &model.objects[i];
+        if o.kind != ObjectKind::Door {
+            return None;
+        }
+        let to = o.position.truncate() + offset;
+        model.hook_near(to.extend(o.position.z), DOOR_REACH).map(|h| (i, *h))
+    }
+
+    /// Whether a door dragged now goes onto a hook (`Some(true)`) or
+    /// freely (`Some(false)`, Alt held where one is in reach too): for the
+    /// Status Bar and the tests. `None` while no lone door is moved.
+    pub fn door_drag_hooked(&self) -> Option<bool> {
+        let model = self.model.as_ref()?;
+        let Some(Drag::Move { offset, .. }) = self.drag else { return None };
+        let mut chosen = self.selected_indices();
+        let (Some(i), None) = (chosen.next(), chosen.next()) else { return None };
+        (model.objects[i].kind == ObjectKind::Door)
+            .then(|| self.door_drag_hook(model, offset).is_some())
+    }
+
     /// Where each selected object stands and turns with the drag applied
     /// (and Q and E's turning under way): its place in the model's
     /// objects, position and turn.
@@ -2600,6 +2676,15 @@ impl AreaView {
             Some(&(tp, tr)) => (i, p + (tp - model.objects[i].position), tr),
             None => (i, p, r),
         };
+        // A door dragged alone onto a hook in reach: on it, facing as it
+        // does (Alt keeps it free).
+        let hooked = match drag {
+            Drag::Move { offset, .. } if locked.is_none() => self.door_drag_hook(model, offset),
+            _ => None,
+        };
+        if let Some((i, h)) = hooked {
+            return vec![(i, h.position, h.bearing)];
+        }
         self.selected_indices()
             .map(|i| {
                 let o = &model.objects[i];
@@ -2841,57 +2926,69 @@ fn refresh(app: &mut Moonglow, view: &mut AreaView, ctx: &egui::Context) {
     let rewrites = ws.rewrites(&are_key);
     let rewritten = view.rewrites.is_some_and(|r| r != rewrites);
     view.rewrites = Some(rewrites);
-    let are = match ws.doc(&are_key) {
-        Ok(g) => g.clone(),
+    let (tileset_ref, same_are) = match ws.doc(&are_key) {
+        Ok(are) => (
+            are.root.resref("Tileset").unwrap_or(ResRef::EMPTY),
+            view.scene.is_some()
+                && view.model.is_some()
+                && view.read_from.as_ref().is_some_and(|(was_are, _)| was_are == are),
+        ),
         Err(e) => {
             step(&format!("its ARE can't be read: {e}"));
             view.error = Some(e.to_string());
             return;
         }
     };
-    // An area without a GIT has no objects yet.
-    let git = ws.doc(&view.git()).cloned().unwrap_or_else(|_| Gff::new(*b"GIT "));
-    let tileset_ref = are.root.resref("Tileset").unwrap_or(ResRef::EMPTY);
-    step(&format!(
-        "tileset {tileset_ref}, GIT {}",
-        if ws.doc(&view.git()).is_ok() { "read" } else { "none" }
-    ));
+    let git_ok = ws.doc(&view.git()).is_ok();
+    step(&format!("tileset {tileset_ref}, GIT {}", if git_ok { "read" } else { "none" }));
     // Only some of its objects changed (an object moved, turned, edited
     // in its Properties; or nothing of the area at all, another resource
     // edited): those read again, the rest kept. Read whole, an area of a
     // thousand objects took 4 to 15 ms at every edit (`frame_perf`'s
     // `refresh_parts`), noticed in busy areas.
-    if view.scene.is_some()
-        && view.model.is_some()
-        && let Some((was_are, was_git)) = &view.read_from
-        && *was_are == are
-        && let Some(mut changed) = AreaModel::changed_objects(&was_git.root, &git.root)
-    {
-        // (And those the model has as an edit since left them, which may
-        // be set back by now: an object moved, the move undone while
-        // another tab was in front, the module saved.)
-        let since = std::mem::take(&mut view.read_since);
-        let known: std::collections::HashSet<_> = changed.iter().copied().collect();
-        changed.extend(since.into_iter().filter(|o| !known.contains(o)));
-        changed.sort();
-        let mut model = view.model.take().expect("checked above");
-        if changed.is_empty() {
-            step("nothing of it changed");
-            view.model = Some(model);
+    if same_are {
+        // (As `Gff::new` makes a GIT's root, what the area was read from
+        // without one: else every edit read it whole.)
+        let empty_git_root = mg_gff::Struct::new(mg_gff::ROOT_STRUCT_ID);
+        let changed = {
+            let git_root = ws.doc(&view.git()).map_or(&empty_git_root, |g| &g.root);
+            view.read_from
+                .as_ref()
+                .and_then(|(_, was_git)| AreaModel::changed_objects(&was_git.root, git_root))
+        };
+        if let Some(mut changed) = changed {
+            // (And those the model has as an edit since left them, which may
+            // be set back by now: an object moved, the move undone while
+            // another tab was in front, the module saved.)
+            let since = std::mem::take(&mut view.read_since);
+            let known: std::collections::HashSet<_> = changed.iter().copied().collect();
+            changed.extend(since.into_iter().filter(|o| !known.contains(o)));
+            changed.sort();
+            let mut model = view.model.take().expect("checked above");
+            if changed.is_empty() {
+                step("nothing of it changed");
+                view.model = Some(model);
+                return;
+            }
+            let git = ws.doc(&view.git()).cloned().unwrap_or_else(|_| Gff::new(*b"GIT "));
+            let at = model.read_objects(&game, &git.root, &changed);
+            step(&format!("{} of its objects read again", changed.len()));
+            if let Some(g) = &mut view.ground {
+                g.update(&game, &model);
+            }
+            if let (Some(s), Some(vp)) = (&mut view.scene, &app.viewport) {
+                s.update_objects(&vp.gpu, &game, &model, &at);
+            }
+            if let Some((_, was_git)) = &mut view.read_from {
+                *was_git = git;
+            }
+            show(app, view, &game, model, false, false);
             return;
         }
-        let at = model.read_objects(&game, &git.root, &changed);
-        step(&format!("{} of its objects read again", changed.len()));
-        if let Some(g) = &mut view.ground {
-            g.update(&game, &model);
-        }
-        if let (Some(s), Some(vp)) = (&mut view.scene, &app.viewport) {
-            s.update_objects(&vp.gpu, &game, &model, &at);
-        }
-        view.read_from = Some((are, git));
-        show(app, view, &game, model, false, false);
-        return;
     }
+    let are = ws.doc(&are_key).expect("checked above").clone();
+    // An area without a GIT has no objects yet.
+    let git = ws.doc(&view.git()).cloned().unwrap_or_else(|_| Gff::new(*b"GIT "));
     // The first reading, and a reading again of its models and textures
     // (Reload Resources), where the window is kept going: on a thread.
     // (An edit reads the area here: what it changed is shown at once, its
@@ -3107,9 +3204,14 @@ fn look_at_start(app: &mut Moonglow, view: &mut AreaView) -> bool {
     true
 }
 
-/// Axis-aligned bounding corners for framing `o`: an outline's bounding box
-/// for triggers and encounters, or the object's position otherwise.
-fn object_bounds_for_focus(o: &mg_area::AreaObject) -> (Vec3, Vec3) {
+/// Axis-aligned world corners for framing object `i` of `model`: an
+/// outline's box for triggers and encounters; for an object whose model
+/// `scene` draws, that model's box where it stands (turned, tilted and
+/// scaled as drawn, the box selected objects show), so that the view
+/// looks at the middle of what is seen rather than its feet; else (a
+/// waypoint's arrow, a sound, a model not loaded yet) its position.
+fn object_bounds_for_focus(scene: Option<&AreaScene>, model: &AreaModel, i: usize) -> (Vec3, Vec3) {
+    let o = &model.objects[i];
     if o.kind.has_outline() && !o.outline.is_empty() {
         let mut min = o.outline[0];
         let mut max = o.outline[0];
@@ -3117,13 +3219,20 @@ fn object_bounds_for_focus(o: &mg_area::AreaObject) -> (Vec3, Vec3) {
             min = min.min(p);
             max = max.max(p);
         }
-        (min, max)
-    } else {
-        (o.position, o.position)
+        return (min, max);
     }
+    let Some((low, high)) = scene.and_then(|s| s.model_bounds(model, i)) else {
+        return (o.position, o.position);
+    };
+    let t = o.model_transform();
+    let corners = mg_render::box_corners(low, high).map(|p| t.transform_point3(p));
+    let min = corners.iter().copied().reduce(Vec3::min).unwrap_or(o.position);
+    let max = corners.iter().copied().reduce(Vec3::max).unwrap_or(o.position);
+    (min, max)
 }
 
-/// Frames the camera on the center of `min..=max`, pulling back if wide.
+/// Frames the camera on the center of `min..=max`, pulling back if wide,
+/// or if nearer than shows all of it.
 fn focus_bounds(orbit: &mut Orbit, min: Vec3, max: Vec3) {
     let center = (min + max) * 0.5;
     let half_extent = ((max - min) * 0.5).length();
@@ -3131,7 +3240,7 @@ fn focus_bounds(orbit: &mut Orbit, min: Vec3, max: Vec3) {
     orbit.distance = if half_extent > 8.0 {
         (half_extent * 2.4).clamp(12.0, 200.0)
     } else {
-        orbit.distance.min(25.0)
+        orbit.distance.min(25.0).max(half_extent * 2.4)
     };
 }
 
@@ -3143,10 +3252,13 @@ fn focus_selection(app: &mut Moonglow, view: &mut AreaView) -> bool {
     let (Some(model), Some(orbit)) = (&view.model, &mut view.orbit) else {
         return false;
     };
+    let scene = view.scene.as_ref();
     let mut bounds: Option<(Vec3, Vec3)> = None;
     for &(kind, index) in &view.selection {
-        let Some(o) = model.object(kind, index) else { continue };
-        let (omin, omax) = object_bounds_for_focus(o);
+        let Some(i) = model.objects.iter().position(|o| o.kind == kind && o.index == index) else {
+            continue;
+        };
+        let (omin, omax) = object_bounds_for_focus(scene, model, i);
         bounds = Some(match bounds {
             Some((bmin, bmax)) => (bmin.min(omin), bmax.max(omax)),
             None => (omin, omax),
@@ -3229,6 +3341,9 @@ impl PressTo {
             _ if writable && view.tile_mode => PressTo::Tiles,
             _ if view.pasting => PressTo::Pasting,
             _ if view.redraw.is_some() => PressTo::Redraw,
+            // (Paint on with no placeable chosen: what a click would place
+            // is not, and the press is the objects' as with Paint off.)
+            _ if !clicks_place(app) => PressTo::Objects,
             _ if app.palette.placing_start => PressTo::PlacingStart,
             _ if writable && app.palette.placing_appearance.is_some() => PressTo::Appearance,
             _ if writable && app.palette.placing_light.is_some() => PressTo::Light,
@@ -3345,26 +3460,49 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut egui::Ui, area: ResRef) {
     });
     refresh(app, &mut view, ui.ctx());
     preview_variables(app, &mut view);
-    crate::trace::changed(&format!("area {area} view"), || {
-        format!(
-            "in {:?}; error {:?}; model {}; tileset {}; ground {}; scene {}; camera {}; \
-             drawn at {:?}; game data {}; 3D viewport {}",
-            ui.max_rect(),
-            view.error,
-            view.model.as_ref().map_or("none".into(), |m| format!("{} objects", m.objects.len())),
-            match &view.tileset {
-                Some((r, Ok(_))) => format!("{r} read"),
-                Some((r, Err(e))) => format!("{r} NOT read: {e}"),
-                None => "none".into(),
-            },
+    if crate::trace::on() {
+        let r = ui.max_rect();
+        let trace_key = (
+            [r.min.x.to_bits(), r.min.y.to_bits(), r.max.x.to_bits(), r.max.y.to_bits()],
+            view.error.as_deref(),
+            view.model.as_ref().map(|m| m.objects.len()),
+            view.tileset.as_ref().map(|(name, res)| (*name, res.is_ok(), res.as_ref().err())),
             view.ground.is_some(),
             view.scene.is_some(),
             view.orbit.is_some(),
             view.targets.as_ref().map(|(t, _)| t.size),
             app.game.is_some(),
             app.viewport.is_some(),
-        )
-    });
+        );
+        crate::trace::changed_for(
+            "area_view",
+            &area,
+            &trace_key,
+            || format!("area {area} view"),
+            || {
+                format!(
+                    "in {:?}; error {:?}; model {}; tileset {}; ground {}; scene {}; camera {}; \
+                     drawn at {:?}; game data {}; 3D viewport {}",
+                    ui.max_rect(),
+                    view.error,
+                    view.model
+                        .as_ref()
+                        .map_or("none".into(), |m| format!("{} objects", m.objects.len())),
+                    match &view.tileset {
+                        Some((r, Ok(_))) => format!("{r} read"),
+                        Some((r, Err(e))) => format!("{r} NOT read: {e}"),
+                        None => "none".into(),
+                    },
+                    view.ground.is_some(),
+                    view.scene.is_some(),
+                    view.orbit.is_some(),
+                    view.targets.as_ref().map(|(t, _)| t.size),
+                    app.game.is_some(),
+                    app.viewport.is_some(),
+                )
+            },
+        );
+    }
     app.palette.area = Some(area);
     view.snap = (
         app.settings.snap_grid.map(|cm| f32::from(cm) / 100.0),
@@ -3377,8 +3515,8 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut egui::Ui, area: ResRef) {
         && a == area
         && let Some(model) = &view.model
     {
-        if let Some(o) = model.object(kind, index) {
-            let (min, max) = object_bounds_for_focus(o);
+        if let Some(i) = model.objects.iter().position(|o| o.kind == kind && o.index == index) {
+            let (min, max) = object_bounds_for_focus(view.scene.as_ref(), model, i);
             view.selection = vec![(kind, index)];
             view.start_selected = false;
             if let Some(orbit) = &mut view.orbit {
@@ -3702,19 +3840,11 @@ fn viewport(
     view.pasted_shown = pasted.len();
     // What the placeable brush has painted in the stroke going on, and the
     // dab it would lay next.
-    let painted = if view.read_only.is_none() {
+    let (painted, paint_stamp) = if view.read_only.is_none() {
         crate::paint_mode::ghosts(app, ui, view)
     } else {
-        Vec::new()
+        (std::sync::Arc::from([]), 0)
     };
-    if let (Some(scene), Some(vp), Some(game)) =
-        (view.scene.as_mut(), app.viewport.as_ref(), app.game.as_deref())
-    {
-        for o in &painted {
-            let (instances, _) = scene.ghost(&vp.gpu, game, o, view.time, GHOST_OPACITY);
-            ghost_instances.extend(instances);
-        }
-    }
     // Adjust Location's values, shown as they are changed.
     let adjusting = (app.adjust.as_ref().filter(|a| a.area == view.area))
         .zip(view.model.as_ref())
@@ -3735,8 +3865,9 @@ fn viewport(
     let high_shadows = app.settings.shadow_quality == crate::settings::ShadowQuality::High;
     let sound_ranges = sound_ranges_of(app, view);
     let game_arc = app.game.clone();
-    let (Some(model), Some(scene), Some(orbit), Some(vp), Some(game)) =
-        (&view.model, &view.scene, view.orbit, app.viewport.as_mut(), app.game.as_deref())
+    let merchant_signs = view.scene.as_ref().map(|s| s.merchant_signs);
+    let (Some(_model), Some(merchant_signs), Some(orbit), Some(vp), Some(game)) =
+        (&view.model, merchant_signs, view.orbit, app.viewport.as_mut(), app.game.as_deref())
     else {
         return;
     };
@@ -3761,8 +3892,9 @@ fn viewport(
         settings: View { time: 0.0, ..settings },
         grid: view.overlay(view.grid),
         background: app.settings.area_background,
-        merchant_signs: scene.merchant_signs,
+        merchant_signs,
         follows,
+        paint_stamp,
         shaders,
         high_shadows,
         sound_ranges: sound_ranges.clone(),
@@ -3794,8 +3926,20 @@ fn viewport(
         Some(Drag::MoveSpawn { object, point, at, .. }) => Some((object, point, Ok(at))),
         _ => None,
     };
+    let paint_instances = if !kept && !painted.is_empty() {
+        let scene = view.scene.as_mut().expect("checked above");
+        let mut out = Vec::new();
+        for o in painted.iter() {
+            let (instances, _) = scene.ghost(&vp.gpu, game, o, view.time, GHOST_OPACITY);
+            out.extend(instances);
+        }
+        out
+    } else {
+        Vec::new()
+    };
     // (A copy of the model kept from frame to frame, the objects posed
     // set back and posed again: not the whole model copied every frame.)
+    let Some(model) = &view.model else { return };
     let mut copy = view.posed.take();
     if poses.is_empty() && visuals.is_empty() && spawn.is_none() {
         copy = None;
@@ -3807,6 +3951,7 @@ fn viewport(
     vp.size_targets(&mut view.targets, w, h);
     let (targets, id) = view.targets.as_ref().expect("made above");
     if !kept {
+        let scene = view.scene.as_ref().expect("checked above");
         let mut frame = scene.scene_hiding(shown, &settings, &hidden);
         frame.environment.clock = clock;
         // Flames, sparks and portals: with the animations (they need
@@ -3826,14 +3971,19 @@ fn viewport(
         view.particles_shown = frame.particles.iter().map(|b| b.vertices.len() / 4).sum();
         frame.fog = frame.fog.map(|f| view_fog(f, orbit.distance));
         frame.instances.extend(ghost_instances);
+        frame.instances.extend(paint_instances);
         frame.instances.extend(preview_instances);
         if view.overlay(view.grid) {
             frame.lines = grid_lines(view, shown);
         }
-        let placed: Vec<(usize, Vec3)> = (shown.objects.iter())
-            .filter(|o| o.kind == ObjectKind::Sound)
-            .map(|o| (o.index, o.position))
-            .collect();
+        let placed: Vec<(usize, Vec3)> = if sound_ranges.is_empty() {
+            Vec::new()
+        } else {
+            (shown.objects.iter())
+                .filter(|o| o.kind == ObjectKind::Sound)
+                .map(|o| (o.index, o.position))
+                .collect()
+        };
         let size = (w as f32, h as f32);
         frame.line_shapes = sound_range_shapes(&placed, &sound_ranges, &orbit.camera(), size);
         view.sound_rings = (frame.line_shapes.iter())
@@ -3906,7 +4056,7 @@ fn viewport(
         Some(Drag::Start { at, facing, .. }) => Some((at, facing)),
         // About to be placed (the palette's Start Location): under the
         // pointer, facing the way the view looks.
-        _ if app.palette.placing_start => {
+        _ if app.palette.placing_start && clicks_place(app) => {
             view.pointer_over(ui).and_then(|p| view.area_point(p)).map(|at| (at, view_facing(view)))
         }
         // As Adjust Location has it, changed.
@@ -3916,7 +4066,7 @@ fn viewport(
         },
     };
     overlays(ui, view, shown, start, app.object_clip.as_ref(), door_brush, marks);
-    sound_range_overlay(app, ui, view, shown);
+    sound_range_overlay(ui, view, shown, &sound_ranges);
     view.posed = copy;
     // Where the pointer is, to the centimeter (Aurora shows whole meters).
     view.pointer = view.pointer_over(ui).and_then(|p| view.ground_at(p, 0.0));
@@ -4137,7 +4287,7 @@ fn face_on_screen(
 
 /// Whether points on screen all lie beyond one side of `rect` (a shape
 /// with those corners is wholly out of it).
-fn beside(points: &[Pos2], rect: Rect) -> bool {
+pub(crate) fn beside(points: &[Pos2], rect: Rect) -> bool {
     points.iter().all(|p| p.x < rect.min.x)
         || points.iter().all(|p| p.x > rect.max.x)
         || points.iter().all(|p| p.y < rect.min.y)
@@ -4168,14 +4318,14 @@ impl OverlayKey {
 }
 
 /// What the objects' walkmesh overlay was made for: as [`OverlayKey`],
-/// and the selection, the kinds shown and the faces Bake Walkmesh to
-/// Transform shows.
+/// and the selection, the kinds shown and the stamp of faces Bake Walkmesh
+/// to Transform shows.
 #[derive(Clone, Debug, PartialEq)]
 struct ObjectOverlayKey {
     at: OverlayKey,
     selection: Vec<(ObjectKind, usize)>,
     show: [bool; 9],
-    baked: Vec<[Vec3; 3]>,
+    baked: Option<u64>,
 }
 
 /// The ground's walkmesh over the view: walkable faces (surfacemat.2da
@@ -4245,31 +4395,35 @@ fn walkmesh_overlay(app: &Moonglow, ui: &egui::Ui, view: &mut AreaView) {
 /// as Aurora draws it; the selection's brighter. Its distances are drawn
 /// in the picture, hidden by what stands in front of them
 /// ([`sound_range_shapes`]).
-fn sound_range_overlay(app: &mut Moonglow, ui: &egui::Ui, view: &AreaView, shown: &AreaModel) {
-    if !view.overlay(view.sound_ranges) || !view.show[ObjectKind::Sound.index()] {
+fn sound_range_overlay(
+    ui: &egui::Ui,
+    view: &AreaView,
+    shown: &AreaModel,
+    sound_ranges: &[SoundRange],
+) {
+    if sound_ranges.is_empty()
+        || !view.overlay(view.sound_ranges)
+        || !view.show[ObjectKind::Sound.index()]
+    {
         return;
     }
-    let Some(ws) = app.ws.as_mut() else { return };
-    let Ok(doc) = ws.doc(&view.git()) else { return };
-    let Some(list) = doc.root.list(ObjectKind::Sound.list()) else { return };
     let painter = ui.painter_at(view.rect);
-    let chosen = view.selected_set();
-    for o in shown.objects.iter().filter(|o| o.kind == ObjectKind::Sound) {
-        let Some(sound) = list.get(o.index).map(crate::area_audio::PlacedSound::from_git) else {
-            continue;
-        };
-        if !sound.positional {
-            continue;
-        }
-        let alpha = if chosen.contains(&(o.kind, o.index)) { 255 } else { 150 };
-        if let Some(reach) = list.get(o.index).and_then(random_reach) {
-            let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(240, 150, 60, alpha));
-            let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-                .map(|(x, y)| o.position + Vec3::new(x * reach.x, y * reach.y, 0.0));
-            for k in 0..4 {
-                if let Some(line) = view.screen_segment(corners[k], corners[(k + 1) % 4]) {
-                    painter.line_segment(line, stroke);
-                }
+    for range in sound_ranges {
+        let Some(reach) = range.reach else { continue };
+        let o = view
+            .places
+            .get(&(ObjectKind::Sound, range.index))
+            .and_then(|&at| shown.objects.get(at))
+            .filter(|o| o.kind == ObjectKind::Sound && o.index == range.index)
+            .or_else(|| shown.object(ObjectKind::Sound, range.index));
+        let Some(o) = o else { continue };
+        let alpha = if range.chosen { 255 } else { 150 };
+        let stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(240, 150, 60, alpha));
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| o.position + Vec3::new(x * reach.x, y * reach.y, 0.0));
+        for k in 0..4 {
+            if let Some(line) = view.screen_segment(corners[k], corners[(k + 1) % 4]) {
+                painter.line_segment(line, stroke);
             }
         }
     }
@@ -4279,11 +4433,11 @@ fn sound_range_overlay(app: &mut Moonglow, ui: &egui::Ui, view: &AreaView, shown
 /// it is off or the sounds are hidden), read from the area's GIT, in its
 /// list's order; kept while the workspace's revision and the selection
 /// stay as they were (an area of 317 sounds was read every frame).
-fn sound_ranges_of(app: &mut Moonglow, view: &mut AreaView) -> Vec<SoundRange> {
+fn sound_ranges_of(app: &mut Moonglow, view: &mut AreaView) -> std::sync::Arc<Vec<SoundRange>> {
     if !view.overlay(view.sound_ranges) || !view.show[ObjectKind::Sound.index()] {
-        return Vec::new();
+        return std::sync::Arc::new(Vec::new());
     }
-    let Some(ws) = app.ws.as_mut() else { return Vec::new() };
+    let Some(ws) = app.ws.as_mut() else { return std::sync::Arc::new(Vec::new()) };
     let revision = ws.revision();
     if let Some(((at, selection), ranges)) = &view.sound_ranges_kept
         && *at == revision
@@ -4293,18 +4447,22 @@ fn sound_ranges_of(app: &mut Moonglow, view: &mut AreaView) -> Vec<SoundRange> {
     }
     let key = (revision, view.selection.clone());
     let chosen = view.selected_set();
-    let Ok(doc) = ws.doc(&view.git()) else { return Vec::new() };
+    let Ok(doc) = ws.doc(&view.git()) else { return std::sync::Arc::new(Vec::new()) };
     let list = doc.root.list(ObjectKind::Sound.list()).unwrap_or(&[]);
-    let ranges: Vec<SoundRange> = (list.iter().enumerate())
-        .map(|(index, s)| (index, crate::area_audio::PlacedSound::from_git(s)))
-        .filter(|(_, s)| s.positional)
-        .map(|(index, s)| SoundRange {
-            index,
-            min: s.min_distance,
-            max: s.max_distance,
-            chosen: chosen.contains(&(ObjectKind::Sound, index)),
-        })
-        .collect();
+    let ranges: std::sync::Arc<Vec<SoundRange>> = std::sync::Arc::new(
+        (list.iter().enumerate())
+            .filter_map(|(index, raw)| {
+                let s = crate::area_audio::PlacedSound::from_git(raw);
+                s.positional.then(|| SoundRange {
+                    index,
+                    min: s.min_distance,
+                    max: s.max_distance,
+                    reach: random_reach(raw),
+                    chosen: chosen.contains(&(ObjectKind::Sound, index)),
+                })
+            })
+            .collect(),
+    );
     view.sound_ranges_kept = Some((key, ranges.clone()));
     ranges
 }
@@ -4474,65 +4632,85 @@ fn object_walkmesh_overlay(app: &Moonglow, ui: &egui::Ui, view: &mut AreaView) {
     }
     let (Some(game), Some(model)) = (app.game.as_deref(), view.model.as_ref()) else { return };
     let Some(at) = OverlayKey::of(view) else { return };
-    // (Nothing to work out without Bake Walkmesh to Transform open here.)
-    let baked = crate::bake_view::after_faces(app, model, view.area);
-    if let Some((kept, mesh, edges)) = &view.object_walk_mesh
+    let baked_stamp = crate::bake_view::after_stamp(app, model, view.area);
+    if let Some((kept, fill, edges)) = &view.object_walk_mesh
         && (kept.at, kept.show) == (at, view.show)
         && kept.selection == view.selection
-        && kept.baked == baked
+        && kept.baked == baked_stamp
     {
         let painter = ui.painter_at(view.rect);
-        painter.add(egui::Shape::Mesh(mesh.clone()));
-        for (p, color) in edges {
-            outline(&painter, p, Stroke::new(1.0, *color));
-        }
+        painter.add(egui::Shape::Mesh(fill.clone()));
+        painter.extend(edges.iter().cloned());
         return;
     }
-    let key = ObjectOverlayKey { at, selection: view.selection.clone(), show: view.show, baked };
-    let baked = &key.baked;
+    let (Some(camera), Some(to_screen)) = (view.camera(), view.projector()) else { return };
+    let depth = NearDepth::of(&camera);
+    let baked = crate::bake_view::after_faces(app, model, view.area);
+    let key = ObjectOverlayKey {
+        at,
+        selection: view.selection.clone(),
+        show: view.show,
+        baked: baked_stamp,
+    };
     if view.object_faces.is_none() {
         view.object_faces = Some(view.object_walks.faces(game, model));
     }
     let Some(faces) = view.object_faces.as_ref() else { return };
     let mut mesh = egui::Mesh::default();
-    let mut edges = Vec::new();
+    let mut edge_lines: Vec<([Pos2; 2], Stroke)> = Vec::new();
     let chosen = view.selected_set();
+    let push_face = |mesh: &mut egui::Mesh,
+                     edge_lines: &mut Vec<([Pos2; 2], Stroke)>,
+                     points: &[Pos2],
+                     fill_color: Color32,
+                     edge_stroke: Stroke| {
+        fan(mesh, points, fill_color);
+        for k in 0..points.len() {
+            edge_lines.push(([points[k], points[(k + 1) % points.len()]], edge_stroke));
+        }
+    };
     for (corners, object) in faces {
         let Some(o) = model.objects.get(*object) else { continue };
         if !view.show[o.kind.index()] {
             continue;
         }
         let lifted = corners.map(|c| c + Vec3::Z * 0.05);
-        // (Cut where it passes behind the eye.)
-        let points = view.screen_polygon(&lifted, None);
-        if points.len() < 3 {
+        let (points, count) = face_on_screen(view, &depth, &to_screen, lifted);
+        let points = &points[..count];
+        if points.len() < 3 || beside(points, view.rect) {
             continue;
         }
         let (r, g, b) = if o.kind == ObjectKind::Door { (70, 140, 255) } else { (255, 150, 40) };
         let alpha = if chosen.contains(&(o.kind, o.index)) { 150 } else { 80 };
-        fan(&mut mesh, &points, egui::Color32::from_rgba_unmultiplied(r, g, b, alpha));
-        edges.push((points, egui::Color32::from_rgba_unmultiplied(r, g, b, 200)));
+        push_face(
+            &mut mesh,
+            &mut edge_lines,
+            points,
+            egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+            Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 200)),
+        );
     }
     let green = crate::bake_view::after_color();
+    let [gr, gg, gb, _] = green.to_array();
+    let baked_fill = egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 140);
+    let baked_stroke = Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(gr, gg, gb, 230));
     for corners in baked {
         // (A little above the walkmesh as it is, to be seen over it.)
         let lifted = corners.map(|c| c + Vec3::Z * 0.08);
-        let points = view.screen_polygon(&lifted, None);
-        if points.len() < 3 {
+        let (points, count) = face_on_screen(view, &depth, &to_screen, lifted);
+        let points = &points[..count];
+        if points.len() < 3 || beside(points, view.rect) {
             continue;
         }
-        let [r, g, b, _] = green.to_array();
-        fan(&mut mesh, &points, egui::Color32::from_rgba_unmultiplied(r, g, b, 140));
-        edges.push((points, egui::Color32::from_rgba_unmultiplied(r, g, b, 230)));
+        push_face(&mut mesh, &mut edge_lines, points, baked_fill, baked_stroke);
     }
+    let fill = std::sync::Arc::new(mesh);
+    let edges = outlines(&edge_lines);
     let painter = ui.painter_at(view.rect);
-    let mesh = std::sync::Arc::new(mesh);
-    painter.add(egui::Shape::Mesh(mesh.clone()));
-    for (p, color) in &edges {
-        outline(&painter, p, Stroke::new(1.0, *color));
-    }
+    painter.add(egui::Shape::Mesh(fill.clone()));
+    painter.extend(edges.iter().cloned());
     view.overlay_builds[1] += 1;
-    view.object_walk_mesh = Some((key, mesh, edges));
+    view.object_walk_mesh = Some((key, fill, edges));
 }
 
 /// The area header's controls to show, ticked (its right-click menu, one
@@ -4876,13 +5054,18 @@ fn overlays(
             // Selected, how far it reaches: where the game's light ends
             // (20 m, further for a color brighter than 1), level with it.
             if selected {
-                let ring: Vec<Pos2> = (0..96)
-                    .filter_map(|k| {
-                        let a = k as f32 / 96.0 * std::f32::consts::TAU;
-                        at(o.position + Vec3::new(a.cos(), a.sin(), 0.0) * light.reach)
-                    })
-                    .collect();
-                if ring.len() == 96 {
+                let mut ring = [Pos2::ZERO; 96];
+                let mut count = 0;
+                for k in 0..96 {
+                    let a = k as f32 / 96.0 * std::f32::consts::TAU;
+                    let Some(p) = at(o.position + Vec3::new(a.cos(), a.sin(), 0.0) * light.reach)
+                    else {
+                        break;
+                    };
+                    ring[count] = p;
+                    count += 1;
+                }
+                if count == 96 {
                     let faint = Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], 150);
                     outline(&painter, &ring, Stroke::new(1.5, faint));
                 }
@@ -4957,10 +5140,13 @@ fn overlays(
         }
     }
     if door_brush {
-        // The door hooks: a short line across the doorway, the nearest to
-        // the pointer bright.
-        let pointer = hover.and_then(|p| view.ground_at(p, 0.0));
-        let near = pointer.and_then(|p| shown.hook_near(p, DOOR_REACH)).copied();
+        // The door hooks: a short line across the doorway, the one the door
+        // would go on bright (none with Alt, which places it freely).
+        let off = hooks_off(ui.ctx());
+        let near = match hover.and_then(|p| door_at(view, p, off)) {
+            Some(DoorAt::Hook(h)) => Some(h),
+            _ => None,
+        };
         for h in &shown.hooks {
             let lit = near.is_some_and(|n| n.position == h.position && n.bearing == h.bearing);
             let color =
@@ -4986,7 +5172,13 @@ fn overlays(
     }
     if let Some(Drag::Box { from, to, .. }) = view.drag {
         let r = Rect::from_two_pos(from, to);
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::YELLOW), egui::StrokeKind::Inside);
+        painter.rect(
+            r,
+            0.0,
+            t.accent_fill.gamma_multiply(0.14),
+            Stroke::new(1.5, t.accent),
+            egui::StrokeKind::Inside,
+        );
     }
     if !view.outline.is_empty() {
         let stroke = Stroke::new(2.0, Color32::from_rgb(120, 230, 255));
@@ -5088,6 +5280,7 @@ fn overlays(
 fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui::Response) {
     let (shift, command, alt) =
         ui.input(|i| (i.modifiers.shift, i.modifiers.command, i.modifiers.alt));
+    view.hooks_off = hooks_off(ui.ctx());
     // Alt with an outline's first corner set: a rectangle from there on,
     // until the outline is done or dropped; while it is held, and after
     // it was let go (or taken away with the click, see `rectangle`).
@@ -5115,7 +5308,11 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
         || view.held.on;
     // (And said to the windows over the view: Escape with the pointer here
     // drops what is in hand and leaves the Properties window in front open.)
-    if in_hand || view.redraw.is_some() || crate::terrain_mode::active(app, view).is_some() {
+    if in_hand
+        || view.tile_mode
+        || view.redraw.is_some()
+        || crate::terrain_mode::active(app, view).is_some()
+    {
         app.area_tool_at = ui.ctx().cumulative_pass_nr();
     }
     view.held = Held::read(ui, response, view.held);
@@ -5128,10 +5325,11 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
     let middle_moves = app.settings.middle_drag_moves;
     // Alt + drag moves the view unless it raises the selection: with
     // nothing selected, on a read-only area, and in every mode that is
-    // not the objects' (Paint, Select Tiles, a tile brush in hand).
+    // not the objects' (Paint with placeables to paint, Select Tiles, a
+    // tile brush in hand). Paint with none is Select Objects here.
     let alt_pans = view.selection.is_empty()
         || view.read_only.is_some()
-        || app.paint
+        || crate::paint_mode::active(app).is_some()
         || view.tile_mode
         || crate::terrain_mode::active(app, view).is_some();
     let camera = (middle_moves, alt_pans);
@@ -5186,8 +5384,10 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
     }
     let read_only = read_only.is_some();
     // Q and E turn a blueprint about to be placed (dragged, or chosen in
-    // the palette), as they turn a selection; doors face as their hooks do.
-    let placing = view.ghost_shown.as_ref().filter(|o| o.kind != ObjectKind::Door).is_some()
+    // the palette), as they turn a selection; a door on a hook faces as
+    // the hook does.
+    let on_hook = matches!(view.ghost_door, Some(DoorAt::Hook(_)));
+    let placing = view.ghost_shown.as_ref().filter(|_| !on_hook).is_some()
         || crate::paint_mode::active(app).is_some()
         || view.pasting;
     if placing && !ui.ctx().memory(|m| m.focused().is_some()) {
@@ -5372,6 +5572,24 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
         return;
     }
 
+    // Paint on with something chosen that it doesn't paint (a door, a
+    // waypoint, a gallery's appearance or light, the start location): the
+    // click that would place it places nothing, and is no other click
+    // either, as with Paint off it would be no selecting click. Only a
+    // click that would go to placing: a paste's, an outline's drawn anew,
+    // Select Tiles' and a tile paste's are theirs (dispatched above). The
+    // rest (dragging, Delete, copy and paste, the camera) is as with Paint
+    // off. (Not on a read-only area, where Paint's Escape isn't read and
+    // a click selects as ever.)
+    if !read_only
+        && press == PressTo::Objects
+        && !clicks_place(app)
+        && to_place(app)
+        && (response.clicked() || response.double_clicked() || response.triple_clicked())
+    {
+        return;
+    }
+
     // Placing the start location (the palette's Start Location): where a
     // click puts it, facing the way the view looks, as the menu's Set
     // Start Location Here.
@@ -5472,15 +5690,13 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
                     }
                 }
             } else if kind == ObjectKind::Door {
-                // Doors stand on door hooks (Aurora places none elsewhere).
-                match view.model.as_ref().and_then(|m| m.hook_near(at, DOOR_REACH)).copied() {
-                    Some(h) => {
-                        place(app, view, key, h.position, h.bearing, &[]);
-                        if !shift {
-                            app.palette.selected = None;
-                        }
+                // On the door hook in reach (Aurora places doors nowhere
+                // else); away from one, or with Alt, where clicked.
+                if let Some(door) = door_at(view, pos, alt) {
+                    place_door(app, view, key, door);
+                    if !shift {
+                        app.palette.selected = None;
                     }
-                    None => app.log.warn("Doors go on door hooks: click near one"),
                 }
             } else if let Some(at) = view.placed_at(pos) {
                 place(app, view, key, at, view.ghost_turn, &[]);
@@ -5509,12 +5725,9 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
         view.start_selected = true;
     } else if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
-        && !(view.spawn_arrow_at(pos).is_some()
-            || view.spawn_foot_at(pos).is_some()
-            || view.ring_at(pos).is_some_and(|_| !shift)
-            || (shift && view.tilt_ring_at(pos).is_some())
-            || (shift && view.axis_arrow_at(pos).is_some())
-            || (shift && view.scale_handle_at(pos).is_some()))
+        && view
+            .handle_under(pos, ui.input(|i| i.modifiers), !app.settings.no_spawn_markers, None)
+            .is_none()
     {
         let hits: Vec<(ObjectKind, usize)> = view
             .pick_all(pos)
@@ -5632,7 +5845,9 @@ fn input(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView, response: &egui
     {
         // A double click on the ground: over to the tiles, that one
         // selected (a click on an object there comes back to objects), so
-        // going between the two needs no trip to the header.
+        // going between the two needs no trip to the header. (Paint, on
+        // with no placeable chosen, goes off: one tool at a time.)
+        app.paint = false;
         view.tile_mode = true;
         view.selection.clear();
         view.start_selected = false;
@@ -6203,7 +6418,8 @@ fn boxed(view: &AreaView, rect: Rect) -> Vec<(ObjectKind, usize)> {
 }
 
 /// A blueprint dragged from the palette and dropped on the view: placed
-/// where it was dropped (a door on the nearest door hook); a trigger or
+/// where it was dropped (a door on the door hook in reach, unless Alt
+/// keeps it free: [`door_at`]); a trigger or
 /// encounter begins its outline there, to be drawn on with clicks.
 fn drop_blueprint(app: &mut Moonglow, view: &mut AreaView, response: &egui::Response, key: ResKey) {
     let Some(kind) = ObjectKind::from_restype(key.restype) else { return };
@@ -6216,9 +6432,9 @@ fn drop_blueprint(app: &mut Moonglow, view: &mut AreaView, response: &egui::Resp
         app.log.info("Click the outline's corners; double-click to close it");
         return;
     } else if kind == ObjectKind::Door {
-        match view.model.as_ref().and_then(|m| m.hook_near(at, DOOR_REACH)).copied() {
-            Some(h) => place(app, view, key, h.position, h.bearing, &[]),
-            None => app.log.warn("Doors go on door hooks: drop it near one"),
+        let off = hooks_off(&response.ctx);
+        if let Some(door) = pointer.and_then(|pos| door_at(view, pos, off)) {
+            place_door(app, view, key, door);
         }
     } else if let Some(at) = pointer.and_then(|pos| view.placed_at(pos)) {
         place(app, view, key, at, view.ghost_turn, &[]);
@@ -6297,7 +6513,27 @@ const RECENT: usize = 12;
 
 /// The palette's chosen blueprint, if it is one to place.
 fn brush(app: &Moonglow) -> Option<ResKey> {
-    app.palette.selected.filter(|k| ObjectKind::from_restype(k.restype).is_some())
+    let key = app.palette.selected.filter(|k| ObjectKind::from_restype(k.restype).is_some());
+    key.filter(|_| clicks_place(app))
+}
+
+/// Whether a click on the view may place what is in hand to place (the
+/// palette's blueprint, a gallery's appearance or light, the start
+/// location): not with Paint on, which places only its own placeables
+/// (none at all where none is chosen, a door or a waypoint not among
+/// them). The ghost follows it: none where a click would place nothing.
+fn clicks_place(app: &Moonglow) -> bool {
+    !app.paint
+}
+
+/// Whether something is in hand for a click to place ([`clicks_place`]
+/// or not).
+fn to_place(app: &Moonglow) -> bool {
+    let p = &app.palette;
+    p.selected.is_some_and(|k| ObjectKind::from_restype(k.restype).is_some())
+        || p.placing_appearance.is_some()
+        || p.placing_light.is_some()
+        || p.placing_start
 }
 
 /// Places blueprint `key` at `at` (a trigger or encounter along `outline`,
@@ -6314,8 +6550,8 @@ fn place(
 ) {
     use mg_module::instances::{OUTLINE_LIFT, Placement};
     let Some(kind) = ObjectKind::from_restype(key.restype) else { return };
-    // (`at` is on the grid already, or onto an object: `put_down_at`.
-    // Doors go on their hooks; outlines are drawn point by point.)
+    // (`at` is on the grid already, or onto an object: `put_down_at`;
+    // a door on its hook, `door_at`. Outlines are drawn point by point.)
     let ground = |p: Vec3| view.ground.as_ref().and_then(|g| g.height(p.truncate(), p.z));
     let position = at + Vec3::Z * lift(kind);
     let mut relative: Vec<[f32; 3]> = outline
@@ -6343,6 +6579,15 @@ fn place(
     recent.retain(|x| *x != r);
     recent.insert(0, r);
     recent.truncate(RECENT);
+}
+
+/// Places door blueprint `key` where [`door_at`] said: on its hook,
+/// facing as the hook does, or freely, turned as its ghost was.
+fn place_door(app: &mut Moonglow, view: &mut AreaView, key: ResKey, door: DoorAt) {
+    match door {
+        DoorAt::Hook(h) => place(app, view, key, h.position, h.bearing, &[]),
+        DoorAt::Free { at, .. } => place(app, view, key, at, view.ghost_turn, &[]),
+    }
 }
 
 /// The turn keys and how far each turns (radians, anticlockwise): Q and E
@@ -6479,9 +6724,13 @@ pub(crate) fn template(app: &mut Moonglow, key: ResKey) -> Option<mg_area::AreaO
 /// The blueprint about to be placed, where it would go if the pointer
 /// placed it now: one dragged (from the palette or the module tree) over
 /// the view, else the palette's choice while the pointer is over it.
-/// Snapped to the grid, a door on the nearest hook; not for triggers and
-/// encounters (drawn point by point).
+/// Snapped to the grid, a door on the hook in reach (else free, as
+/// [`door_at`] has it); not for triggers and encounters (drawn point by
+/// point).
 fn ghost(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView) -> Option<mg_area::AreaObject> {
+    // (Said anew each frame: with the pointer off the view, no door goes
+    // anywhere.)
+    view.ghost_door = None;
     // (Nothing is placed in a read-only area.)
     if view.read_only.is_some() {
         return None;
@@ -6491,24 +6740,31 @@ fn ghost(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView) -> Option<mg_ar
     // would place (kept under a name of its own, no blueprint's).
     type Appearance = crate::appearance_gallery::DraggedAppearance;
     // (Or taken by a click to place, the gallery's.)
-    let appearance = egui::DragAndDrop::payload::<Appearance>(ui.ctx())
-        .or_else(|| app.palette.placing_appearance.clone().map(std::sync::Arc::new));
+    let appearance = egui::DragAndDrop::payload::<Appearance>(ui.ctx()).or_else(|| {
+        let taken = app.palette.placing_appearance.clone().filter(|_| clicks_place(app));
+        taken.map(std::sync::Arc::new)
+    });
     let unnamed = appearance
         .as_ref()
         .and_then(|a| ResKey::parse(&format!("plc_app_{}", a.row), ResType::UTP));
-    // (The palette's placeables are painted, with Paint on: the brush shows
-    // its own.)
-    let painting = crate::paint_mode::active(app).is_some();
-    let key = unnamed.or(dragged.map(|d| d.0)).or_else(|| brush(app).filter(|_| !painting));
+    // (With Paint on, the palette's choice is not placed by a click
+    // ([`brush`]): the brush shows its own placeables, and nothing else.)
+    let key = unnamed.or(dragged.map(|d| d.0)).or_else(|| brush(app));
     let Some(key) = key.filter(|_| !view.pasting && view.outline.is_empty()) else {
         view.ghost = None;
         return None;
     };
     let kind = ObjectKind::from_restype(key.restype).filter(|k| !k.has_outline())?;
     let pos = view.pointer_over(ui)?;
+    // A door on the hook in reach, facing as it does; else (or with Alt)
+    // freely, as the others go.
     let (at, rotation) = if kind == ObjectKind::Door {
-        let hook = view.model.as_ref()?.hook_near(view.ground_at(pos, 0.0)?, DOOR_REACH)?;
-        (hook.position, Some(hook.bearing))
+        let door = door_at(view, pos, hooks_off(ui.ctx()))?;
+        view.ghost_door = Some(door);
+        match door {
+            DoorAt::Hook(h) => (h.position, Some(h.bearing)),
+            DoorAt::Free { at, .. } => (at, None),
+        }
     } else {
         (view.placed_at(pos)?, None)
     };
@@ -6536,7 +6792,8 @@ fn ghost(app: &mut Moonglow, ui: &egui::Ui, view: &mut AreaView) -> Option<mg_ar
     }
     let mut o = view.ghost.as_ref()?.2.clone()?;
     o.position = at + Vec3::Z * lift(kind);
-    // A door faces as its hook does; the others as Q and E turned them.
+    // A door on a hook faces as the hook does; the others (a free door
+    // too) as Q and E turned them.
     o.rotation = rotation.unwrap_or(o.rotation + view.ghost_turn);
     Some(o)
 }
@@ -7153,7 +7410,7 @@ fn pose_kept(
 /// Many lines as one mesh, a quad a line (its edges not smoothed): the
 /// boxes of a selection of hundreds, which as shapes of their own egui
 /// lays out one by one, twelve an object.
-fn lines_mesh(lines: &[([Pos2; 2], Stroke)]) -> egui::Mesh {
+pub(crate) fn lines_mesh(lines: &[([Pos2; 2], Stroke)]) -> egui::Mesh {
     let mut mesh = egui::Mesh::default();
     mesh.reserve_vertices(lines.len() * 4);
     mesh.reserve_triangles(lines.len() * 2);
@@ -7175,8 +7432,19 @@ fn lines_mesh(lines: &[([Pos2; 2], Stroke)]) -> egui::Mesh {
 }
 
 /// From how many lines on the boxes of the objects selected or marked
-/// are drawn as one mesh ([`lines_mesh`]): some eighty boxes.
-const BOXES_MESHED: usize = 1000;
+/// are drawn as one mesh ([`lines_mesh`]): some eighty boxes. (Below it
+/// they are egui's own, smoothed; as are the outlines of [`outlines`].)
+pub(crate) const BOXES_MESHED: usize = 1000;
+
+/// Outlines' lines as shapes to paint: egui's own line segments, their
+/// edges smoothed, and past [`BOXES_MESHED`] of them one mesh (laid out
+/// one by one, thousands took longer than the frame has).
+pub(crate) fn outlines(lines: &[([Pos2; 2], Stroke)]) -> std::sync::Arc<[egui::Shape]> {
+    if lines.len() > BOXES_MESHED {
+        return std::sync::Arc::from([egui::Shape::mesh(lines_mesh(lines))]);
+    }
+    lines.iter().map(|&(points, stroke)| egui::Shape::LineSegment { points, stroke }).collect()
+}
 
 /// Makes Q and E's turning under way one command, and turns the view's
 /// model with it at once: what is done after it before the area is read
@@ -7566,12 +7834,15 @@ fn editing_items(
     ui.add_enabled_ui(any, |ui| {
         mg_uikit::menu_button(ui, "Position", |ui| {
             mg_uikit::menu_rows(ui);
-            if ui.add_enabled(any, egui::Button::new("Drop to Ground (G)")).clicked() {
+            let drop = app.keymap.titled("Drop to Ground", crate::keys::Cmd::DropToGround, ui.ctx());
+            if ui.add_enabled(any, egui::Button::new(drop)).clicked() {
                 drop_to_ground(app, view);
                 ui.close();
             }
+            let drop_onto =
+                app.keymap.titled("Drop onto Object", crate::keys::Cmd::DropOntoObject, ui.ctx());
             if ui
-                .add_enabled(any, egui::Button::new("Drop onto Object (Shift+G)"))
+                .add_enabled(any, egui::Button::new(drop_onto))
                 .on_hover_text(
                     "Set each selected object on the placeable or door below it, else on the ground",
                 )
@@ -8035,7 +8306,7 @@ fn editing_items(
     }
     // The plugins' commands for what is selected (with nothing selected,
     // for the area), run on it.
-    let commands = app.plugin_menu_commands();
+    let commands = app.plugin_menu_commands_cached();
     if !commands.is_empty() {
         use mg_plugin::{Selected, Target};
         let area = view.area;
@@ -9022,6 +9293,20 @@ mod tests {
         assert!(kept == base && last.is_empty(), "nothing posed at the end");
     }
 
+    /// Outlines are egui's smoothed line segments up to `BOXES_MESHED`
+    /// lines, and one mesh past it (the review's C-13: a walkmesh's few
+    /// edges and a small tile selection were drawn as a mesh, unsmoothed,
+    /// stair-stepped where they slant).
+    #[test]
+    fn outlines_are_smoothed_until_there_are_many() {
+        let line = ([Pos2::new(0.0, 0.0), Pos2::new(10.0, 3.0)], Stroke::NONE);
+        let few = outlines(&vec![line; BOXES_MESHED]);
+        assert_eq!(few.len(), BOXES_MESHED);
+        assert!(few.iter().all(|s| matches!(s, egui::Shape::LineSegment { .. })));
+        let many = outlines(&vec![line; BOXES_MESHED + 1]);
+        assert!(matches!(&many[..], [egui::Shape::Mesh(_)]), "one mesh");
+    }
+
     /// Lines as one mesh: a quad a line, as wide as its stroke, in its
     /// color; a line of no length left out.
     #[test]
@@ -9161,8 +9446,8 @@ mod tests {
     fn sound_ranges_copies_are_its_spheres() {
         let placed = [(0, Vec3::new(20.0, 20.0, 1.0)), (1, Vec3::new(30.0, 25.0, 0.0))];
         let ranges = [
-            SoundRange { index: 0, min: 3.0, max: 12.0, chosen: false },
-            SoundRange { index: 1, min: 5.0, max: 20.0, chosen: true },
+            SoundRange { index: 0, min: 3.0, max: 12.0, reach: None, chosen: false },
+            SoundRange { index: 1, min: 5.0, max: 20.0, reach: None, chosen: true },
         ];
         let camera = mg_render::Camera::orbit(Vec3::new(25.0, 20.0, 0.0), 60.0, 0.3, 0.8);
         let shapes = sound_range_shapes(&placed, &ranges, &camera, (1000.0, 1000.0));
@@ -9216,7 +9501,7 @@ mod tests {
     #[test]
     fn sound_ranges_draw_fewer_dots_far_off() {
         let placed = [(0, Vec3::new(20.0, 20.0, 0.0))];
-        let ranges = [SoundRange { index: 0, min: 3.0, max: 12.0, chosen: false }];
+        let ranges = [SoundRange { index: 0, min: 3.0, max: 12.0, reach: None, chosen: false }];
         let lines = |distance: f32| {
             let camera = mg_render::Camera::orbit(Vec3::new(20.0, 20.0, 0.0), distance, 0.0, 0.8);
             let shapes = sound_range_shapes(&placed, &ranges, &camera, (1000.0, 1000.0));

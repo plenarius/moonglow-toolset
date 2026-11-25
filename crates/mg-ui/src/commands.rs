@@ -29,6 +29,9 @@ pub enum Id {
     /// File › Import Folder…: a folder's files' resources.
     ImportFolder,
     Export,
+    /// File › Export Changed Resources…: the Export window with the
+    /// resources changed since the module was opened ticked.
+    ExportChanged,
     ImportConversation,
     Close,
     Exit,
@@ -145,6 +148,12 @@ pub enum Id {
     ClearLog,
     HidePanels,
     ResetLayout,
+    /// View › Interface Size: the whole interface a size larger or
+    /// smaller ([`crate::options::UI_SCALES`]), or at 100% again
+    /// (Options › General › Interface size; Ctrl with +, - and 0).
+    ZoomIn,
+    ZoomOut,
+    ResetZoom,
 }
 
 /// What a menu holds, in order.
@@ -171,6 +180,9 @@ pub enum Item {
     PluginPanels,
     /// The commands the project names (moonglow.toml's `[commands]`).
     Project,
+    /// The interface sizes ([`crate::options::UI_SCALES`]), the one in
+    /// use ticked (View › Interface Size).
+    UiScales,
 }
 
 use Item::{Do, Separator, Sub};
@@ -193,6 +205,7 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::ImportFiles),
             Do(Id::ImportFolder),
             Item::WithPlugins(Id::Export, crate::plugin_kinds::Added::Exporter),
+            Do(Id::ExportChanged),
             Do(Id::ImportConversation),
             Separator,
             Do(Id::Close),
@@ -240,6 +253,12 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::GoToStart),
             Separator,
             Do(Id::SplitEditor),
+            Separator,
+            // (Before the layout's two, which stay the menu's last rows.)
+            Sub(
+                "Interface Size",
+                &[Do(Id::ZoomIn), Do(Id::ZoomOut), Do(Id::ResetZoom), Separator, Item::UiScales],
+            ),
             Separator,
             Do(Id::HidePanels),
             Do(Id::ResetLayout),
@@ -364,38 +383,47 @@ impl Id {
         if kind == BlueprintKind::Creature { Id::CreatureWizard } else { Id::Wizard(kind) }
     }
 
-    /// Every command, in the menus' order, then those no menu has.
-    pub fn all() -> Vec<Id> {
-        fn walk(items: &[Item], out: &mut Vec<Id>) {
-            for item in items {
-                match item {
-                    Do(id) | Item::WithPlugins(id, _) => out.push(*id),
-                    Sub(_, items) => walk(items, out),
-                    Item::Wizards => {
-                        out.extend(crate::blueprint_wizard::KINDS.into_iter().map(Id::Wizard));
+    /// Every command, in the menus' order, then those no menu has (cached).
+    pub(crate) fn all_slice() -> &'static [Id] {
+        static ALL: std::sync::OnceLock<Vec<Id>> = std::sync::OnceLock::new();
+        ALL.get_or_init(|| {
+            fn walk(items: &[Item], out: &mut Vec<Id>) {
+                for item in items {
+                    match item {
+                        Do(id) | Item::WithPlugins(id, _) => out.push(*id),
+                        Sub(_, items) => walk(items, out),
+                        Item::Wizards => {
+                            out.extend(crate::blueprint_wizard::KINDS.into_iter().map(Id::Wizard));
+                        }
+                        Separator
+                        | Item::Recent
+                        | Item::Prefabs
+                        | Item::PluginCommands
+                        | Item::PluginWizards
+                        | Item::PluginPanels
+                        | Item::Project
+                        | Item::UiScales => {}
                     }
-                    Separator
-                    | Item::Recent
-                    | Item::Prefabs
-                    | Item::PluginCommands
-                    | Item::PluginWizards
-                    | Item::PluginPanels
-                    | Item::Project => {}
                 }
             }
-        }
-        let mut out = Vec::new();
-        for (_, items) in MENUS {
-            walk(items, &mut out);
-        }
-        out.push(Id::FullScreen);
-        out.push(Id::QuickOpen);
-        // (The compass's button's: no menu has it.)
-        out.push(Id::ReorientCamera);
-        out.extend([Id::CloseTab, Id::NextTab, Id::PreviousTab, Id::ReopenTab]);
-        out.push(Id::MaximizeWindow);
-        out.extend([Id::NextPane, Id::PreviousPane]);
-        out
+            let mut out = Vec::new();
+            for (_, items) in MENUS {
+                walk(items, &mut out);
+            }
+            out.push(Id::FullScreen);
+            out.push(Id::QuickOpen);
+            // (The compass's button's: no menu has it.)
+            out.push(Id::ReorientCamera);
+            out.extend([Id::CloseTab, Id::NextTab, Id::PreviousTab, Id::ReopenTab]);
+            out.push(Id::MaximizeWindow);
+            out.extend([Id::NextPane, Id::PreviousPane]);
+            out
+        })
+    }
+
+    /// Every command, in the menus' order, then those no menu has.
+    pub fn all() -> Vec<Id> {
+        Self::all_slice().to_vec()
     }
 
     /// The id its keys are kept under in the settings (never to change),
@@ -429,6 +457,11 @@ impl Id {
                 ("import-folder", "Import Folder…", "Every file in a folder and its subfolders")
             }
             Id::Export => ("export", "Export…", ""),
+            Id::ExportChanged => (
+                "export-changed",
+                "Export Changed Resources…",
+                "Export what changed since the module was opened, saved or not",
+            ),
             Id::ImportConversation => (
                 "import-conversation",
                 "Import Conversation…",
@@ -516,7 +549,7 @@ impl Id {
             }
             Id::PlaceableGallery => (
                 "placeable-gallery",
-                "Appearance Gallery…",
+                "Appearance Gallery",
                 "Every placeable, creature and door appearance as a picture, to give to the \
                  selection",
             ),
@@ -588,7 +621,7 @@ impl Id {
             Id::AreaStatistics => ("area-statistics", "Area Statistics", ""),
             Id::Plugins => (
                 "plugins",
-                "Manage Plugins…",
+                "Manage Plugins",
                 "The plugins installed: enable them, and try the plugin console",
             ),
             Id::InstallPlugin => (
@@ -666,6 +699,11 @@ impl Id {
                 "Reset Layout",
                 "Put the tree, the palettes and the log back where they started",
             ),
+            Id::ZoomIn => ("zoom-in", "Zoom In", "Make the whole interface one size larger"),
+            Id::ZoomOut => ("zoom-out", "Zoom Out", "Make the whole interface one size smaller"),
+            Id::ResetZoom => {
+                ("reset-zoom", "Reset Zoom", "Bring the whole interface back to its usual size")
+            }
         };
         (id.into(), label.into(), hint)
     }
@@ -786,6 +824,12 @@ impl Id {
                 open || crate::shell::left_holds(app) || crate::shell::right_shown(app).is_some()
             }
             Id::ViewLog | Id::ResetLayout => true,
+            Id::ZoomIn => {
+                let up = ui_scale_step(ui_scale(app), true);
+                up != ui_scale(app) && up <= app.largest_ui_scale
+            }
+            Id::ZoomOut => ui_scale_step(ui_scale(app), false) != ui_scale(app),
+            Id::ResetZoom => ui_scale(app) != 100,
             Id::CopyLog | Id::SaveLog | Id::ClearLog => !app.log.entries.is_empty(),
             Id::CloseReport => crate::dock_reports::in_front(app).is_some(),
             // (Whenever the Left Dock holds a panel: its Resources panel
@@ -802,10 +846,9 @@ impl Id {
             Id::SplitEditor => app.can_split(),
             Id::ReopenTab => !app.closed_tabs.is_empty(),
             Id::InstallPlugin => app.plugin_dir.is_some(),
-            // (A script's, with the keys in its editor: as its Ctrl+Z,
-            // which does nothing with nothing to undo. Whether its history
-            // has a step is not known without a copy of it all.)
-            Id::Undo | Id::Redo if app.undo_script.is_some() => true,
+            Id::Undo | Id::Redo if let Some(key) = app.undo_script => {
+                app.scripts.get(&key).is_some_and(|b| b.undo.can_step(matches!(self, Id::Redo)))
+            }
             // (A side editor's own or the talk table's, with the pointer
             // over it or the keys in its grid.)
             Id::Undo => app
@@ -828,6 +871,9 @@ impl Id {
             // other modules too.)
             Id::BuilderCode => crate::builder_code::root(app).is_some(),
             Id::ClaimsTable => crate::claims::kept(app),
+            Id::ExportChanged => app.ws.as_ref().is_some_and(|ws| {
+                ws.changed_since_opened().changed.iter().any(crate::transfer::exported_changed)
+            }),
             Id::TakeInLeftOut => (app.ws.as_ref())
                 .and_then(|ws| ws.module.project.as_ref())
                 .is_some_and(|p| !p.left_out.is_empty()),
@@ -869,7 +915,7 @@ impl Id {
 
     /// Why it cannot be chosen now, in a few words (a grayed row's tip in
     /// Quick Open); empty where it can.
-    pub(crate) fn why_disabled(self, app: &Moonglow) -> &'static str {
+    pub fn why_disabled(self, app: &Moonglow) -> &'static str {
         if self.enabled(app) {
             return "";
         }
@@ -891,16 +937,27 @@ impl Id {
             Id::IndentToTabs | Id::IndentToSpaces => {
                 "It acts on the script in front, or the one typed in last, and none is open"
             }
-            Id::CloseTab | Id::MaximizeWindow => "No tab is open",
+            Id::CloseTab => "No tab is open",
+            Id::MaximizeWindow => "No floating editor window is open",
             Id::SplitEditor => "The editor group in front has one tab",
             Id::ReopenTab => "No tab was closed",
             Id::InstallPlugin => "Moonglow has no plugin folder",
             Id::BuilderCode => "Open a module in a folder or a nasher project first",
             Id::ClaimsTable => "The project keeps no claims table",
             Id::TakeInLeftOut => "nasher.cfg leaves no files out",
+            Id::ExportChanged if open && !app.unsaved_module_editors().is_empty() => {
+                "Nothing changed in the module yet: save the editors with unsaved changes first"
+            }
+            Id::ExportChanged if open => "No resource has changed since the module was opened",
             Id::ViewTree | Id::ViewPalettes => "The dock holds no panel now",
             Id::ViewProperties if open => "Switch to an area first",
             Id::NextPane | Id::PreviousPane => "No pane is open",
+            Id::ZoomIn if ui_scale(app) >= app.largest_ui_scale => {
+                "The screen has no room for a larger size"
+            }
+            Id::ZoomIn => "The interface is at its largest size",
+            Id::ZoomOut => "The interface is at its smallest size",
+            Id::ResetZoom => "The interface is at its usual size",
             _ if !open => "Open a module first",
             _ => "It cannot be used now",
         }
@@ -919,6 +976,7 @@ impl Id {
             Id::ImportFiles => Action::ImportFilesDialog,
             Id::ImportFolder => Action::ImportFolderDialog,
             Id::Export => Action::ExportDialog(Vec::new()),
+            Id::ExportChanged => Action::ExportChangedDialog,
             Id::Close => Action::Close,
             Id::Exit => Action::Quit,
             // (With the keys in a script's editor, or a menu opened from
@@ -1008,6 +1066,7 @@ impl Id {
             }
             // (Their names start with the builder's code.)
             Id::NewConversation => {
+                app.new_dialog_for = None;
                 app.new_dialog = Some(crate::widgets::code_start(app, mg_core::ResType::DLG));
                 return;
             }
@@ -1110,6 +1169,10 @@ impl Id {
                 return;
             }
             Id::ResetLayout => return app.reset_layout(ctx),
+            Id::ZoomIn | Id::ZoomOut => {
+                return set_ui_scale(app, ui_scale_step(ui_scale(app), self == Id::ZoomIn));
+            }
+            Id::ResetZoom => return set_ui_scale(app, 100),
             Id::CopyLog => return app.copy_log(ctx),
             Id::CloseReport => {
                 if let Some(p) = crate::dock_reports::in_front(app) {
@@ -1124,6 +1187,80 @@ impl Id {
     }
 }
 
+/// The interface size in use, per cent (Options › General › Interface
+/// size; 100 where none was chosen).
+/// The interface size in use: the setting's, within the sizes offered (a
+/// settings file's 0 or 60000 would break the window) and no larger than
+/// the screen holds ([`largest_fitting_ui_scale`]).
+pub(crate) fn ui_scale(app: &Moonglow) -> u16 {
+    let sizes = crate::options::UI_SCALES;
+    let scale = app.settings.ui_scale.unwrap_or(100);
+    scale.clamp(sizes[0], sizes[sizes.len() - 1]).min(app.largest_ui_scale.max(sizes[0]))
+}
+
+/// Where the context keeps [`Moonglow::largest_ui_scale`] (for Options'
+/// Interface size row).
+pub(crate) fn largest_ui_scale_id() -> egui::Id {
+    egui::Id::new("largest-ui-scale")
+}
+
+/// Why an interface size is not offered (View › Interface Size, Options).
+pub(crate) const NO_ROOM_FOR_SIZE: &str = "The screen has no room for this size";
+
+/// The interface size for a zoom egui kept from a run before (egui's own
+/// Ctrl with + and - changed it without the setting): the nearest size
+/// offered, `None` for the usual size.
+pub(crate) fn ui_scale_kept_from_zoom(zoom: f32) -> Option<u16> {
+    let per_cent = zoom * 100.0;
+    let nearest = crate::options::UI_SCALES
+        .into_iter()
+        .min_by(|a, b| {
+            (f32::from(*a) - per_cent).abs().total_cmp(&(f32::from(*b) - per_cent).abs())
+        })
+        .unwrap_or(100);
+    (zoom.is_finite() && (zoom - 1.0).abs() > 0.001 && nearest != 100).then_some(nearest)
+}
+
+/// The largest size offered at which a window of `least` points fits a
+/// screen of `monitor` points (measured at the zoom `zoom`): at 300%
+/// a 1366×768 screen cannot hold the least window. Every size when the
+/// screen's size is not known; the smallest when none fits.
+pub(crate) fn largest_fitting_ui_scale(
+    monitor: Option<egui::Vec2>,
+    zoom: f32,
+    least: egui::Vec2,
+) -> u16 {
+    let sizes = crate::options::UI_SCALES;
+    let Some(monitor) = monitor.filter(|m| m.x > 0.0 && m.y > 0.0) else {
+        return sizes[sizes.len() - 1];
+    };
+    // (In pixels the screen is monitor × zoom × the system's scale, and
+    // the least window least × size × the same: the system's scale goes.)
+    let room = (monitor * zoom / least).min_elem() * 100.0;
+    sizes.into_iter().filter(|&s| f32::from(s) <= room + 0.01).max().unwrap_or(sizes[0])
+}
+
+/// The size of [`crate::options::UI_SCALES`] one step up from `now` (or
+/// down), `now` itself at the end; a size between two steps (a settings
+/// file's own) goes to the next one.
+pub(crate) fn ui_scale_step(now: u16, up: bool) -> u16 {
+    let sizes = crate::options::UI_SCALES;
+    let next = match up {
+        true => sizes.iter().copied().find(|&s| s > now),
+        false => sizes.iter().rev().copied().find(|&s| s < now),
+    };
+    next.unwrap_or(now)
+}
+
+/// The interface set to `scale` per cent (View › Interface Size and its
+/// keys): the setting, at once, and the open Options window's row with it.
+fn set_ui_scale(app: &mut Moonglow, scale: u16) {
+    app.settings.ui_scale = (scale != 100).then_some(scale);
+    if let Some(draft) = &mut app.options {
+        draft.ui_scale = scale;
+    }
+}
+
 /// The area the commands about "the area" mean: the one shown last, while
 /// its view is open.
 fn shown_area(app: &Moonglow) -> Option<mg_core::ResRef> {
@@ -1132,13 +1269,14 @@ fn shown_area(app: &Moonglow) -> Option<mg_core::ResRef> {
 
 /// The script the script commands mean: the one whose editor is the tab
 /// in front, else (a script in a window of its own) the one whose editor
-/// had the keyboard last, else the only one open.
+/// had the keyboard last, else the only one open. (Open: with a tab. A
+/// script whose tab closed keeps its editor's state for the session.)
 fn script_in_front(app: &Moonglow) -> Option<mg_resman::ResKey> {
-    let open = |k: &mg_resman::ResKey| app.scripts.contains_key(k);
+    let open = |k: &mg_resman::ResKey| app.scripts.contains_key(k) && app.script_open(k);
     match app.front_tab() {
         Some(Tab::Script(k)) if open(&k) => Some(k),
         _ => app.script_tools.last_typed.filter(open).or_else(|| {
-            let mut keys = app.scripts.keys();
+            let mut keys = app.scripts.keys().filter(|k| app.script_open(k));
             keys.next().filter(|_| keys.next().is_none()).copied()
         }),
     }
@@ -1248,6 +1386,9 @@ pub(crate) fn keys_pressed(app: &mut Moonglow, ui: &Ui) {
     if let Some(after) = app.command_after_text.take() {
         run_after(app, ui, after);
     }
+    if !ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
+        return;
+    }
     // (Undo and Redo's keys of Options › Keyboard in a script's editor:
     // its own history's, as the menu's are. Taken before the editor is
     // drawn, so that its own Ctrl+Z doesn't take a second step.)
@@ -1256,7 +1397,7 @@ pub(crate) fn keys_pressed(app: &mut Moonglow, ui: &Ui) {
     // waits, its keys left to the field, Ctrl+Z its own undo:
     // `quick_open::runs_from_field`.)
     let searching = focused == Some(crate::quick_open::field_id());
-    for id in Id::all() {
+    for &id in Id::all_slice() {
         if searching && !crate::quick_open::runs_from_field(id) {
             continue;
         }
@@ -1304,14 +1445,15 @@ pub(crate) fn keys_pressed(app: &mut Moonglow, ui: &Ui) {
     // The plugins' commands, after the window's own: a key both have is
     // the window's. (They too wait for a field typed in to set its text:
     // a plugin reads the module as its command begins.)
-    for c in app.plugin_commands() {
+    let plugin_commands = app.plugin_commands_cached();
+    for c in plugin_commands.iter() {
         if searching {
             break;
         }
         let pressed = ui.input_mut(|i| app.keymap.consume_outside_text(i, &c.key_id, typing));
         if pressed && app.ws.is_some() {
             app.quick_open.close(ui.ctx(), false);
-            let after = AfterText::Plugin { plugin: c.plugin, command: c.command };
+            let after = AfterText::Plugin { plugin: c.plugin.clone(), command: c.command.clone() };
             run_after_text(app, ui, after);
         }
     }
@@ -1451,8 +1593,12 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     // Alt alone: down, then up with no key or button between.
     let (alt_down, other) = ctx.input(|i| {
         // (Alt+Tab to another program and back is not Alt alone: the
-        // window lost the keyboard meanwhile.)
+        // window lost the keyboard meanwhile. Nor is Alt held while a
+        // button is down: a door dragged off its hooks, one dropped from
+        // the palette freely.)
         let other = i.pointer.any_pressed()
+            || i.pointer.any_down()
+            || i.pointer.any_released()
             || !i.focused
             || i.events.iter().any(|e| {
                 matches!(
@@ -1546,24 +1692,39 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     let size = egui::vec2(width.min(ui.available_width()), ui.available_height());
     let layout = egui::Layout::left_to_right(egui::Align::Center);
     ui.allocate_ui_with_layout(size, layout, |ui| {
-        egui::MenuBar::new().style(mg_uikit::menu_bar_style).config(config).ui(ui, |ui| {
-            for (name, items) in MENUS {
-                // (Its first letter underlined: Alt and the letter opens it.)
-                let mut job = egui::text::LayoutJob::default();
-                let font = egui::TextStyle::Button.resolve(ui.style());
-                // (The button's own text color, which its state gives: on the
-                // open menu's `accent-fill`, `on-fill`.)
+        type MenuJobs = (u32, egui::FontFamily, std::sync::Arc<[egui::WidgetText]>);
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let jobs_id = ui.id().with("menu-bar-jobs");
+        let font_key = (font.size.to_bits(), font.family.clone());
+        let jobs = ui
+            .data(|d| d.get_temp::<MenuJobs>(jobs_id))
+            .filter(|(s, f, _)| *s == font_key.0 && *f == font_key.1)
+            .map(|(_, _, j)| j)
+            .unwrap_or_else(|| {
                 let color = egui::Color32::PLACEHOLDER;
                 let plain = egui::TextFormat { font_id: font, color, ..Default::default() };
                 let under =
                     egui::TextFormat { underline: egui::Stroke::new(1.0, color), ..plain.clone() };
-                let split = name.chars().next().map_or(0, char::len_utf8);
-                job.append(&name[..split], 0.0, under);
-                job.append(&name[split..], 0.0, plain);
-                let (response, _) = egui::containers::menu::MenuButton::new(job).ui(ui, |ui| {
-                    app.menu_row = vec![0];
-                    menu(app, ui, items, 0);
-                });
+                let made: std::sync::Arc<[egui::WidgetText]> = MENUS
+                    .iter()
+                    .map(|(name, _)| {
+                        let mut job = egui::text::LayoutJob::default();
+                        let split = name.chars().next().map_or(0, char::len_utf8);
+                        job.append(&name[..split], 0.0, under.clone());
+                        job.append(&name[split..], 0.0, plain.clone());
+                        egui::WidgetText::LayoutJob(std::sync::Arc::new(job))
+                    })
+                    .collect();
+                ui.data_mut(|d| d.insert_temp(jobs_id, (font_key.0, font_key.1, made.clone())));
+                made
+            });
+        egui::MenuBar::new().style(mg_uikit::menu_bar_style).config(config).ui(ui, |ui| {
+            for ((_, items), job) in MENUS.iter().zip(jobs.iter()) {
+                let (response, _) =
+                    egui::containers::menu::MenuButton::new(job.clone()).ui(ui, |ui| {
+                        app.menu_row = vec![0];
+                        menu(app, ui, items, 0);
+                    });
                 tops.push((Popup::default_response_id(&response), response));
             }
         });
@@ -1791,7 +1952,7 @@ fn menu(app: &mut Moonglow, ui: &mut Ui, items: &[Item], level: usize) {
                 }
             }
             Item::PluginCommands => {
-                let commands = app.plugin_commands();
+                let commands = app.plugin_commands_cached();
                 let several = commands.iter().any(|c| c.plugin != commands[0].plugin);
                 let mut at = 0;
                 while at < commands.len() {
@@ -1847,6 +2008,25 @@ fn menu(app: &mut Moonglow, ui: &mut Ui, items: &[Item], level: usize) {
                 .on_disabled_hover_text(
                     "The update and submit commands a project's moonglow.toml names ([commands])",
                 );
+            }
+            Item::UiScales => {
+                let now = ui_scale(app);
+                for scale in crate::options::UI_SCALES {
+                    let name = format!("{scale}%");
+                    let fits = scale <= app.largest_ui_scale;
+                    let entry = egui::Button::new(tick_atoms(&name));
+                    let (entry, chosen) = row(app, level, &name, entry, fits);
+                    let at = app.menu_keys.at(level, app.menu_row[level] - 1);
+                    let (r, tick) = add_entry(ui, fits, entry, None, at);
+                    paint_tick(ui, &r, tick, scale == now, at, &name);
+                    let r = r.on_disabled_hover_text(NO_ROOM_FOR_SIZE);
+                    if fits && (r.clicked() || chosen) {
+                        set_ui_scale(app, scale);
+                        if chosen {
+                            egui::Popup::close_all(ui.ctx());
+                        }
+                    }
+                }
             }
             Item::Recent => {
                 let recent = app.settings.recent.clone();
@@ -1914,6 +2094,11 @@ fn button(app: &mut Moonglow, ui: &mut Ui, id: Id, level: usize) {
     let hint = hint.map_or(std::borrow::Cow::Borrowed(id.text().2), std::borrow::Cow::Owned);
     if !hint.is_empty() {
         r = r.on_hover_text(hint.as_ref());
+    }
+    // (Grayed, Export Changed Resources says why: nothing changed is not
+    // plain from the menu, as no module open or no area shown is.)
+    if !enabled && id == Id::ExportChanged {
+        r = r.on_disabled_hover_text(id.why_disabled(app));
     }
     if r.clicked() || chosen {
         id.run(app, ui.ctx());
@@ -2125,14 +2310,15 @@ fn menu_of(id: Id) -> Option<&'static str> {
             | Item::PluginCommands
             | Item::PluginWizards
             | Item::PluginPanels
-            | Item::Project => false,
+            | Item::Project
+            | Item::UiScales => false,
         })
     }
     MENUS.iter().find(|(_, items)| has(items, id)).map(|(name, _)| *name)
 }
 
 /// What a command row of Quick Open runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Choice {
     Window(Id),
     /// A plugin's command: the plugin's id and the command's.
@@ -2173,11 +2359,12 @@ pub(crate) fn found(app: &Moonglow) -> Vec<Row> {
                 enabled: id.enabled(app),
             }
         });
-    let plugins = app.plugin_commands().into_iter().map(|c| Row {
+    let plugin_commands = app.plugin_commands_cached();
+    let plugins = plugin_commands.iter().map(|c| Row {
         label: c.path_title(),
-        choice: Choice::Plugin(c.plugin, c.command),
-        menu: c.plugin_name,
-        key_id: c.key_id,
+        choice: Choice::Plugin(c.plugin.clone(), c.command.clone()),
+        menu: c.plugin_name.clone(),
+        key_id: c.key_id.clone(),
         enabled: app.ws.is_some(),
     });
     // (Their exporters, importers, wizards and panels, by their menus.)
@@ -2189,9 +2376,7 @@ pub(crate) fn found(app: &Moonglow) -> Vec<Row> {
         (Added::Panel, "Panels"),
     ]
     .into_iter()
-    .flat_map(|(kind, menu)| {
-        app.plugin_entries(kind).into_iter().map(move |e| (menu, e)).collect::<Vec<_>>()
-    })
+    .flat_map(|(kind, menu)| app.plugin_entries(kind).into_iter().map(move |e| (menu, e)))
     .map(|(menu, e)| Row {
         enabled: app.plugin_entry_enabled(&e),
         key_id: format!("{}/{}:{}", e.plugin, menu.to_lowercase(), e.id),
@@ -2210,7 +2395,9 @@ pub(crate) fn found(app: &Moonglow) -> Vec<Row> {
         choice: Choice::Project(c.name),
     });
     // (The editor in front's, by its group's name: the conversation's.)
-    let editor = crate::dialog_view::palette_commands(app).into_iter().map(|(cmd, enabled)| Row {
+    // (And a read-only text's in front: its Find, v5.2's W3.)
+    let editor = crate::dialog_view::palette_commands(app).into_iter();
+    let editor = editor.chain(crate::browser::palette_commands(app)).map(|(cmd, enabled)| Row {
         choice: Choice::Editor(cmd),
         label: cmd.name().to_string(),
         menu: cmd.group().name().to_string(),
@@ -2230,7 +2417,10 @@ pub(crate) fn run_choice(app: &mut Moonglow, ctx: &egui::Context, choice: Choice
         }
         // (Saved first, asked as from File › Project.)
         Choice::Project(name) => app.actions.push(Action::ProjectCommand(name)),
-        Choice::Editor(cmd) => crate::dialog_view::run_palette_command(app, cmd),
+        Choice::Editor(cmd) => {
+            crate::dialog_view::run_palette_command(app, cmd);
+            crate::browser::run_palette_command(app, cmd);
+        }
     }
 }
 
@@ -2239,6 +2429,23 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// A script whose tab was closed with nothing unsaved keeps its
+    /// editor's state for the session, but is no script the script
+    /// commands mean: "the only one open" was any script with that state,
+    /// so Convert Indentation could go to a script with no tab.
+    #[test]
+    fn the_script_in_front_is_never_a_closed_one() {
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        let key = mg_resman::ResKey::parse("closed", mg_core::ResType::NSS).unwrap();
+        let buf = crate::script_view::ScriptBuffer::read(b"void main() {}\n", (0, 0, 0));
+        app.scripts.insert(key, buf);
+        assert_eq!(script_in_front(&app), None, "its tab closed");
+        app.script_tools.last_typed = Some(key);
+        assert_eq!(script_in_front(&app), None, "typed in last, its tab closed since");
+        app.dock.main_surface_mut().push_to_first_leaf(Tab::Script(key));
+        assert_eq!(script_in_front(&app), Some(key), "its tab open");
+    }
 
     #[test]
     fn every_command_has_an_id_of_its_own() {
@@ -2290,5 +2497,173 @@ mod tests {
             assert!(on_bar.insert(id), "{id:?} is on the Top Bar twice");
         }
         assert!(on_bar.contains(&Id::TestModule) && on_bar.contains(&Id::TestChoose));
+    }
+
+    /// The main window in a harness, its first frame drawn.
+    fn sized_harness(scale: Option<u16>) -> egui_kittest::Harness<'static, Moonglow> {
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        app.settings.ui_scale = scale;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 720.0))
+            .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+        h.run();
+        h
+    }
+
+    /// The window's next frame as the start of a run whose egui kept the
+    /// zoom `zoom` from the last (egui's own Ctrl with + and - set it in
+    /// 5.1).
+    fn restored(h: &mut egui_kittest::Harness<'static, Moonglow>, zoom: f32) {
+        h.ctx.set_zoom_factor(zoom);
+        h.state_mut().zoom_kept_seen = false;
+        h.run();
+    }
+
+    /// A zoom egui kept from a run before becomes the setting's nearest
+    /// size, once: the menu ticks it and Zoom In goes on from it. The
+    /// usual zoom leaves the setting unset.
+    #[test]
+    fn a_zoom_egui_kept_becomes_the_interface_size() {
+        let mut h = sized_harness(None);
+        restored(&mut h, 1.5);
+        assert_eq!(h.state().settings.ui_scale, Some(150));
+        assert_eq!(ui_scale(h.state()), 150, "ticked in View › Interface Size");
+        assert!(Id::ResetZoom.enabled(h.state()));
+        let ctx = h.ctx.clone();
+        Id::ZoomIn.run(h.state_mut(), &ctx);
+        h.run();
+        assert_eq!(h.state().settings.ui_scale, Some(175));
+        assert!((h.ctx.zoom_factor() - 1.75).abs() < 0.001, "{}", h.ctx.zoom_factor());
+        // (Between two sizes: the nearest.)
+        let mut h = sized_harness(None);
+        restored(&mut h, 1.3);
+        assert_eq!(h.state().settings.ui_scale, Some(125));
+        // The usual size, or a size already set: left as they are.
+        let mut h = sized_harness(None);
+        restored(&mut h, 1.0);
+        assert_eq!(h.state().settings.ui_scale, None);
+        assert_eq!(ui_scale(h.state()), 100);
+        let mut h = sized_harness(Some(110));
+        restored(&mut h, 1.5);
+        assert_eq!(h.state().settings.ui_scale, Some(110));
+        assert!((h.ctx.zoom_factor() - 1.1).abs() < 0.001);
+        // Only once a run: Reset Zoom stays reset.
+        Id::ResetZoom.run(h.state_mut(), &ctx);
+        h.run();
+        h.run();
+        assert_eq!(h.state().settings.ui_scale, None);
+        assert!((h.ctx.zoom_factor() - 1.0).abs() < 0.001);
+    }
+
+    /// A settings file's size out of the sizes offered is used as the
+    /// nearest end of them: 0 and 5 broke egui's layout, 60000 its
+    /// painting.
+    #[test]
+    fn an_interface_size_out_of_range_is_kept_in_it() {
+        for (scale, zoom) in [(0, 0.9), (5, 0.9), (60000, 3.0)] {
+            let mut h = sized_harness(Some(scale));
+            h.run();
+            assert!((h.ctx.zoom_factor() - zoom).abs() < 0.001, "{scale}: {}", h.ctx.zoom_factor());
+            assert_eq!(ui_scale(h.state()), (zoom * 100.0).round() as u16, "{scale}");
+            // (The window's least size given for the size in use.)
+            let ppp = h.ctx.pixels_per_point();
+            assert_eq!(h.state().least_size_for, Some(ppp), "{scale}: least size");
+        }
+    }
+
+    /// No larger than the screen holds the least window at: on a 1366×768
+    /// screen 300% (a least window 960 pixels high) is used as 200%, and
+    /// the larger sizes are not offered.
+    #[test]
+    fn the_interface_size_fits_the_screen() {
+        let least = crate::LEAST_WINDOW_SIZE;
+        let small = Some(egui::vec2(1366.0, 768.0));
+        assert_eq!(largest_fitting_ui_scale(small, 1.0, least), 200);
+        // (Measured at another zoom, the same screen.)
+        assert_eq!(largest_fitting_ui_scale(small.map(|m| m / 2.0), 2.0, least), 200);
+        assert_eq!(largest_fitting_ui_scale(Some(egui::vec2(1920.0, 1080.0)), 1.0, least), 300);
+        assert_eq!(largest_fitting_ui_scale(None, 1.0, least), 300);
+        assert_eq!(largest_fitting_ui_scale(Some(egui::vec2(300.0, 200.0)), 1.0, least), 90);
+        let mut h = sized_harness(Some(300));
+        // (The screen in points at the zoom of the frame's start, as
+        // egui-winit measures it before each frame.)
+        for _ in 0..6 {
+            let points = small.map(|m| m / h.ctx.zoom_factor());
+            h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().monitor_size =
+                points;
+            h.step();
+        }
+        assert_eq!(h.state().largest_ui_scale, 200);
+        assert!((h.ctx.zoom_factor() - 2.0).abs() < 0.001, "{}", h.ctx.zoom_factor());
+        assert_eq!(ui_scale(h.state()), 200, "the size ticked is the size used");
+        assert!(!Id::ZoomIn.enabled(h.state()));
+        assert_eq!(h.state().settings.ui_scale, Some(300), "the setting kept for a larger screen");
+        assert_eq!(h.state().least_size_for, Some(h.ctx.pixels_per_point()), "least size");
+    }
+
+    /// A run's first frames on a 1366×768 screen, with `scale` saved and
+    /// egui's zoom `zoom` kept from the last run: the zoom in use and the
+    /// largest size, frame by frame, with the window's sizes sent (each
+    /// in pixels, at the frame's scale).
+    fn first_frames(scale: Option<u16>, zoom: f32) -> Vec<(f32, u16, Vec<egui::Vec2>)> {
+        let app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 720.0))
+            .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+        // (The harness drew frames as it was made, at 100%: this run
+        // starts now, with egui's zoom as kept.)
+        h.ctx.set_zoom_factor(zoom);
+        h.step();
+        assert!((h.ctx.zoom_factor() - zoom).abs() < 1e-3);
+        let app = h.state_mut();
+        app.settings.ui_scale = scale;
+        app.zoom_kept_seen = false;
+        app.zoom_seen = None;
+        app.largest_ui_scale = crate::options::UI_SCALES[crate::options::UI_SCALES.len() - 1];
+        app.least_size_for = None;
+        let small = egui::vec2(1366.0, 768.0);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            // (The screen in points at the zoom of the frame's start, as
+            // egui-winit measures it before each frame.)
+            let points = small / h.ctx.zoom_factor();
+            h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().monitor_size =
+                Some(points);
+            h.step();
+            let ppp = h.ctx.pixels_per_point();
+            let sent = h.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::ViewportCommand::MinInnerSize(s)
+                    | egui::ViewportCommand::InnerSize(s) => Some(*s * ppp),
+                    _ => None,
+                })
+                .collect();
+            out.push((h.ctx.zoom_factor(), h.state().largest_ui_scale, sent));
+        }
+        out
+    }
+
+    /// A saved 300% on a 1366×768 screen: the screen is measured in the
+    /// first frame, so 300% is never applied and no window size larger
+    /// than the screen is ever sent (it grew the window past the screen,
+    /// nothing shrinking it back). A zoom of 3 kept from 5.1 the same,
+    /// once its own first frame (drawn at the zoom kept) is past.
+    #[test]
+    fn a_size_too_large_for_the_screen_is_never_applied_from_the_first_frame() {
+        let small = egui::vec2(1366.0, 768.0);
+        for (scale, zoom, from) in [(Some(300), 1.0, 0), (Some(250), 1.0, 0), (None, 3.0, 1)] {
+            let frames = first_frames(scale, zoom);
+            assert!(frames.iter().all(|f| f.1 == 200), "{scale:?} {zoom}: {frames:?}");
+            assert!(frames[from..].iter().all(|f| f.0 <= 2.0 + 1e-3), "{scale:?}: {frames:?}");
+            let sent: Vec<egui::Vec2> = frames.iter().flat_map(|f| f.2.clone()).collect();
+            assert!(!sent.is_empty(), "{scale:?} {zoom}: the least size sent: {frames:?}");
+            assert!(
+                sent.iter().all(|s| s.x <= small.x + 0.5 && s.y <= small.y + 0.5),
+                "{scale:?} {zoom}: {frames:?}"
+            );
+            assert!((frames[7].0 - 2.0).abs() < 1e-3, "{scale:?} {zoom}: {frames:?}");
+        }
     }
 }

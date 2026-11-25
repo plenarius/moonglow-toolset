@@ -159,6 +159,11 @@ pub enum Cmd {
     TogglePalettes,
     ToggleLog,
     HidePanels,
+    /// View › Interface Size's Zoom In, Zoom Out and Reset Zoom (egui's
+    /// own keys for its zoom, which Moonglow turns off, given the setting).
+    ZoomIn,
+    ZoomOut,
+    ResetZoom,
     NuiDelete,
     NuiDuplicate,
     NuiMoveUp,
@@ -174,7 +179,7 @@ const SHIFT: Modifiers = Modifiers::SHIFT;
 const NONE: Modifiers = Modifiers::NONE;
 
 impl Cmd {
-    pub const ALL: [Cmd; 86] = [
+    pub const ALL: [Cmd; 89] = [
         Cmd::NewModule,
         Cmd::OpenModule,
         Cmd::Save,
@@ -253,6 +258,9 @@ impl Cmd {
         Cmd::TogglePalettes,
         Cmd::ToggleLog,
         Cmd::HidePanels,
+        Cmd::ZoomIn,
+        Cmd::ZoomOut,
+        Cmd::ResetZoom,
         Cmd::NuiDelete,
         Cmd::NuiDuplicate,
         Cmd::NuiMoveUp,
@@ -304,9 +312,9 @@ impl Cmd {
             Cmd::RotateTileClockwise => {
                 ("rotate-tile-clockwise", Some("Rotate Tile Clockwise"), Area)
             }
-            Cmd::TurnLeft => ("turn-left", Some("Turn Anticlockwise"), Area),
+            Cmd::TurnLeft => ("turn-left", Some("Turn Counterclockwise"), Area),
             Cmd::TurnRight => ("turn-right", Some("Turn Clockwise"), Area),
-            Cmd::TurnLeft90 => ("turn-left-90", Some("Turn Anticlockwise 90°"), Area),
+            Cmd::TurnLeft90 => ("turn-left-90", Some("Turn Counterclockwise 90°"), Area),
             Cmd::TurnRight90 => ("turn-right-90", Some("Turn Clockwise 90°"), Area),
             Cmd::DropToGround => ("drop", Some("Drop to the Ground"), Area),
             Cmd::DropOntoObject => ("drop-onto", Some("Drop onto the Object Below"), Area),
@@ -353,6 +361,9 @@ impl Cmd {
             Cmd::TogglePalettes => ("view-palettes", None, General),
             Cmd::ToggleLog => ("view-log", None, General),
             Cmd::HidePanels => ("hide-panels", None, General),
+            Cmd::ZoomIn => ("zoom-in", None, General),
+            Cmd::ZoomOut => ("zoom-out", None, General),
+            Cmd::ResetZoom => ("reset-zoom", None, General),
             Cmd::NuiDelete => ("nui-delete", Some("Delete Element"), Nui),
             Cmd::NuiDuplicate => ("nui-duplicate", Some("Duplicate Element"), Nui),
             Cmd::NuiMoveUp => ("nui-move-up", Some("Move Element Up"), Nui),
@@ -477,13 +488,21 @@ impl Cmd {
             Cmd::NextPane => vec![k(NONE, Key::F6)],
             Cmd::PreviousPane => vec![k(SHIFT, Key::F6)],
             // (Right and Left open and close a row; with Ctrl+Shift,
-            // every one. Ctrl and + or -, egui's zoom, are the window's.)
+            // every one. Ctrl and + or -, the interface size, are the
+            // window's.)
             Cmd::ExpandAll => vec![k(CTRL | SHIFT, Key::ArrowRight)],
             Cmd::CollapseAll => vec![k(CTRL | SHIFT, Key::ArrowLeft)],
             Cmd::ToggleTree => vec![k(CTRL | Modifiers::ALT, Key::Num1)],
             Cmd::TogglePalettes => vec![k(CTRL | Modifiers::ALT, Key::Num2)],
             Cmd::ToggleLog => vec![k(CTRL | Modifiers::ALT, Key::Num3)],
             Cmd::HidePanels => vec![k(CTRL | Modifiers::ALT, Key::Num0)],
+            // egui's and a browser's: + with Shift (US keyboards) or
+            // without (a keypad's, many others' keyboards), or the = key.
+            Cmd::ZoomIn => {
+                vec![k(CTRL, Key::Plus), k(CTRL, Key::Equals), k(CTRL | SHIFT, Key::Plus)]
+            }
+            Cmd::ZoomOut => vec![k(CTRL, Key::Minus)],
+            Cmd::ResetZoom => vec![k(CTRL, Key::Num0)],
             Cmd::NuiDelete => vec![k(NONE, Key::Delete)],
             Cmd::NuiDuplicate => vec![k(CTRL, Key::D)],
             Cmd::NuiMoveUp => vec![k(Modifiers::ALT, Key::ArrowUp)],
@@ -691,6 +710,19 @@ impl Keymap {
         map
     }
 
+    /// Order-independent content hash of bound shortcuts for cache keys.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut xor = self.keys.len() as u64;
+        for (id, list) in &self.keys {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut h);
+            list.hash(&mut h);
+            xor ^= h.finish();
+        }
+        xor
+    }
+
     /// The key `cmd` gave way on ([`Keymap::give_way`]), and the id of the
     /// command that has it: what Options › Keyboard says on its row.
     pub fn gave_way_to(&self, cmd: Cmd) -> Option<(KeyboardShortcut, String)> {
@@ -883,7 +915,7 @@ impl Keymap {
     /// Whether `e` presses a key some command was given (a plugin's or a
     /// project's too): Alt and a letter is a menu's only where none was.
     pub fn bound(&self, e: &Event) -> bool {
-        self.keys.values().chain(self.defaults.values()).flatten().any(|s| is(e, s))
+        self.keys.values().flatten().any(|s| is(e, s))
     }
 
     /// Whether `e` presses a key of a command of `group`: a list's own key
@@ -1229,5 +1261,24 @@ mod tests {
         let mut map = map;
         map.set(Cmd::Manual, vec![KeyboardShortcut::new(CTRL, Key::T)]);
         assert_eq!(map.conflicts().len(), 1);
+    }
+
+    #[test]
+    fn clearing_a_plugin_default_unbounds_its_shortcut() {
+        let mut map = Keymap::default();
+        let mods = Modifiers::ALT | Modifiers::SHIFT;
+        let sc = KeyboardShortcut::new(mods, Key::F11);
+        let press = egui::Event::Key {
+            key: Key::F11,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        };
+        assert!(!map.bound(&press), "shortcut must start unbound");
+        map.set_default("plugin.foo", vec![sc]);
+        assert!(map.bound(&press));
+        map.set_of("plugin.foo", Vec::new());
+        assert!(!map.bound(&press), "cleared plugin command shortcut must not remain bound");
     }
 }

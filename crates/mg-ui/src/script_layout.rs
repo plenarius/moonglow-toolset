@@ -57,18 +57,56 @@ struct MadeWith {
     fonts: u64,
 }
 
-/// A script editor's text and line numbers, laid out a line at a time and
-/// kept between frames.
+/// A script editor's text and line numbers, laid out lazily a line at a time
+/// and kept between frames.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LaidOut {
     made_with: Option<MadeWith>,
-    /// Each line, and its galley.
+    /// Text hash corresponding to `lines` (`None` until [`LaidOut::sync_full`]
+    /// or [`LaidOut::apply_edit`] runs).
+    synced_hash: Option<u64>,
+    /// Each line, with its byte and character bounds.
     lines: Vec<Line>,
-    galleys: Vec<Arc<Galley>>,
-    /// The whole text's galley.
+    /// Shaped galley per line (`None` for off-screen lines not yet painted or queried).
+    galleys: Vec<Option<Arc<Galley>>>,
+    /// Full concatenated galley, built lazily only when AccessKit or unit tests ask.
     galley: Option<Arc<Galley>>,
-    /// Each line's number, laid out ([`LaidOut::numbers`]).
-    numbers: Vec<Arc<Galley>>,
+    /// Each line's number galley (`None` until painted or queried).
+    numbers: Vec<Option<Arc<Galley>>>,
+    /// Total UTF-8 character count of `lines`.
+    total_chars: usize,
+    /// Widest line in display columns (tabs counted as 4), used to estimate
+    /// horizontal scroll bounds before off-screen lines are shaped.
+    max_cols: usize,
+    /// Widest shaped line galley seen so far in points.
+    max_width: f32,
+    /// Measured monospace column advance (`"M"`).
+    char_advance: f32,
+    /// Pixel-snapped line height for `made_with`.
+    row_height: f32,
+    /// Active IME preedit character range and sub-range inside it.
+    ime_preedit: Option<(egui::text::CCursorRange, Option<std::ops::Range<egui::text::CCursor>>)>,
+    /// Last pointer/key interaction time for caret blink phase.
+    last_interaction_time: f64,
+}
+
+/// Output returned by [`code_edit`] for one frame.
+pub(crate) struct CodeEditOutput {
+    pub(crate) response: egui::Response,
+    pub(crate) text_origin: egui::Pos2,
+    pub(crate) gutter_rect: egui::Rect,
+    pub(crate) cursor_range: Option<egui::text::CCursorRange>,
+    pub(crate) current_band: Option<egui::Rangef>,
+    pub(crate) cursor_line_col: (usize, usize),
+}
+
+fn count_chars(s: &str) -> usize {
+    if s.is_ascii() { s.len() } else { s.chars().count() }
+}
+
+fn est_line_cols(s: &str, char_len: usize) -> usize {
+    let tabs = s.bytes().filter(|&b| b == b'\t').count();
+    char_len + tabs * 3
 }
 
 impl LaidOut {
@@ -76,125 +114,479 @@ impl LaidOut {
     /// laid out otherwise (other colors, another font size or scale, egui's
     /// fonts made again) are let go of.
     pub(crate) fn begin(&mut self, ui: &Ui, palette: &Palette) {
+        let ppp = ui.ctx().pixels_per_point();
         let made_with = MadeWith {
             palette: *palette,
             weak: ui.visuals().weak_text_color(),
-            pixels_per_point: ui.ctx().pixels_per_point(),
+            pixels_per_point: ppp,
             fonts: fonts_made(ui.ctx()),
         };
         if self.made_with != Some(made_with) {
-            *self = LaidOut { made_with: Some(made_with), ..LaidOut::default() };
+            *self = LaidOut {
+                made_with: Some(made_with),
+                row_height: palette.row_height(ppp),
+                ..LaidOut::default()
+            };
+        } else if self.row_height == 0.0 {
+            self.row_height = palette.row_height(ppp);
         }
     }
 
-    /// The text laid out, colored by its tokens (the live error's wavy
-    /// underline is painted over it by the editor, M4's U13: no line is
-    /// laid out again as the error comes and goes). Of the text laid out
-    /// before, the lines before the change are kept, and those after it
-    /// once the tokens there begin as they did (a block comment opened
-    /// colors the lines down to its end); between them, those as they were
-    /// somewhere there before (a Replace All's lines between its
-    /// replacements).
+    pub(crate) fn line_count(&self) -> usize {
+        self.lines.len().max(1)
+    }
+
+    pub(crate) fn row_height(&self) -> f32 {
+        self.row_height.max(1.0)
+    }
+
+    pub(crate) fn row_y(&self, line: usize, ppp: f32) -> f32 {
+        ((line as f32 * self.row_height) * ppp).round() / ppp
+    }
+
+    /// Ensures line metadata (`lines`, `total_chars`, `max_cols`) matches `text`
+    /// (`h`), leaving off-screen galleys `None` for lazy shaping on demand.
+    pub(crate) fn sync_full(&mut self, ui: &Ui, text: &str, h: u64, palette: &Palette) {
+        self.begin(ui, palette);
+        if self.char_advance <= 0.0 {
+            self.char_advance = ui
+                .painter()
+                .layout_no_wrap("M".into(), palette.font(), Color32::WHITE)
+                .size()
+                .x
+                .max(1.0);
+        }
+        if self.synced_hash == Some(h) {
+            return;
+        }
+        let mut was: std::collections::HashMap<u64, Arc<Galley>> = std::collections::HashMap::new();
+        for (line, galley) in self.lines.iter().zip(self.galleys.drain(..)) {
+            if let Some(g) = galley {
+                was.insert(line.print, g);
+            }
+        }
+        self.lines.clear();
+        let mut tokens = Vec::new();
+        let (mut start, mut within, mut char_pos) = (0, Within::Code, 0);
+        let mut max_cols = 0;
+        let mut max_width: f32 = 0.0;
+        loop {
+            let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+            let next = lex_line(text, start, end, within, &mut tokens);
+            let print = fingerprint(text, start, end, &tokens);
+            let slice = &text[start..end];
+            let char_len = count_chars(slice);
+            let cols = est_line_cols(slice, char_len);
+            max_cols = max_cols.max(cols);
+            let galley = was.get(&print).cloned();
+            if let Some(g) = &galley {
+                max_width = max_width.max(g.size().x);
+            }
+            self.lines.push(Line {
+                start,
+                end,
+                char_start: char_pos,
+                char_len,
+                cols,
+                within,
+                print,
+            });
+            self.galleys.push(galley);
+            char_pos += char_len;
+            if end == text.len() {
+                break;
+            }
+            char_pos += 1;
+            (start, within) = (end + 1, next);
+        }
+        self.total_chars = char_pos;
+        self.max_cols = max_cols;
+        self.max_width = max_width;
+        self.galley = None;
+        self.synced_hash = Some(h);
+    }
+
+    /// Whether the lines are those of `text` (`h`, its hash): what places
+    /// in the text may be read from them. A script's text replaced where
+    /// its editor was not drawn (a tab behind another following the
+    /// module, the NUI Creator writing it) leaves them those of the text
+    /// before.
+    pub(crate) fn in_sync(&self, text: &str, h: u64) -> bool {
+        self.synced_hash == Some(h) && self.lines.last().is_some_and(|l| l.end == text.len())
+    }
+
+    /// Whether the lines are stamped as those of the text hashed `h`.
+    pub(crate) fn stamped_in_sync(&self, h: u64) -> bool {
+        self.synced_hash == Some(h)
+    }
+
+    /// Whether the lines' bounds are `text`'s lines' (its line ends, the
+    /// characters before each), for tests.
+    pub(crate) fn lines_are(&self, text: &str) -> bool {
+        let mut start = 0;
+        let mut chars = 0;
+        for (i, l) in self.lines.iter().enumerate() {
+            let end =
+                text.get(start..).and_then(|t| t.find('\n')).map_or(text.len(), |e| start + e);
+            let Some(own) = text.get(start..end) else { return false };
+            if (l.start, l.end, l.char_start, l.char_len)
+                != (start, end, chars, own.chars().count())
+            {
+                return false;
+            }
+            chars += l.char_len + 1;
+            if end == text.len() {
+                return i + 1 == self.lines.len() && self.total_chars == chars - 1;
+            }
+            start = end + 1;
+        }
+        false
+    }
+
+    /// Incrementally updates line metadata after `text` changed in byte range
+    /// `edit_start..old_end` -> `edit_start..new_end`, without shaping any line.
+    /// The lines must be those of the text before the edit (`old_hash`):
+    /// otherwise they are only marked stale, for [`LaidOut::sync_full`] to
+    /// make again (an edit applied to another text's lines stamped them as
+    /// the new text's, wrong: review D1 of the adversarial branch).
+    pub(crate) fn apply_edit(
+        &mut self,
+        text: &str,
+        edit_start: usize,
+        old_end: usize,
+        new_end: usize,
+        old_hash: u64,
+        new_hash: u64,
+    ) {
+        let old_len = (text.len() + old_end).checked_sub(new_end);
+        if self.synced_hash != Some(old_hash)
+            || self.lines.last().map(|l| l.end) != old_len
+            || old_end < edit_start
+            || new_end < edit_start
+        {
+            self.synced_hash = None;
+            return;
+        }
+        let delta = new_end as isize - old_end as isize;
+        let first = self.lines.partition_point(|l| l.start <= edit_start).saturating_sub(1);
+        let reached = self.lines.partition_point(|l| l.start <= old_end).min(self.lines.len());
+        let mut was: std::collections::HashMap<u64, Arc<Galley>> = std::collections::HashMap::new();
+        for i in first..reached {
+            if let Some(g) = &self.galleys[i] {
+                was.insert(self.lines[i].print, g.clone());
+            }
+        }
+        let mut start = self.lines[first].start;
+        let mut within = self.lines[first].within;
+        let mut char_pos = self.lines[first].char_start;
+        let (mut fresh, mut fresh_galleys) = (Vec::new(), Vec::new());
+        let mut fresh_max_cols = 0;
+        let mut tokens = Vec::new();
+        let mut tail = self.lines.len();
+        loop {
+            if start > new_end {
+                let at = (start as isize - delta) as usize;
+                if let Ok(j) = self.lines.binary_search_by_key(&at, |l| l.start)
+                    && self.lines[j].within == within
+                {
+                    tail = j;
+                    break;
+                }
+            }
+            let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+            let next = lex_line(text, start, end, within, &mut tokens);
+            let print = fingerprint(text, start, end, &tokens);
+            let slice = &text[start..end];
+            let char_len = count_chars(slice);
+            let cols = est_line_cols(slice, char_len);
+            fresh_max_cols = fresh_max_cols.max(cols);
+            fresh.push(Line { start, end, char_start: char_pos, char_len, cols, within, print });
+            fresh_galleys.push(was.get(&print).cloned());
+            char_pos += char_len;
+            if end == text.len() {
+                break;
+            }
+            char_pos += 1;
+            (start, within) = (end + 1, next);
+        }
+        drop(was);
+        let shrank_max = self.lines[first..tail].iter().any(|l| l.cols >= self.max_cols);
+        let kept = first + fresh.len();
+        if tail < self.lines.len() {
+            let char_delta = char_pos as isize - self.lines[tail].char_start as isize;
+            self.lines.splice(first..tail, fresh);
+            self.galleys.splice(first..tail, fresh_galleys);
+            for l in &mut self.lines[kept..] {
+                l.start = (l.start as isize + delta) as usize;
+                l.end = (l.end as isize + delta) as usize;
+                l.char_start = (l.char_start as isize + char_delta) as usize;
+            }
+            self.total_chars = (self.total_chars as isize + char_delta) as usize;
+        } else {
+            self.lines.splice(first..tail, fresh);
+            self.galleys.splice(first..tail, fresh_galleys);
+            self.total_chars = char_pos;
+        }
+        if fresh_max_cols > self.max_cols {
+            self.max_cols = fresh_max_cols;
+        } else if shrank_max {
+            self.max_cols = self.lines.iter().map(|l| l.cols).max().unwrap_or(0);
+        }
+        self.galley = None;
+        self.synced_hash = Some(new_hash);
+    }
+
+    /// Shapes line `i` on demand if `None`, returning its cached galley.
+    pub(crate) fn ensure_line(
+        &mut self,
+        ui: &Ui,
+        text: &str,
+        i: usize,
+        palette: &Palette,
+    ) -> Arc<Galley> {
+        if let Some(g) = &self.galleys[i] {
+            return g.clone();
+        }
+        let line = self.lines[i];
+        let mut tokens = Vec::new();
+        lex_line(text, line.start, line.end, line.within, &mut tokens);
+        let job = line_job(text, line.start, line.end, &tokens, palette);
+        let g = ui.fonts_mut(|f| f.layout_job(job));
+        self.max_width = self.max_width.max(g.size().x);
+        self.galleys[i] = Some(g.clone());
+        g
+    }
+
+    fn ensure_number(&mut self, ui: &Ui, i: usize, palette: &Palette) -> Arc<Galley> {
+        if let Some(Some(g)) = self.numbers.get(i) {
+            return g.clone();
+        }
+        if i >= self.numbers.len() {
+            self.numbers.resize(i + 1, None);
+        }
+        let color = self.made_with.map_or(mg_uikit::Tokens::DARK.text_3, |m| m.weak);
+        let g = ui.fonts_mut(|f| {
+            let mut job = LayoutJob::default();
+            job.append(&(i + 1).to_string(), 0.0, palette.format(color));
+            f.layout_job(palette.pitched(job))
+        });
+        self.numbers[i] = Some(g.clone());
+        g
+    }
+
+    pub(crate) fn ensure_gutter_width(&mut self, ui: &Ui, lines: usize, palette: &Palette) -> f32 {
+        let lines = lines.max(1);
+        if self.numbers.len() != lines {
+            self.numbers.truncate(lines);
+            if self.numbers.len() < lines {
+                self.numbers.resize(lines, None);
+            }
+        }
+        let widest = self.ensure_number(ui, lines - 1, palette).size().x;
+        GUTTER_LEFT + widest + GUTTER_RIGHT
+    }
+
+    /// Maps character index `c` (0..=`total_chars`) to `(line, column_chars)`.
+    pub(crate) fn line_col(&self, char_idx: usize) -> (usize, usize) {
+        if self.lines.is_empty() {
+            return (0, 0);
+        }
+        let clamped = char_idx.min(self.total_chars);
+        let li = self.lines.partition_point(|l| l.char_start <= clamped).saturating_sub(1);
+        let line = &self.lines[li];
+        let col = (clamped - line.char_start).min(line.char_len);
+        (li, col)
+    }
+
+    pub(crate) fn ccursor_at(&self, line: usize, col: usize) -> egui::text::CCursor {
+        let li = line.min(self.lines.len().saturating_sub(1));
+        let l = &self.lines[li];
+        egui::text::CCursor::new(l.char_start + col.min(l.char_len))
+    }
+
+    pub(crate) fn byte_of_char(&self, text: &str, char_idx: usize) -> usize {
+        if self.lines.is_empty() {
+            return crate::script_tools::byte_index(text, char_idx);
+        }
+        let (li, col) = self.line_col(char_idx);
+        let line = &self.lines[li];
+        let slice = &text[line.start..line.end];
+        if slice.is_ascii() {
+            line.start + col.min(slice.len())
+        } else {
+            line.start + slice.char_indices().nth(col).map_or(slice.len(), |(b, _)| b)
+        }
+    }
+
+    pub(crate) fn char_of_byte(&self, text: &str, byte_idx: usize) -> usize {
+        if self.lines.is_empty() {
+            return crate::script_tools::char_index(text, byte_idx);
+        }
+        let clamped = byte_idx.min(text.len());
+        let li = self.lines.partition_point(|l| l.start <= clamped).saturating_sub(1);
+        let line = &self.lines[li];
+        let rel = clamped.saturating_sub(line.start).min(line.end - line.start);
+        let slice = &text[line.start..line.start + rel];
+        line.char_start + count_chars(slice)
+    }
+
+    pub(crate) fn line_moved_char(&self, from_char: usize, delta_lines: isize) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let (li, col) = self.line_col(from_char);
+        let target = li as isize + delta_lines;
+        if target < 0 {
+            return 0;
+        }
+        let Some(dst) = self.lines.get(target as usize) else {
+            return self.total_chars;
+        };
+        dst.char_start + col.min(dst.char_len)
+    }
+
+    pub(crate) fn cursor_local_rect(
+        &mut self,
+        ui: &Ui,
+        text: &str,
+        palette: &Palette,
+        c: egui::text::CCursor,
+    ) -> egui::Rect {
+        if self.lines.is_empty() {
+            return egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, self.row_height()));
+        }
+        let (li, col) = self.line_col(usize::from(c.index));
+        let g = self.ensure_line(ui, text, li, palette);
+        let x = g.rows.first().map_or(0.0, |r| r.x_offset(egui::text::CharIndex::from(col)));
+        let y = self.row_y(li, ui.ctx().pixels_per_point());
+        egui::Rect::from_min_max(egui::pos2(x, y), egui::pos2(x, y + self.row_height()))
+    }
+
+    fn ccursor_from_local_pos(
+        &mut self,
+        ui: &Ui,
+        text: &str,
+        palette: &Palette,
+        local: egui::Pos2,
+    ) -> egui::text::CCursor {
+        let li = ((local.y / self.row_height()).floor().max(0.0) as usize)
+            .min(self.lines.len().saturating_sub(1));
+        let g = self.ensure_line(ui, text, li, palette);
+        let col = g.rows.first().map_or(0, |r| usize::from(r.char_at(local.x)));
+        self.ccursor_at(li, col)
+    }
+
+    /// Total UTF-8 character count of the currently synced text.
+    pub(crate) fn total_chars(&self) -> usize {
+        self.total_chars
+    }
+
+    /// The text laid out whole (concatenated across all lines): used by tests
+    /// and when AccessKit is enabled.
     pub(crate) fn text(&mut self, ui: &Ui, text: &str, palette: &Palette) -> Arc<Galley> {
-        let before = self.galley.clone();
-        if let Some(g) = &before
+        let h = crate::script_tools::hash(text);
+        self.sync_full(ui, text, h, palette);
+        if let Some(g) = &self.galley
             && g.text() == text
         {
             return g.clone();
         }
-        let old = before.as_ref().map_or("", |g| g.text());
-        // The change: from the first byte that differs to the last (as
-        // the old text has them, and as the new one does).
-        let p = common_prefix(old.as_bytes(), text.as_bytes());
-        let room = old.len().min(text.len()) - p;
-        let s = common_suffix(&old.as_bytes()[p..], &text.as_bytes()[p..]).min(room);
-        let (old_end, new_end) = (old.len() - s, text.len() - s);
-        let delta = text.len() as isize - old.len() as isize;
-        let first = self.lines.partition_point(|l| l.start <= p).saturating_sub(1);
-        let reached = self.lines.partition_point(|l| l.start <= old_end);
-        let was: std::collections::HashMap<u64, &Arc<Galley>> =
-            (first..reached).map(|i| (self.lines[i].print, &self.galleys[i])).collect();
-        let (mut start, mut within) =
-            self.lines.get(first).map_or((0, Within::Code), |l| (l.start, l.within));
-        let (mut fresh, mut fresh_galleys) = (Vec::new(), Vec::new());
         let mut tokens = Vec::new();
-        let mut tail = self.lines.len();
         ui.fonts_mut(|f| {
-            loop {
-                // A line after the change, begun as the old one in its place
-                // began: the rest are as they were.
-                if before.is_some() && start > new_end {
-                    let at = (start as isize - delta) as usize;
-                    if let Ok(j) = self.lines.binary_search_by_key(&at, |l| l.start)
-                        && self.lines[j].within == within
-                    {
-                        tail = j;
-                        return;
-                    }
+            for (i, line) in self.lines.iter().enumerate() {
+                if self.galleys[i].is_none() {
+                    lex_line(text, line.start, line.end, line.within, &mut tokens);
+                    let job = line_job(text, line.start, line.end, &tokens, palette);
+                    self.galleys[i] = Some(f.layout_job(job));
                 }
-                let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-                let next = lex_line(text, start, end, within, &mut tokens);
-                let print = fingerprint(text, start, end, &tokens);
-                let galley = match was.get(&print) {
-                    Some(g) => (*g).clone(),
-                    None => f.layout_job(line_job(text, &tokens, palette)),
-                };
-                fresh.push(Line { start, within, print });
-                fresh_galleys.push(galley);
-                if end == text.len() {
-                    return;
-                }
-                (start, within) = (end + 1, next);
             }
         });
-        drop(was);
-        let kept = first + fresh.len();
-        self.lines.splice(first..tail, fresh);
-        self.galleys.splice(first..tail, fresh_galleys);
-        for l in &mut self.lines[kept..] {
-            l.start = (l.start as isize + delta) as usize;
-        }
+        let slices: Vec<Arc<Galley>> =
+            self.galleys.iter().map(|g| g.as_ref().expect("all lines shaped").clone()).collect();
         let mut job = LayoutJob::single_section(
             text.to_owned(),
             TextFormat::simple(palette.font(), palette.colors[0]),
         );
         job.wrap.max_width = f32::INFINITY;
         let ppp = ui.ctx().pixels_per_point();
-        let galley = Arc::new(Galley::concat(Arc::new(job), &self.galleys, ppp));
+        let galley = Arc::new(Galley::concat(Arc::new(job), &slices, ppp));
+        self.max_width = galley.size().x;
         self.galley = Some(galley.clone());
         galley
     }
 
-    /// Lays out the numbers of `lines` lines (each line's own, kept while
-    /// the palette is: those of lines added laid out as they come).
+    /// Lays out all `lines` line numbers immediately (for unit tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn numbers(&mut self, ui: &Ui, lines: usize, palette: &Palette) {
-        if self.numbers.len() == lines {
+        if self.numbers.len() == lines && self.numbers.iter().all(Option::is_some) {
             return;
         }
         let color = self.made_with.map_or(mg_uikit::Tokens::DARK.text_3, |m| m.weak);
-        self.numbers.truncate(lines);
+        self.numbers.resize(lines, None);
         ui.fonts_mut(|f| {
-            for n in self.numbers.len() + 1..=lines {
-                let mut job = LayoutJob::default();
-                job.append(&n.to_string(), 0.0, palette.format(color));
-                self.numbers.push(f.layout_job(palette.pitched(job)));
+            for (i, slot) in self.numbers.iter_mut().enumerate() {
+                if slot.is_none() {
+                    let mut job = LayoutJob::default();
+                    job.append(&(i + 1).to_string(), 0.0, palette.format(color));
+                    *slot = Some(f.layout_job(palette.pitched(job)));
+                }
             }
         });
     }
 
     /// The gutter's width: the board's `.code .ln` (12 points, the widest
     /// number, 10 points), for the numbers laid out last.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn gutter_width(&self) -> f32 {
-        let widest = self.numbers.last().map_or(0.0, |g| g.size().x);
+        let widest = self.numbers.last().and_then(|o| o.as_ref()).map_or(0.0, |g| g.size().x);
         GUTTER_LEFT + widest + GUTTER_RIGHT
     }
 
-    /// Paints the line numbers in the gutter whose left edge is `left`,
-    /// beside the rows of `galley` (the text, laid out at `at`, a row a
-    /// line), those in sight alone: each right-aligned, the line
-    /// `current`'s in `current_color` (`.ln.cur`), the others in the
-    /// numbers' color; and each bookmark's mark in the room before them
-    /// ([`paint_marks`]).
+    /// Paints visible line numbers and bookmark icons in `gutter` alongside the
+    /// code rows intersecting `ui.clip_rect()`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn paint_gutter_visible(
+        &mut self,
+        ui: &Ui,
+        left: f32,
+        text_origin: egui::Pos2,
+        first_vis: usize,
+        last_vis: usize,
+        current: Option<usize>,
+        current_color: Color32,
+        palette: &Palette,
+        marks: Marks<'_>,
+    ) {
+        let lines = self.line_count();
+        let gutter_w = self.ensure_gutter_width(ui, lines, palette);
+        let right = left + gutter_w - GUTTER_RIGHT;
+        let ppp = ui.ctx().pixels_per_point();
+        let weakest = self.made_with.map_or(current_color, |m| m.weak);
+        for i in first_vis..last_vis.min(lines) {
+            let top = text_origin.y + self.row_y(i, ppp);
+            let number = self.ensure_number(ui, i, palette);
+            let pos = egui::pos2(right - number.size().x, top);
+            let painter = ui.painter();
+            if current == Some(i) {
+                painter.galley_with_override_text_color(pos, number, current_color);
+            } else {
+                painter.galley(pos, number, current_color);
+            }
+        }
+        let row_h = self.row_height();
+        paint_mark_badges(ui, palette.font(), weakest, marks, |line| {
+            (first_vis..last_vis.min(lines)).contains(&line).then(|| {
+                let top = text_origin.y + self.row_y(line, ppp);
+                egui::Rect::from_min_size(
+                    egui::pos2(left, top),
+                    egui::vec2(GUTTER_LEFT - MARK_GAP, row_h),
+                )
+            })
+        });
+    }
+
+    /// Paints visible line numbers and bookmark icons for callers holding a whole
+    /// [`Galley`] (such as the read-only NUI source viewer).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint_gutter(
         &self,
@@ -207,7 +599,9 @@ impl LaidOut {
         marks: Marks<'_>,
     ) {
         let clip = ui.clip_rect();
-        let right = left + GUTTER_LEFT + self.numbers.last().map_or(0.0, |g| g.size().x);
+        let right = left
+            + GUTTER_LEFT
+            + self.numbers.last().and_then(|o| o.as_ref()).map_or(0.0, |g| g.size().x);
         let first = galley.rows.partition_point(|r| at.y + r.pos.y + r.size.y < clip.top());
         let painter = ui.painter();
         for (i, row) in galley.rows.iter().enumerate().skip(first) {
@@ -215,7 +609,7 @@ impl LaidOut {
             if top > clip.bottom() {
                 break;
             }
-            let Some(number) = self.numbers.get(i) else { break };
+            let Some(number) = self.numbers.get(i).and_then(|o| o.as_ref()) else { break };
             let pos = egui::pos2(right - number.size().x, top);
             if current == Some(i) {
                 painter.galley_with_override_text_color(pos, number.clone(), current_color);
@@ -223,22 +617,67 @@ impl LaidOut {
                 painter.galley(pos, number.clone(), current_color);
             }
         }
-        paint_marks(ui, left, galley, at, marks, self.made_with.map_or(current_color, |m| m.weak));
+        let font = galley
+            .job
+            .sections
+            .first()
+            .map(|s| s.format.font_id.clone())
+            .unwrap_or_else(|| egui::TextStyle::Monospace.resolve(ui.style()));
+        let weakest = self.made_with.map_or(current_color, |m| m.weak);
+        paint_mark_badges(ui, font, weakest, marks, |line| {
+            let row = galley.rows.get(line)?;
+            let top = at.y + row.pos.y;
+            if top + row.size.y < clip.top() || top > clip.bottom() {
+                return None;
+            }
+            Some(egui::Rect::from_min_size(
+                egui::pos2(left, top),
+                egui::vec2(GUTTER_LEFT - MARK_GAP, row.size.y),
+            ))
+        });
+    }
+}
+
+fn paint_mark_badges(
+    ui: &Ui,
+    font: egui::FontId,
+    weakest: Color32,
+    marks: Marks<'_>,
+    mut place: impl FnMut(usize) -> Option<egui::Rect>,
+) {
+    let painter = ui.painter();
+    for &line in marks.bookmarks {
+        if marks.numbered.contains(&Some(line)) {
+            continue;
+        }
+        let Some(rect) = place(line) else { continue };
+        let side = rect.height().min(rect.width());
+        let square = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
+        mg_uikit::Icon::Bookmark.paint(painter, square, weakest);
+    }
+    for (n, line) in marks.numbered.iter().enumerate() {
+        let Some(line) = *line else { continue };
+        let Some(rect) = place(line) else { continue };
+        let digit = painter.layout_no_wrap(n.to_string(), font.clone(), weakest);
+        painter.galley(rect.center() - digit.size() / 2.0, digit, weakest);
     }
 }
 
 /// The gutter named for a screen reader by what it shows ("Line numbers 1
 /// to 3000"), not by every number in it.
 pub(crate) fn name_gutter(gutter: &egui::Response, lines: usize) {
-    let said = format!("Line numbers 1 to {}", lines.max(1));
-    gutter.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
+    gutter.widget_info(|| {
+        let said = format!("Line numbers 1 to {}", lines.max(1));
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said)
+    });
 }
 
 /// The text field described for a screen reader by the cursor's line
 /// ("Line 12 of 3000"): the gutter's number for it, said.
 pub(crate) fn describe_line(field: &egui::Response, line: usize, lines: usize) {
-    let said = format!("Line {line} of {}", lines.max(1));
-    field.ctx.accesskit_node_builder(field.id, |node| node.set_description(said));
+    field.ctx.accesskit_node_builder(field.id, |node| {
+        node.set_description(format!("Line {line} of {}", lines.max(1)));
+    });
 }
 
 /// The room before the line numbers (`.code .ln`'s `padding-left`), where
@@ -292,8 +731,14 @@ enum Within {
 /// A line of the text, laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Line {
-    /// Where it starts (bytes), and what in.
+    /// Where it starts and ends in bytes (excluding trailing `\n`).
     start: usize,
+    end: usize,
+    /// Where it starts and how many characters long it is.
+    char_start: usize,
+    char_len: usize,
+    /// Estimated display columns (tabs counted as 4).
+    cols: usize,
     within: Within,
     /// Its text and its tokens' colors (each one's element and place in
     /// the line): two lines alike in these are laid out alike.
@@ -371,37 +816,15 @@ fn fingerprint(text: &str, start: usize, end: usize, tokens: &[Token]) -> u64 {
     egui::epaint::util::hash((&text[start..end], colors))
 }
 
-/// How many bytes `a` and `b` begin with alike.
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
-    let n = a.len().min(b.len());
-    let mut i = 0;
-    // (64 at a time, compared as slices are: quick.)
-    while i + 64 <= n && a[i..i + 64] == b[i..i + 64] {
-        i += 64;
-    }
-    while i < n && a[i] == b[i] {
-        i += 1;
-    }
-    i
-}
-
-/// How many bytes `a` and `b` end with alike.
-fn common_suffix(a: &[u8], b: &[u8]) -> usize {
-    let n = a.len().min(b.len());
-    let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
-    let mut i = 0;
-    while i + 64 <= n && a[n - i - 64..n - i] == b[n - i - 64..n - i] {
-        i += 64;
-    }
-    while i < n && a[n - i - 1] == b[n - i - 1] {
-        i += 1;
-    }
-    i
-}
-
 /// A line's layout: its tokens' pieces in their colors, the line
 /// [`Palette::pitch`] high.
-fn line_job(text: &str, tokens: &[Token], palette: &Palette) -> LayoutJob {
+fn line_job(
+    text: &str,
+    _line_start: usize,
+    _line_end: usize,
+    tokens: &[Token],
+    palette: &Palette,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     for t in tokens.iter().filter(|t| t.span.end > t.span.start) {
         let color = palette.colors[element(t.kind)];
@@ -415,42 +838,838 @@ fn line_job(text: &str, tokens: &[Token], palette: &Palette) -> LayoutJob {
     palette.pitched(job)
 }
 
-/// Each bookmark's mark in the room before the line numbers of the
-/// gutter whose left edge is `left` ([`GUTTER_LEFT`]), on its line's row
-/// of `galley` (laid out at `at`): a numbered bookmark's number, else the
-/// `bookmark` icon, in `color` (the numbers').
-fn paint_marks(
-    ui: &Ui,
-    left: f32,
-    galley: &Galley,
-    at: egui::Pos2,
-    marks: Marks<'_>,
-    color: Color32,
+/// Replaces the characters `del` of the editor's text with `ins` as a step
+/// of its history (`before` and `after`, the cursor it gives back on Undo
+/// and on Redo), keeping the laid-out lines in step.
+#[allow(clippy::too_many_arguments)]
+fn replace(
+    buf: &mut crate::script_view::ScriptBuffer,
+    laid: &mut LaidOut,
+    del: egui::text::CCursorRange,
+    ins: &str,
+    before: egui::text::CCursorRange,
+    after: egui::text::CCursorRange,
+    time: f64,
+    mergeable: bool,
 ) {
-    let clip = ui.clip_rect();
-    let place = |line: usize| {
-        let row = galley.rows.get(line)?;
-        let rect = egui::Rect::from_min_size(
-            at + row.pos.to_vec2() + egui::vec2(left - at.x - row.pos.x, 0.0),
-            egui::vec2(GUTTER_LEFT - MARK_GAP, row.size.y),
-        );
-        clip.intersects(rect).then_some(rect)
-    };
-    for line in marks.bookmarks {
-        if marks.numbered.contains(&Some(*line)) {
-            continue;
+    let [min, max] = del.sorted_cursors();
+    let bf = laid.byte_of_char(&buf.text, usize::from(min.index));
+    let bt = laid.byte_of_char(&buf.text, usize::from(max.index));
+    let oh = buf.text_hash();
+    let (at, old_end, new_end) =
+        buf.replace_range_undo(bf..bt, ins, before, after, time, mergeable);
+    let nh = buf.text_hash();
+    laid.apply_edit(&buf.text, at, old_end, new_end, oh, nh);
+}
+
+/// [`replace`] for a composition's text (IME): the composition one step.
+fn compose(
+    buf: &mut crate::script_view::ScriptBuffer,
+    laid: &mut LaidOut,
+    del: egui::text::CCursorRange,
+    ins: &str,
+    after: egui::text::CCursorRange,
+    time: f64,
+) {
+    let [min, max] = del.sorted_cursors();
+    let bf = laid.byte_of_char(&buf.text, usize::from(min.index));
+    let bt = laid.byte_of_char(&buf.text, usize::from(max.index));
+    let oh = buf.text_hash();
+    let (at, old_end, new_end) = buf.replace_range_composing(bf..bt, ins, del, after, time);
+    let nh = buf.text_hash();
+    laid.apply_edit(&buf.text, at, old_end, new_end, oh, nh);
+}
+
+/// Where a word move left from the character `cur` lands (Ctrl+Left, Alt+Left
+/// on a Mac): egui's word before it, over line ends as egui finds it in the
+/// whole text, from the lines before it only as far back as a line with
+/// something other than spaces (not the whole text each key).
+fn word_left(laid: &LaidOut, text: &str, cur: usize) -> usize {
+    use egui::text_selection::text_cursor_state::ccursor_previous_word;
+    let (li, _) = laid.line_col(cur);
+    let to = laid.byte_of_char(text, cur);
+    let mut k = li;
+    loop {
+        let from = laid.lines[k];
+        let slice = &text[from.start..to];
+        if k == 0 || slice.chars().any(|c| !c.is_whitespace()) {
+            let n = count_chars(slice);
+            let at = ccursor_previous_word(slice, egui::text::CCursor::new(n));
+            return from.char_start + usize::from(at.index);
         }
-        let Some(rect) = place(*line) else { continue };
-        let side = rect.height().min(rect.width());
-        let square = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side));
-        mg_uikit::Icon::Bookmark.paint(ui.painter(), square, color);
+        k -= 1;
     }
-    let font = galley.job.sections.first().map(|s| s.format.font_id.clone());
-    for (n, line) in marks.numbered.iter().enumerate() {
-        let (Some(line), Some(font)) = (line, &font) else { continue };
-        let Some(rect) = place(*line) else { continue };
-        let digit = ui.painter().layout_no_wrap(n.to_string(), font.clone(), color);
-        ui.painter().galley(rect.center() - digit.size() / 2.0, digit, color);
+}
+
+/// Where a word move right from the character `cur` lands (Ctrl+Right), as
+/// [`word_left`] does: over line ends, as egui's in the whole text.
+fn word_right(laid: &LaidOut, text: &str, cur: usize) -> usize {
+    use egui::text_selection::text_cursor_state::ccursor_next_word;
+    let (li, _) = laid.line_col(cur);
+    let from = laid.byte_of_char(text, cur);
+    let mut k = li;
+    loop {
+        let to = laid.lines[k];
+        let slice = &text[from..to.end];
+        if k + 1 == laid.lines.len() || slice.chars().any(|c| !c.is_whitespace()) {
+            let at = ccursor_next_word(slice, egui::text::CCursor::new(0));
+            return (cur + usize::from(at.index)).min(laid.total_chars);
+        }
+        k += 1;
+    }
+}
+
+/// The start of the line of the character `c`.
+fn line_start_of(laid: &LaidOut, c: usize) -> usize {
+    let (li, _) = laid.line_col(c);
+    laid.lines.get(li).map_or(0, |l| l.char_start)
+}
+
+/// The end of the line of the character `c` (before its line end).
+fn line_end_of(laid: &LaidOut, c: usize) -> usize {
+    let (li, _) = laid.line_col(c);
+    laid.lines.get(li).map_or(0, |l| l.char_start + l.char_len)
+}
+
+/// The cursor a line up (`up`) or down from `range`'s, at its column as the
+/// points across go (kept over short lines, `h_pos`); past the first line
+/// the text's start, past the last its end.
+fn vertical(
+    ui: &Ui,
+    laid: &mut LaidOut,
+    text: &str,
+    palette: &Palette,
+    range: &mut egui::text::CCursorRange,
+    up: bool,
+) {
+    let (li, _) = laid.line_col(usize::from(range.primary.index));
+    let h_pos = range
+        .h_pos
+        .unwrap_or_else(|| laid.cursor_local_rect(ui, text, palette, range.primary).min.x);
+    let lines = laid.lines.len();
+    let to = if up { li.checked_sub(1) } else { Some(li + 1).filter(|l| *l < lines) };
+    range.primary = match to {
+        Some(l) => {
+            let g = laid.ensure_line(ui, text, l, palette);
+            let col = g.rows.first().map_or(0, |r| usize::from(r.char_at(h_pos)));
+            laid.ccursor_at(l, col)
+        }
+        None if up => egui::text::CCursor::new(0),
+        None => egui::text::CCursor::new(laid.total_chars),
+    };
+    range.h_pos = Some(h_pos);
+}
+
+impl LaidOut {
+    /// Paints a line under the characters `from..to` at the foot of their
+    /// rows (a composition's, IME), as egui underlines one.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_underline(
+        &mut self,
+        ui: &Ui,
+        painter: &egui::Painter,
+        text: &str,
+        palette: &Palette,
+        origin: egui::Pos2,
+        (from, to): (usize, usize),
+        stroke: egui::Stroke,
+    ) {
+        if from >= to {
+            return;
+        }
+        let ((fl, fc), (tl, tc)) = (self.line_col(from), self.line_col(to));
+        let ppp = ui.ctx().pixels_per_point();
+        for li in fl..=tl {
+            let g = self.ensure_line(ui, text, li, palette);
+            let Some(row) = g.rows.first() else { continue };
+            let left = if li == fl { row.x_offset(egui::text::CharIndex::from(fc)) } else { 0.0 };
+            let right =
+                if li == tl { row.x_offset(egui::text::CharIndex::from(tc)) } else { row.size.x };
+            let y = origin.y + self.row_y(li, ppp) + self.row_height();
+            painter.line_segment(
+                [egui::pos2(origin.x + left, y), egui::pos2(origin.x + right, y)],
+                stroke,
+            );
+        }
+    }
+}
+
+/// Viewport-virtualized multiline script editor built directly over [`LaidOut`]
+/// and [`ScriptBuffer`], avoiding `egui::TextEdit`'s full-galley clones and
+/// full-document undo snapshots. It answers the keys and the pointer as
+/// egui's `TextEdit` does (its `events` and `pointer_interaction`); where it
+/// does otherwise, it says so. `reveal`: the cursor brought into sight, the
+/// text changed before it was drawn (the menus' Undo, Tab, a completion put
+/// in: review N4).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_edit(
+    ui: &mut Ui,
+    key: mg_resman::ResKey,
+    buf: &mut crate::script_view::ScriptBuffer,
+    laid: &mut LaidOut,
+    palette: &Palette,
+    room: f32,
+    reveal: bool,
+) -> CodeEditOutput {
+    use egui::text::{CCursor, CCursorRange};
+    use egui::{Event, Key, Modifiers};
+
+    let ctx = ui.ctx().clone();
+    let id = crate::script_view::editor_id(key);
+    let h = buf.text_hash();
+    laid.sync_full(ui, &buf.text, h, palette);
+    let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+    let max_char = egui::text::CharIndex::from(laid.total_chars);
+    let prev_cursor_range = state.cursor.char_range().map(|mut r| {
+        r.primary.index = r.primary.index.min(max_char);
+        r.secondary.index = r.secondary.index.min(max_char);
+        r
+    });
+    let mut cursor_range = prev_cursor_range.unwrap_or_default();
+
+    let os = ui.os();
+    let has_focus = ctx.memory(|m| m.has_focus(id));
+    let mut text_changed = false;
+    let mut any_cursor_edit = false;
+    let prev_text_for_a11y = if ctx.accesskit_node_builder(id, |_| ()).is_some() {
+        Some(buf.text.clone())
+    } else {
+        None
+    };
+
+    if has_focus {
+        let filter = egui::EventFilter {
+            horizontal_arrows: true,
+            vertical_arrows: true,
+            tab: true,
+            escape: false,
+        };
+        ctx.memory_mut(|m| m.set_focus_lock_filter(id, filter));
+    } else {
+        // (A composition goes with the keys: review M2.)
+        laid.ime_preedit = None;
+        buf.undo.end_composing();
+    }
+
+    // Keyboard, clipboard and IME events, before the editor's size is
+    // taken, as egui's TextEdit has them: lines a paste adds are in the
+    // room the scroll area is given this frame, and the cursor scrolled to
+    // there at once (with smooth scrolling off, the scroll stopped short of
+    // a paste at the text's end: review N6).
+    if has_focus {
+        let now = ui.input(|i| i.time);
+        let events = ui.input(|i| {
+            i.events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Event::Key { .. }
+                            | Event::Text(_)
+                            | Event::Paste(_)
+                            | Event::Copy
+                            | Event::Cut
+                            | Event::Ime(_)
+                            | Event::AccessKitActionRequest(_)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        for ev in &events {
+            let total = laid.total_chars;
+            let was = cursor_range;
+            match ev {
+                Event::Copy => {
+                    if !cursor_range.is_empty() {
+                        let [min, max] = cursor_range.sorted_cursors();
+                        let bf = laid.byte_of_char(&buf.text, usize::from(min.index));
+                        let bt = laid.byte_of_char(&buf.text, usize::from(max.index));
+                        ui.copy_text(buf.text[bf..bt].to_owned());
+                    }
+                }
+                Event::Cut => {
+                    if !cursor_range.is_empty() {
+                        let [min, max] = cursor_range.sorted_cursors();
+                        let bf = laid.byte_of_char(&buf.text, usize::from(min.index));
+                        let bt = laid.byte_of_char(&buf.text, usize::from(max.index));
+                        ui.copy_text(buf.text[bf..bt].to_owned());
+                        let next = CCursorRange::one(min);
+                        replace(buf, laid, was, "", was, next, now, false);
+                        cursor_range = next;
+                        text_changed = true;
+                    }
+                }
+                Event::Paste(ins) => {
+                    if !ins.is_empty() {
+                        let min = cursor_range.sorted_cursors()[0];
+                        let next = CCursorRange::one(CCursor::new(min.index + count_chars(ins)));
+                        replace(buf, laid, was, ins, was, next, now, false);
+                        cursor_range = next;
+                        text_changed = true;
+                    }
+                }
+                Event::Text(ins) => {
+                    if !ins.is_empty() && ins != "\n" && ins != "\r" {
+                        let mergeable = cursor_range.is_empty();
+                        let min = cursor_range.sorted_cursors()[0];
+                        let next = CCursorRange::one(CCursor::new(min.index + count_chars(ins)));
+                        replace(buf, laid, was, ins, was, next, now, mergeable);
+                        cursor_range = next;
+                        text_changed = true;
+                    }
+                }
+                // A composition (IME) goes where the cursor is, as in
+                // egui: its text replaces the selection, and each next text
+                // the one before (the cursor's range while it goes on); the
+                // whole of it is one step of the history (review M1, M2).
+                Event::Ime(ime) => match ime {
+                    egui::ImeEvent::Preedit { text: pre, .. }
+                        if pre.is_empty() && laid.ime_preedit.is_none() => {}
+                    egui::ImeEvent::Commit(c) if c.is_empty() && laid.ime_preedit.is_none() => {}
+                    egui::ImeEvent::Preedit { text: pre, .. } | egui::ImeEvent::Commit(pre)
+                        if pre == "\n" || pre == "\r" => {}
+                    egui::ImeEvent::Preedit { text: pre, active_range_chars } => {
+                        let min = cursor_range.sorted_cursors()[0];
+                        let end = CCursor::new(min.index + count_chars(pre));
+                        let next = CCursorRange::two(min, end);
+                        compose(buf, laid, was, pre, next, now);
+                        cursor_range = next;
+                        laid.ime_preedit = (!pre.is_empty()).then(|| {
+                            let active = active_range_chars.as_ref();
+                            (next, active.map(|r| CCursor::new(r.start)..CCursor::new(r.end)))
+                        });
+                        text_changed = true;
+                    }
+                    egui::ImeEvent::Commit(commit) => {
+                        let min = cursor_range.sorted_cursors()[0];
+                        let next = CCursorRange::one(CCursor::new(min.index + count_chars(commit)));
+                        compose(buf, laid, was, commit, next, now);
+                        buf.undo.end_composing();
+                        cursor_range = next;
+                        laid.ime_preedit = None;
+                        text_changed = true;
+                    }
+                    // (The characters around the selection, the selection
+                    // kept, as egui's `delete_surrounding_chars`: review N5.)
+                    egui::ImeEvent::DeleteSurrounding { before_chars, after_chars } => {
+                        let [min, max] = cursor_range.sorted_cursors();
+                        if *after_chars > 0 {
+                            let to =
+                                CCursor::new((usize::from(max.index) + after_chars).min(total));
+                            let del = CCursorRange::two(max, to);
+                            replace(buf, laid, del, "", was, was, now, false);
+                        }
+                        let back = (*before_chars).min(usize::from(min.index));
+                        if back > 0 {
+                            let mut moved = cursor_range;
+                            moved.primary -= back;
+                            moved.secondary -= back;
+                            let del = CCursorRange::two(CCursor::new(min.index - back), min);
+                            replace(buf, laid, del, "", was, moved, now, false);
+                            cursor_range = moved;
+                        }
+                        laid.ime_preedit = None;
+                        text_changed = true;
+                    }
+                    _ => {}
+                },
+                Event::Key { key, pressed: true, modifiers, .. } => {
+                    // (A Mac's Ctrl+A, E, P, N, B and F move the cursor, as
+                    // in egui: review N8.)
+                    let mac_ctrl =
+                        os == egui::os::OperatingSystem::Mac && modifiers.ctrl && !modifiers.shift;
+                    let cur = usize::from(cursor_range.primary.index);
+                    let [min, max] = cursor_range.sorted_cursors();
+                    let (min_c, max_c) = (usize::from(min.index), usize::from(max.index));
+                    // (Deletes the characters `a..b`, the cursor left at
+                    // `a`; Undo gives the cursor back as it was, not the
+                    // characters taken selected: review N2.)
+                    let mut delete = |buf: &mut crate::script_view::ScriptBuffer,
+                                      laid: &mut LaidOut,
+                                      a: usize,
+                                      b: usize,
+                                      merge: bool|
+                     -> CCursorRange {
+                        let next =
+                            CCursorRange::one(CCursor { prefer_next_row: true, ..CCursor::new(a) });
+                        if a < b {
+                            let del = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+                            replace(buf, laid, del, "", was, next, now, merge);
+                            text_changed = true;
+                        }
+                        next
+                    };
+                    match key {
+                        Key::A if modifiers.command => {
+                            cursor_range =
+                                CCursorRange::two(CCursor::new(0), CCursor::new(laid.total_chars));
+                        }
+                        Key::P | Key::N if mac_ctrl => {
+                            let up = *key == Key::P;
+                            vertical(ui, laid, &buf.text, palette, &mut cursor_range, up);
+                            cursor_range.secondary = cursor_range.primary;
+                        }
+                        Key::A | Key::E | Key::B | Key::F if mac_ctrl => {
+                            let c = match key {
+                                Key::A => line_start_of(laid, cur),
+                                Key::E => line_end_of(laid, cur),
+                                Key::B => cur.saturating_sub(1),
+                                _ => (cur + 1).min(total),
+                            };
+                            cursor_range = CCursorRange::one(CCursor::new(c));
+                        }
+                        Key::ArrowLeft | Key::ArrowRight
+                            if modifiers.is_none() && !cursor_range.is_empty() =>
+                        {
+                            cursor_range =
+                                CCursorRange::one(if *key == Key::ArrowLeft { min } else { max });
+                        }
+                        Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End => {
+                            let left = matches!(key, Key::ArrowLeft | Key::Home);
+                            let arrow = matches!(key, Key::ArrowLeft | Key::ArrowRight);
+                            let c = if arrow && (modifiers.alt || modifiers.ctrl) {
+                                // (Words over line ends, as egui: review N10.)
+                                if left {
+                                    word_left(laid, &buf.text, cur)
+                                } else {
+                                    word_right(laid, &buf.text, cur)
+                                }
+                            } else if (arrow && modifiers.mac_cmd) || (!arrow && !modifiers.ctrl) {
+                                if left { line_start_of(laid, cur) } else { line_end_of(laid, cur) }
+                            } else if !arrow {
+                                if left { 0 } else { total }
+                            } else if left {
+                                cur.saturating_sub(1)
+                            } else {
+                                (cur + 1).min(total)
+                            };
+                            cursor_range.primary = CCursor::new(c);
+                            cursor_range.h_pos = None;
+                            if !modifiers.shift {
+                                cursor_range.secondary = cursor_range.primary;
+                            }
+                        }
+                        Key::ArrowUp | Key::ArrowDown => {
+                            let up = *key == Key::ArrowUp;
+                            if modifiers.command {
+                                cursor_range.primary = CCursor::new(if up { 0 } else { total });
+                                cursor_range.h_pos = None;
+                            } else {
+                                vertical(ui, laid, &buf.text, palette, &mut cursor_range, up);
+                            }
+                            if !modifiers.shift {
+                                cursor_range.secondary = cursor_range.primary;
+                            }
+                        }
+                        Key::Z | Key::Y
+                            if modifiers.matches_logically(Modifiers::COMMAND)
+                                || modifiers
+                                    .matches_logically(Modifiers::COMMAND | Modifiers::SHIFT) =>
+                        {
+                            let redo = *key == Key::Y || modifiers.shift;
+                            let oh = buf.text_hash();
+                            if let Some((next_range, at, old_end, new_end)) =
+                                buf.undo.step(&mut buf.text, redo)
+                            {
+                                buf.invalidate_hash();
+                                let nh = buf.text_hash();
+                                laid.apply_edit(&buf.text, at, old_end, new_end, oh, nh);
+                                cursor_range = next_range;
+                                text_changed = true;
+                            }
+                        }
+                        // (Back to the line's start, a Mac's Cmd+Backspace
+                        // and Ctrl+U, as egui; at its start, the line end
+                        // before: review N9.)
+                        Key::Backspace | Key::U
+                            if (*key == Key::Backspace && modifiers.mac_cmd)
+                                || (*key == Key::U && modifiers.ctrl) =>
+                        {
+                            let from = line_start_of(laid, min_c);
+                            cursor_range = if from == max_c {
+                                delete(buf, laid, max_c.saturating_sub(1), max_c, false)
+                            } else {
+                                delete(buf, laid, from, max_c, false)
+                            };
+                        }
+                        // (To the line's end, a Mac's Cmd+Delete and
+                        // Ctrl+K; at its end, the line end.)
+                        Key::Delete | Key::K
+                            if (*key == Key::Delete && modifiers.mac_cmd)
+                                || (*key == Key::K && modifiers.ctrl) =>
+                        {
+                            let to = line_end_of(laid, max_c);
+                            cursor_range = if to == min_c {
+                                delete(buf, laid, min_c, (min_c + 1).min(total), false)
+                            } else {
+                                delete(buf, laid, min_c, to, false)
+                            };
+                        }
+                        // (A Mac's Ctrl+H, the character before, as egui's;
+                        // on Windows and Linux Ctrl+H is Replace Text.)
+                        Key::H if mac_ctrl => {
+                            cursor_range = if !cursor_range.is_empty() {
+                                delete(buf, laid, min_c, max_c, false)
+                            } else {
+                                delete(buf, laid, cur.saturating_sub(1), cur, true)
+                            };
+                        }
+                        Key::Backspace | Key::W if *key == Key::Backspace || modifiers.ctrl => {
+                            let word = *key == Key::W || modifiers.alt || modifiers.ctrl;
+                            cursor_range = if !cursor_range.is_empty() {
+                                delete(buf, laid, min_c, max_c, false)
+                            } else if word {
+                                delete(buf, laid, word_left(laid, &buf.text, cur), cur, false)
+                            } else {
+                                delete(buf, laid, cur.saturating_sub(1), cur, true)
+                            };
+                        }
+                        Key::Delete
+                            if !modifiers.shift || os != egui::os::OperatingSystem::Windows =>
+                        {
+                            cursor_range = if !cursor_range.is_empty() {
+                                delete(buf, laid, min_c, max_c, false)
+                            } else if modifiers.alt || modifiers.ctrl {
+                                delete(buf, laid, cur, word_right(laid, &buf.text, cur), false)
+                            } else {
+                                // (Key after key one step, as Backspace's:
+                                // review N11.)
+                                delete(buf, laid, cur, (cur + 1).min(total), true)
+                            };
+                        }
+                        Key::Enter if modifiers.is_none() => {
+                            let next = CCursorRange::one(CCursor::new(min.index + 1));
+                            replace(buf, laid, was, "\n", was, next, now, false);
+                            cursor_range = next;
+                            text_changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+                Event::AccessKitActionRequest(_)
+                    if ctx.accesskit_node_builder(id, |_| ()).is_some() =>
+                {
+                    let full = laid.text(ui, &buf.text, palette);
+                    cursor_range.on_event(os, ev, &full, id);
+                }
+                _ => {}
+            }
+            if cursor_range != was {
+                any_cursor_edit = true;
+            }
+        }
+    }
+
+    // The room: what the text needs, after the keys (above).
+    let lines = laid.line_count();
+    let gutter_width = laid.ensure_gutter_width(ui, lines, palette);
+    let (gutter_rect, numbers) =
+        ui.allocate_exact_size(egui::vec2(gutter_width, room), egui::Sense::hover());
+    name_gutter(&numbers, lines);
+    let est_w = (laid.max_cols as f32 + 1.0) * laid.char_advance;
+    let content_w = laid.max_width.max(est_w);
+    let field_w = (content_w + 20.0).max(ui.available_width());
+    let field_h = (lines as f32 * laid.row_height()).max(room);
+    let (_, field_rect) = ui.allocate_space(egui::vec2(field_w, field_h));
+    let mut response = ui.interact(field_rect, id, egui::Sense::click_and_drag());
+    // (Space or Enter in the editor are no click, as in egui's TextEdit:
+    // Help followed the word at the cursor on Space, and Ctrl+Enter went to
+    // its definition: review N1.)
+    response.flags -= egui::response::Flags::FAKE_PRIMARY_CLICKED;
+    let text_origin = egui::pos2(field_rect.left() + 8.0, field_rect.top());
+
+    // Pointer interaction (preserving right-click selection for context menus).
+    if response.hovered() {
+        ui.set_cursor_icon(egui::CursorIcon::Text);
+        ui.output_mut(|o| o.mutable_text_under_cursor = true);
+    }
+    if let Some(pos) = response.interact_pointer_pos() {
+        let local = egui::pos2(pos.x - text_origin.x, pos.y - text_origin.y);
+        let pointer_cursor = laid.ccursor_from_local_pos(ui, &buf.text, palette, local);
+        let mut moved = true;
+        if response.double_clicked() {
+            use egui::text_selection::text_cursor_state::{
+                ccursor_next_word, ccursor_previous_word,
+            };
+            ctx.memory_mut(|m| m.request_focus(id));
+            let (li, col) = laid.line_col(usize::from(pointer_cursor.index));
+            let l = laid.lines[li];
+            let s = &buf.text[l.start..l.end];
+            let rel = CCursor::new(col);
+            let a = usize::from(ccursor_previous_word(s, rel).index) + l.char_start;
+            let b = usize::from(ccursor_next_word(s, rel).index) + l.char_start;
+            cursor_range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+        } else if response.triple_clicked() {
+            ctx.memory_mut(|m| m.request_focus(id));
+            let (li, _) = laid.line_col(usize::from(pointer_cursor.index));
+            let l = laid.lines[li];
+            let end =
+                (l.char_start + l.char_len + usize::from(li + 1 < lines)).min(laid.total_chars);
+            cursor_range = CCursorRange::two(CCursor::new(l.char_start), CCursor::new(end));
+        } else if response.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+            ctx.memory_mut(|m| m.request_focus(id));
+            // (Shift with no cursor before: from the click, as egui; it
+            // selected from the text's start: review N7.)
+            if ui.input(|i| i.modifiers.shift) && prev_cursor_range.is_some() {
+                cursor_range.primary = pointer_cursor;
+                cursor_range.h_pos = None;
+            } else {
+                cursor_range = CCursorRange::one(pointer_cursor);
+            }
+        } else if ui.is_being_dragged(id) && ui.input(|i| i.pointer.primary_down()) {
+            cursor_range.primary = pointer_cursor;
+            cursor_range.h_pos = None;
+        } else if response.hovered()
+            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary))
+        {
+            // (A right press gives the editor the keys, for its menu
+            // (`widgets::text_menu`). In the selection it keeps it, for the
+            // menu's Cut, Copy and Convert Indentation of its lines; outside
+            // it, the caret goes where it was pressed, as a left press puts
+            // it.)
+            ctx.memory_mut(|m| m.request_focus(id));
+            let [min, max] = cursor_range.sorted_cursors();
+            if pointer_cursor.index < min.index || pointer_cursor.index > max.index {
+                cursor_range = CCursorRange::one(pointer_cursor);
+            } else {
+                moved = false;
+            }
+        } else {
+            moved = false;
+        }
+        any_cursor_edit |= moved;
+    }
+
+    // A composition is shown only while the cursor is on it: anything else
+    // that moved the cursor or edited the text ended it (review M2).
+    let preedit = laid.ime_preedit.clone().filter(|(r, _)| {
+        r.as_sorted_char_range() == cursor_range.as_sorted_char_range() && !r.is_empty()
+    });
+    if preedit.is_none() && laid.ime_preedit.is_some() {
+        laid.ime_preedit = None;
+        buf.undo.end_composing();
+    }
+
+    if text_changed {
+        response.mark_changed();
+    }
+    let selection_changed = prev_cursor_range != Some(cursor_range);
+    let final_cursor_range =
+        if has_focus || prev_cursor_range.is_some() || any_cursor_edit || text_changed {
+            state.cursor.set_char_range(Some(cursor_range));
+            Some(cursor_range)
+        } else {
+            None
+        };
+
+    let mut primary_cursor_rect = laid
+        .cursor_local_rect(ui, &buf.text, palette, cursor_range.primary)
+        .translate(text_origin.to_vec2());
+    primary_cursor_rect = primary_cursor_rect.expand(1.5);
+    if (has_focus && (response.changed() || selection_changed)) || reveal {
+        ui.scroll_to_rect(primary_cursor_rect, None);
+    }
+
+    // Reserve ground shape before visible text & gutter.
+    let ground = palette.background.unwrap_or_else(|| ui.visuals().text_edit_bg_color());
+    let radius = ui.style().interact(&response).corner_radius;
+    let ground_shape = ui.painter().add(egui::Shape::Noop);
+    let mut under_shapes =
+        vec![egui::Shape::rect_filled(field_rect.union(gutter_rect), radius, ground)];
+
+    // Visible range from clip_rect.
+    let clip = ui.clip_rect();
+    let lines = laid.line_count();
+    let row_h = laid.row_height();
+    let first_vis = ((clip.top() - text_origin.y) / row_h).floor().max(0.0) as usize;
+    let last_vis =
+        (((clip.bottom() - text_origin.y) / row_h).ceil().max(0.0) as usize + 1).min(lines);
+    let first_vis = first_vis.min(last_vis);
+
+    let code_tokens = match palette.background {
+        Some(g) if crate::script_view::ground_is_dark([g.r(), g.g(), g.b()]) => {
+            mg_uikit::Tokens::DARK
+        }
+        Some(_) => mg_uikit::Tokens::LIGHT,
+        None => mg_uikit::tokens(&ctx),
+    };
+    let (cursor_line, cursor_col) = laid.line_col(usize::from(cursor_range.primary.index));
+    let ppp = ctx.pixels_per_point();
+    let current = final_cursor_range.filter(|r| r.is_empty()).map(|_| cursor_line);
+    let current_band = current.map(|li| {
+        let y = text_origin.y + laid.row_y(li, ppp);
+        egui::Rangef::new(y, y + row_h)
+    });
+    if let Some(y) = current_band {
+        let sight = clip.x_range();
+        under_shapes.push(egui::Shape::rect_filled(
+            egui::Rect::from_x_y_ranges(sight, y),
+            0.0,
+            code_tokens.current_line,
+        ));
+        let text_x = egui::Rangef::new(gutter_rect.right().max(sight.min), sight.max);
+        for edge in crate::script_view::hairlines(y, ppp) {
+            under_shapes.push(egui::Shape::rect_filled(
+                egui::Rect::from_x_y_ranges(text_x, edge),
+                0.0,
+                code_tokens.current_line_edge,
+            ));
+        }
+    }
+
+    // Visible-only selection rectangles (a composition is underlined
+    // instead, as egui shows one: review N5).
+    let selected_color = code_tokens.code_select;
+    if let Some(r) = final_cursor_range.filter(|r| !r.is_empty() && preedit.is_none()) {
+        let [min, max] = r.sorted_cursors();
+        let (min_li, min_col) = laid.line_col(usize::from(min.index));
+        let (max_li, max_col) = laid.line_col(usize::from(max.index));
+        let vis_from = min_li.max(first_vis);
+        let vis_to = max_li.min(last_vis.saturating_sub(1));
+        for li in vis_from..=vis_to {
+            let g = laid.ensure_line(ui, &buf.text, li, palette);
+            let Some(row) = g.rows.first() else { continue };
+            let left =
+                if li == min_li { row.x_offset(egui::text::CharIndex::from(min_col)) } else { 0.0 };
+            let right = if li == max_li {
+                row.x_offset(egui::text::CharIndex::from(max_col))
+            } else {
+                row.size.x
+            };
+            if li == max_li && li != min_li && right <= left {
+                continue;
+            }
+            let right = if right <= left && li != max_li { left + 3.0 } else { right };
+            let y = text_origin.y + laid.row_y(li, ppp);
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(text_origin.x + left, y),
+                egui::pos2(text_origin.x + right, y + row.size.y),
+            );
+            under_shapes.push(egui::Shape::rect_filled(rect, 0.0, selected_color));
+        }
+    }
+    ui.painter().set(ground_shape, egui::Shape::Vec(under_shapes));
+
+    // Paint ONLY visible lines and visible gutter rows.
+    let text_painter = ui.painter_at(field_rect.intersect(clip).expand(1.0));
+    for li in first_vis..last_vis {
+        let g = laid.ensure_line(ui, &buf.text, li, palette);
+        let y = text_origin.y + laid.row_y(li, ppp);
+        text_painter.galley(egui::pos2(text_origin.x, y), g, palette.colors[0]);
+    }
+    let marks = Marks { bookmarks: &buf.bookmarks, numbered: &buf.numbered };
+    laid.paint_gutter_visible(
+        ui,
+        gutter_rect.left(),
+        text_origin,
+        first_vis,
+        last_vis,
+        current_band.and(current),
+        palette.colors[0],
+        palette,
+        marks,
+    );
+
+    // A composition underlined, its active part more strongly; the caret
+    // where the composition puts its own (none while a part is active), as
+    // egui's `paint_ime_preedit_text_visuals` (review N5).
+    let mut caret = Some(primary_cursor_rect);
+    if let Some((r, active)) = &preedit {
+        let [start, end] = r.sorted_cursors();
+        let (s, e) = (usize::from(start.index), usize::from(end.index));
+        let ime = ui.visuals().ime_composition;
+        let active = active.as_ref().map(|a| {
+            let len = e - s;
+            (s + usize::from(a.start.index).min(len), s + usize::from(a.end.index).min(len))
+        });
+        let mut underline = |from: usize, to: usize, stroke| {
+            let painter = &text_painter;
+            laid.paint_underline(ui, painter, &buf.text, palette, text_origin, (from, to), stroke);
+        };
+        match active {
+            Some((a, b)) if a < b => {
+                underline(s, a, ime.inactive_underline_stroke);
+                underline(a, b, ime.active_underline_stroke);
+                underline(b, e, ime.inactive_underline_stroke);
+                caret = None;
+            }
+            Some((a, _)) => {
+                underline(s, e, ime.inactive_underline_stroke);
+                let rect = laid.cursor_local_rect(ui, &buf.text, palette, CCursor::new(a));
+                caret = Some(rect.translate(text_origin.to_vec2()).expand(1.5));
+            }
+            None => {
+                underline(s, e, ime.inactive_underline_stroke);
+                caret = None;
+            }
+        }
+    }
+
+    if has_focus {
+        let now = ui.input(|i| i.time);
+        if text_changed || any_cursor_edit {
+            laid.last_interaction_time = now;
+        }
+        if ui.input(|i| i.focused)
+            && let Some(caret) = caret
+        {
+            egui::text_selection::visuals::paint_text_cursor(
+                ui,
+                &text_painter,
+                caret,
+                now - laid.last_interaction_time,
+            );
+        }
+        let to_global = ctx.layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+        ui.output_mut(|o| {
+            o.ime = Some(egui::output::IMEOutput {
+                purpose: egui::IMEPurpose::Normal,
+                rect: to_global * field_rect,
+                cursor_rect: to_global * primary_cursor_rect,
+                should_interrupt_composition: false,
+            });
+        });
+    }
+
+    state.store(&ctx, id);
+
+    if let Some(prev) = &prev_text_for_a11y {
+        let full = laid.text(ui, &buf.text, palette);
+        if response.changed() {
+            response.widget_info(|| {
+                egui::WidgetInfo::text_edit(ui.is_enabled(), prev.as_str(), buf.text.as_str(), "")
+            });
+        } else if selection_changed && let Some(r) = final_cursor_range {
+            let info = egui::WidgetInfo::text_selection_changed(
+                ui.is_enabled(),
+                r.as_sorted_char_range(),
+                buf.text.as_str(),
+            );
+            response.output_event(egui::output::OutputEvent::TextSelectionChanged(info));
+        } else {
+            response.widget_info(|| {
+                egui::WidgetInfo::text_edit(ui.is_enabled(), prev.as_str(), buf.text.as_str(), "")
+            });
+        }
+        egui::text_selection::accesskit_text::update_accesskit_for_text_widget(
+            &ctx,
+            id,
+            final_cursor_range,
+            egui::accesskit::Role::MultilineTextInput,
+            egui::emath::TSTransform::from_translation(text_origin.to_vec2()),
+            &full,
+        );
+        describe_line(&response, cursor_line + 1, lines);
+    }
+
+    CodeEditOutput {
+        response,
+        text_origin,
+        gutter_rect,
+        cursor_range: final_cursor_range,
+        current_band,
+        cursor_line_col: (cursor_line, cursor_col),
     }
 }
 
@@ -620,7 +1839,11 @@ mod tests {
                 laid.begin(ui, &palette);
                 let before = laid.galleys.clone();
                 let g = laid.text(ui, text, &palette);
-                let kept = laid.galleys.iter().filter(|g| before.iter().any(|b| Arc::ptr_eq(b, g)));
+                let kept = laid
+                    .galleys
+                    .iter()
+                    .flatten()
+                    .filter(|g| before.iter().flatten().any(|b| Arc::ptr_eq(b, g)));
                 out = Some((g, laid.galleys.len() - kept.count()));
             });
             out.unwrap()
@@ -649,6 +1872,207 @@ mod tests {
         same_as_whole(&ctx, &replaced);
     }
 
+    /// The lines an edit leaves ([`LaidOut::apply_edit`]) are those the new
+    /// text laid out afresh has ([`LaidOut::sync_full`]): over thousands of
+    /// edits made as the editor makes them (a range replaced, a text
+    /// replaced whole as Replace All and Tab do, Undo and Redo), with
+    /// characters of two bytes and more, CRLF line ends, edits at lines'
+    /// ends and of their line ends, block comments and raw strings opened
+    /// and closed over lines, and the empty text.
+    #[test]
+    fn an_edit_s_lines_are_the_new_text_s_laid_out_afresh() {
+        use crate::script_view::ScriptBuffer;
+        use egui::text::{CCursor, CCursorRange};
+        let ctx = egui::Context::default();
+        const PIECES: [&str; 18] = [
+            "x",
+            "é",
+            "ü€",
+            "𝄞",
+            "\n",
+            "\r\n",
+            "\r",
+            "\t",
+            " ",
+            "/*",
+            "*/",
+            "r\"",
+            "\"",
+            "\"\"",
+            "//",
+            "int n = 1;",
+            "{\n    é;\n}\n",
+            "\n\n",
+        ];
+        // (A small generator of its own: the same edits on every run.)
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n.max(1) as u64) as usize
+        };
+        // (The palette the window's, as the editor's.)
+        let same = |ui: &Ui, laid: &LaidOut, text: &str, at: &str| {
+            let palette = Palette::for_ui(&ScriptStyle::default(), ui);
+            let mut fresh = LaidOut::default();
+            let h = crate::script_tools::hash(text);
+            fresh.sync_full(ui, text, h, &palette);
+            assert!(laid.in_sync(text, h), "{at}: not in step with {text:?}");
+            assert_eq!(laid.lines, fresh.lines, "{at}: {text:?}");
+            assert_eq!(laid.total_chars, fresh.total_chars, "{at}: {text:?}");
+            assert_eq!(laid.max_cols, fresh.max_cols, "{at}: {text:?}");
+        };
+        let mut edits = 0;
+        run(&ctx, |ui| {
+            let palette = Palette::for_ui(&ScriptStyle::default(), ui);
+            for start in ["", "é", "void main()\r\n{\r\n    int é = 1;\r\n}\r\n", "/* a\nb */ c\n"]
+            {
+                let mut buf = ScriptBuffer::read(b"", (0, 0, 0));
+                buf.set_text(start.to_owned());
+                let mut laid = LaidOut::default();
+                laid.sync_full(ui, &buf.text, buf.text_hash(), &palette);
+                same(ui, &laid, &buf.text, "at first");
+                for round in 0..600 {
+                    let chars = laid.total_chars();
+                    let at = format!("{start:?}, edit {round}");
+                    let was = buf.text_hash();
+                    let (a, b) = (next(chars + 1), next(chars + 1));
+                    let (a, b) = (a.min(b), a.max(b).min(a + 6));
+                    match next(10) {
+                        // (Replace All and Tab: the text replaced whole.)
+                        0 | 1 => {
+                            let mut whole = buf.text.clone();
+                            let piece = PIECES[next(PIECES.len())];
+                            let ba = laid.byte_of_char(&whole, a);
+                            whole.insert_str(ba, piece);
+                            if next(2) == 0 {
+                                whole = whole.replacen('x', "é", 1);
+                            }
+                            let cur = CCursorRange::default();
+                            let (s, o, n) = buf.replace_diff_undo(whole, cur, cur, 0.0);
+                            laid.apply_edit(&buf.text, s, o, n, was, buf.text_hash());
+                        }
+                        // (Undo and Redo.)
+                        2 => {
+                            if let Some((_, s, o, n)) = buf.undo.step(&mut buf.text, next(3) == 0) {
+                                buf.invalidate_hash();
+                                laid.apply_edit(&buf.text, s, o, n, was, buf.text_hash());
+                            }
+                        }
+                        // (A range replaced: typed over, deleted, pasted.)
+                        _ => {
+                            let piece = if next(4) == 0 { "" } else { PIECES[next(PIECES.len())] };
+                            let (ba, bb) =
+                                (laid.byte_of_char(&buf.text, a), laid.byte_of_char(&buf.text, b));
+                            let r = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+                            let (s, o, n) =
+                                buf.replace_range_undo(ba..bb, piece, r, r, 0.0, next(2) == 0);
+                            laid.apply_edit(&buf.text, s, o, n, was, buf.text_hash());
+                        }
+                    }
+                    same(ui, &laid, &buf.text, &at);
+                    edits += 1;
+                }
+                // Back to the start, Undo by Undo: the empty text too.
+                while buf.undo.can_step(false) {
+                    let was = buf.text_hash();
+                    let (_, s, o, n) = buf.undo.step(&mut buf.text, false).unwrap();
+                    buf.invalidate_hash();
+                    laid.apply_edit(&buf.text, s, o, n, was, buf.text_hash());
+                    same(ui, &laid, &buf.text, "undone");
+                }
+                let all = laid.total_chars();
+                let was = buf.text_hash();
+                let r = CCursorRange::two(CCursor::new(0), CCursor::new(all));
+                let end = buf.text.len();
+                let (s, o, n) = buf.replace_range_undo(0..end, "", r, r, 0.0, false);
+                laid.apply_edit(&buf.text, s, o, n, was, buf.text_hash());
+                same(ui, &laid, "", "all deleted");
+            }
+        });
+        assert_eq!(edits, 2400);
+    }
+
+    /// Lines of another text than the one edited (a script rewritten where
+    /// its editor was not drawn) are not stamped as the edited text's: they
+    /// are left to be laid out afresh.
+    #[test]
+    fn an_edit_of_another_text_than_the_lines_one_leaves_them_stale() {
+        let ctx = egui::Context::default();
+        run(&ctx, |ui| {
+            let palette = Palette::for_ui(&ScriptStyle::default(), ui);
+            let before = "int a;\nint b;\nint c;\n";
+            let mut laid = LaidOut::default();
+            laid.sync_full(ui, before, crate::script_tools::hash(before), &palette);
+            // (Rewritten meanwhile, shorter, a character of two bytes first.)
+            let rewritten = "é;\nint c;\n";
+            let edited = "é;\nint total;\n";
+            let (was, now) =
+                (crate::script_tools::hash(rewritten), crate::script_tools::hash(edited));
+            assert!(!laid.in_sync(rewritten, was));
+            laid.apply_edit(edited, 8, 9, 13, was, now);
+            assert!(!laid.in_sync(edited, now), "stamped as the edited text's");
+            laid.sync_full(ui, edited, now, &palette);
+            assert!(laid.in_sync(edited, now));
+            assert_eq!(laid.line_count(), 3);
+        });
+    }
+
+    /// A word move lands where egui's lands in the whole text, from every
+    /// character of texts with blank, indented and CR LF lines (they read
+    /// only the lines back to one with something but spaces: review K's N10).
+    /// The places between a CR and its LF are left out: the editor's lines
+    /// end at the pair, which egui takes as one grapheme.
+    #[test]
+    fn word_moves_land_where_egui_s_do_in_the_whole_text() {
+        use egui::text::CCursor;
+        use egui::text_selection::text_cursor_state::{ccursor_next_word, ccursor_previous_word};
+        let ctx = egui::Context::default();
+        let texts = [
+            "",
+            "\n",
+            "int abc;\n\n  int de;\n",
+            "\n\n\n  x\n\n",
+            "a.b(c);\r\n\r\n\t\tif (é) { n_1 = 2; }\r\n   \r\n",
+            "  \n  \n// note é\n\r\n\"s t\"; x\r",
+            "word",
+            "   ",
+        ];
+        let mut moves = 0;
+        run(&ctx, |ui| {
+            let palette = Palette::for_ui(&ScriptStyle::default(), ui);
+            for text in texts {
+                let mut laid = LaidOut::default();
+                laid.sync_full(ui, text, crate::script_tools::hash(text), &palette);
+                for c in 0..=laid.total_chars {
+                    // (Not between a CR and its LF: one line end to the
+                    // editor, one grapheme to egui.)
+                    if c > 0
+                        && text.chars().nth(c - 1) == Some('\r')
+                        && text.chars().nth(c) == Some('\n')
+                    {
+                        continue;
+                    }
+                    let left = ccursor_previous_word(text, CCursor::new(c)).index;
+                    let right = ccursor_next_word(text, CCursor::new(c)).index;
+                    assert_eq!(
+                        word_left(&laid, text, c),
+                        usize::from(left),
+                        "{text:?} left of {c}"
+                    );
+                    assert_eq!(
+                        word_right(&laid, text, c),
+                        usize::from(right).min(laid.total_chars),
+                        "{text:?} right of {c}"
+                    );
+                    moves += 2;
+                }
+            }
+        });
+        assert!(moves > 150, "{moves}");
+    }
+
     /// The line numbers: one a line, each as the number laid out alone
     /// in the numbers' color and the editor's pitch; those of lines added
     /// laid out as they come, the others kept; the gutter as wide as the
@@ -675,8 +2099,13 @@ mod tests {
         assert_eq!(nine.len(), 9);
         let (twelve, last, width) = frame(12);
         assert_eq!(twelve.len(), 12);
-        assert!(nine.iter().zip(&twelve).all(|(a, b)| Arc::ptr_eq(a, b)), "kept");
-        let ours = twelve.last().unwrap();
+        assert!(
+            nine.iter()
+                .zip(&twelve)
+                .all(|(a, b)| Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap())),
+            "kept"
+        );
+        let ours = twelve.last().unwrap().as_ref().unwrap();
         assert_eq!(ours.text(), "12");
         assert_eq!(ours.size(), last.size());
         assert_eq!(ours.size().y, palette.pitch());
@@ -685,7 +2114,12 @@ mod tests {
         assert_eq!((GUTTER_LEFT, GUTTER_RIGHT), (12.0, 10.0));
         let (five, _, _) = frame(5);
         assert_eq!(five.len(), 5);
-        assert!(five.iter().zip(&twelve).all(|(a, b)| Arc::ptr_eq(a, b)), "kept");
+        assert!(
+            five.iter()
+                .zip(&twelve)
+                .all(|(a, b)| Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap())),
+            "kept"
+        );
     }
 
     /// The editor's lines are the board's 18 points apart at its 13-point

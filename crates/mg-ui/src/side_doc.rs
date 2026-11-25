@@ -163,10 +163,8 @@ impl SideDoc for tileset_view::TilesetDoc {
 
 /// The tips of a side editor's OK and Cancel, at its header's end: OK's
 /// and Cancel's.
-pub(crate) const OK_CANCEL_TIPS: [&str; 2] = [
-    "Save and close the window",
-    "Close the window without saving, asking about unsaved changes first",
-];
+pub(crate) const OK_CANCEL_TIPS: [&str; 2] =
+    ["Save and close the window", "Close the window, asking about unsaved changes first"];
 
 /// What a side editor's OK or Cancel (`pressed`) does, at its header's end
 /// (a script's, M4's U12; a hak's, the last at its foot, U21): `before` run first,
@@ -197,7 +195,9 @@ pub(crate) fn pressed_ok_cancel(
                 return app.side_doc(tab).is_none();
             }
             let saved = !unsaved || app.save_side(tab);
-            if saved {
+            // (A script saved keeps its editor's state for the session, as
+            // the closing question's Save does.)
+            if saved && !app.script_kept_on_close(tab) {
                 app.forget_side(tab);
             } else if app.failed_saving(tab).is_some() && !app.side_closing.contains(tab) {
                 app.side_closing.push_back(tab.clone());
@@ -406,6 +406,14 @@ impl Moonglow {
         }
     }
 
+    /// Whether `tab` is a script whose editor's state stays for the session
+    /// as its tab closes: nothing in it unsaved (a clean close, the
+    /// closing question's Save, the header's OK; the owner's ruling of
+    /// 2026-11-25). With unsaved text (Don't Save) it is let go.
+    fn script_kept_on_close(&self, tab: &Tab) -> bool {
+        matches!(tab, Tab::Script(key) if self.scripts.get(key).is_some_and(|b| !b.is_dirty()))
+    }
+
     /// What the closing question asks about a tab: its document's name
     /// and whether it has unsaved changes. A side editor's, or (for its
     /// Cancel: their tabs' close keeps what is unsaved, for the module's
@@ -545,6 +553,21 @@ impl Moonglow {
                 self.side_closing.push_back(tab.clone());
             }
             return false;
+        }
+        if let Tab::Script(key) = tab {
+            let dirty = self.scripts.get(key).is_some_and(|b| b.is_dirty());
+            if dirty {
+                if !self.side_closing.contains(tab) {
+                    self.side_closing.push_back(tab.clone());
+                }
+                return false;
+            }
+            // (With nothing unsaved its editor's state stays for the
+            // session, as before the question was asked: its bookmarks,
+            // history, codepage and external editor's file when it is
+            // opened again. The question's Save keeps it likewise, Don't
+            // Save lets it go: `closing_window`'s `close`.)
+            return true;
         }
         match self.side_doc(tab) {
             Some(d) if d.has_unsaved() => {
@@ -812,11 +835,17 @@ fn carry_on(app: &mut Moonglow, ctx: &egui::Context) {
     }
 }
 
-/// A side editor's tab closed, its document let go.
+/// A side editor's tab closed, its document let go: a script's only with
+/// its unsaved text (Don't Save). A script saved (the question's Save, or
+/// saved meanwhile) keeps its editor's state for the session, as a clean
+/// close does (the owner's ruling of 2026-11-25): a buffer with no tab is
+/// never unsaved.
 /// (Noted for Reopen Closed Tab as a close without the question is: the
 /// Talk Table tab; a side editor's is not noted.)
 fn close(app: &mut Moonglow, tab: &Tab) {
-    app.forget_side(tab);
+    if !app.script_kept_on_close(tab) {
+        app.forget_side(tab);
+    }
     app.closed(tab);
     if let Some(path) = app.dock.find_tab(tab) {
         app.dock.remove_tab(path);

@@ -90,7 +90,8 @@ fn nui_tool<'t>(h: &'t mut Harness<'_, Moonglow>, name: &'t str) -> egui_kittest
     use mg_uikit::header::{self, Place};
     let rec = header::records(&h.ctx, NUI_HEADER).into_iter().next().expect("the header");
     let place = rec.places.iter().find(|(n, _)| n == name).map(|(_, p)| *p);
-    let more: &'static str = Box::leak(header::more_name(NUI_HEADER).into_boxed_str());
+    static MORE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let more = MORE.get_or_init(|| header::more_name(NUI_HEADER)).as_str();
     if place == Some(Place::More) && h.query_by_label(more).is_none() {
         h.get_by_label(NUI_HEADER).get_by_label(header::MORE).click();
         settle(h);
@@ -1099,44 +1100,7 @@ fn every_component() -> Value {
 /// past its edge, every one-line field in sight as wide as its text.
 #[track_caller]
 fn fits(h: &Harness<'_, Moonglow>, dock: egui::Rect, what: &str) {
-    let in_sight = |n: &egui_kittest::Node<'_>| {
-        let r = n.rect();
-        r.left() >= dock.left() - 0.5
-            && r.top() >= dock.top() - 0.5
-            && r.bottom() <= dock.bottom()
-            && r.width() > 0.0
-    };
-    let past: Vec<String> = h
-        .get_all_by(|n| n.bounding_box().is_some())
-        .filter(in_sight)
-        .filter(|n| n.rect().right() > dock.right() + 0.5)
-        // (A scroll's bar with nothing to scroll is said to stand past its
-        // edge, as wide as egui's room for it: not drawn.)
-        .filter(|n| n.accesskit_node().role() != egui::accesskit::Role::ScrollBar)
-        .map(|n| {
-            let a = n.accesskit_node();
-            format!("{:?} {:?} {:?} {:?}", a.role(), a.label(), a.value(), n.rect())
-        })
-        .collect();
-    assert!(past.is_empty(), "{what}: past the edge {past:?}");
-    let margins = {
-        let m = mg_uikit::controls::FIELD_MARGIN;
-        f32::from(m.left) + f32::from(m.right)
-    };
-    let cut: Vec<String> = h
-        .get_all_by_role(egui::accesskit::Role::TextInput)
-        .filter(in_sight)
-        .filter_map(|n| {
-            let value = n.accesskit_node().value()?;
-            let font = egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE);
-            let words = h.ctx.fonts_mut(|f| {
-                f.layout_no_wrap(value.clone(), font, egui::Color32::WHITE).size().x
-            });
-            (n.rect().width() + 0.5 < words + margins)
-                .then(|| format!("{value:?}: {} for {}", n.rect().width(), words + margins))
-        })
-        .collect();
-    assert!(cut.is_empty(), "{what}: cut short in their fields {cut:?}");
+    fits_dock(h, dock, what, egui::FontId::proportional(mg_uikit::metrics::BODY_SIZE), true);
 }
 
 /// Every panel fits the Right Dock from its least width: for every
@@ -1221,34 +1185,7 @@ fn properties_are_never_taller_where_wider_and_come_to_rest() {
         assert!(row, "{canvas}");
         h.get_all_by_label_contains(canvas).next().unwrap().click();
         settle(&mut h);
-        let mut was: Option<f32> = None;
-        let mut least: Option<(u32, f32)> = None;
-        let mut changes = Vec::new();
-        for w in 270..=480u32 {
-            h.state_mut().settings.right_dock_width = Some(w);
-            settle(&mut h);
-            let high = properties_height(&h);
-            if let Some((at, low)) = least {
-                assert!(high <= low + 0.5, "{canvas}: {low} at {at}, {high} at {w}");
-            }
-            if was.is_some_and(|b| (high - b).abs() > 0.5) {
-                changes.push(w);
-            }
-            was = Some(high);
-            if least.is_none_or(|(_, low)| high < low) {
-                least = Some((w, high));
-            }
-        }
-        for w in changes {
-            for at in w.saturating_sub(2)..=w + 2 {
-                h.state_mut().settings.right_dock_width = Some(at);
-                for high in (700..=900).step_by(20) {
-                    h.set_size(egui::vec2(1600.0, high as f32));
-                    settle(&mut h);
-                }
-            }
-            h.set_size(egui::vec2(1600.0, 900.0));
-        }
+        sweep_dock_heights(&mut h, canvas, properties_height, true);
     }
 }
 
@@ -2582,18 +2519,7 @@ fn the_bindings_table_is_never_taller_where_wider() {
         let foot = h.get_by_label("Events go to the module's event script").rect().bottom();
         foot - top
     };
-    let mut least: Option<(u32, f32)> = None;
-    for w in 270..=480u32 {
-        h.state_mut().settings.right_dock_width = Some(w);
-        settle(&mut h);
-        let high = height(&h);
-        if let Some((at, low)) = least {
-            assert!(high <= low + 0.5, "{low} at {at}, {high} at {w}");
-        }
-        if least.is_none_or(|(_, low)| high < low) {
-            least = Some((w, high));
-        }
-    }
+    sweep_dock_heights(&mut h, "bindings", height, false);
 }
 
 /// The Bindings panel's Custom window ID (M4's U19): typed with none set, it
@@ -2772,7 +2698,10 @@ fn new_errors_open_checks_with_the_design_hidden() {
     settle(&mut h);
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::NuiSource(key())));
     settle(&mut h);
-    assert!(h.state().tab_rect(&Tab::Nui(key())).is_none_or(|_| true));
+    let at = h.state().dock.find_tab(&Tab::Nui(key())).unwrap();
+    let leaf =
+        h.state().dock.leaf(egui_dock::NodePath { surface: at.surface, node: at.node }).unwrap();
+    assert_ne!(leaf.tabs[leaf.active.0], Tab::Nui(key()), "design tab covered by another tab");
     h.state_mut().settings.hide_log = true;
     let edit = mg_edit::Edit::SetResource { key: key(), data: Some(b"{".to_vec()) };
     h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Out", vec![edit])));
@@ -3056,4 +2985,82 @@ fn properties_open_at_their_top_on_a_chip_s_click() {
     assert!(binding.top() < header.bottom() + 24.0, "{binding:?} scrolled from {header:?}");
     let content = h.get_by_label("Content").rect();
     assert!(right_dock_rect(&h).contains_rect(content), "Content in sight: {content:?}");
+}
+
+/// The NUI designer's Checks (5.2's W4): a row's menu (a right click, on
+/// its words too) has Copy (its kind, control and whole message) and Copy
+/// All (every row, in its order); the message cut short is whole in its
+/// tip.
+#[test]
+fn a_check_s_row_copies_from_its_menu_and_its_tip_says_it_whole() {
+    use mg_ui::row_copy::{COPY, COPY_ALL};
+    let mut h = designer_of(Mode::Tabs, 1100.0, with_a_warning());
+    h.get_all_by_label("Checks").next().unwrap().click();
+    settle(&mut h);
+    let lost = "What the player enters here is lost";
+    let rows = h.get_by_label(nui_names::CHECKS_ROWS);
+    let words = rows.get_by_label_contains(lost);
+    let node = words.accesskit_node();
+    let message = node.label().filter(|l| !l.is_empty()).or(node.value()).unwrap_or_default();
+    let at = words.rect().left_center() + egui::vec2(40.0, 0.0);
+    let right = |h: &mut Harness<'_, Moonglow>| {
+        h.hover_at(at);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.run();
+    };
+    let copied = |h: &mut Harness<'_, Moonglow>, item: &str| -> Vec<String> {
+        h.get_all_by_label(item).last().unwrap_or_else(|| panic!("{item} in the menu")).click();
+        h.step();
+        let out = (h.output().platform_output.commands.iter())
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        h.run();
+        out
+    };
+    let line = format!("Warning: Text input · Enter text, {message}");
+    right(&mut h);
+    assert_eq!(copied(&mut h, COPY), [line.as_str()], "Copy: the whole message");
+    right(&mut h);
+    assert_eq!(copied(&mut h, COPY_ALL), [line.as_str()], "Copy All: the one row");
+    let tip = tip_at(&mut h, egui::Rect::from_center_size(at, egui::vec2(2.0, 2.0)));
+    assert!(tip.is_some_and(|t| t.lines().any(|l| l == message)), "the message in its tip");
+    // The keyboard on the row's place (its Tab stop, a label here, its
+    // control found by no link): Ctrl+C copies the row, Shift+F10 opens
+    // its menu, Copy taking the keys, Escape giving them back.
+    let place = "Text input · Enter text";
+    let link = |h: &Harness<'_, Moonglow>| {
+        let rows = h.get_by_label(nui_names::CHECKS_ROWS);
+        rows.get_by_label(place).accesskit_node().is_focused()
+    };
+    h.get_by_label(nui_names::CHECKS_ROWS).get_by_label(place).focus();
+    h.run();
+    assert!(link(&h), "its place has the keyboard");
+    h.event(egui::Event::Copy);
+    h.step();
+    let out: Vec<String> = (h.output().platform_output.commands.iter())
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    h.run();
+    assert_eq!(out, [line.as_str()], "Ctrl+C: the row the keyboard is on");
+    press_now(&mut h, egui::Modifiers::SHIFT, egui::Key::F10);
+    h.run();
+    let copy = h.get_all_by_label(COPY).last().expect("Shift+F10 opens its menu");
+    assert!(copy.accesskit_node().is_focused(), "Copy has the keyboard");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.query_by_label(COPY_ALL).is_none(), "Escape closes it");
+    assert!(link(&h), "Escape gives the keyboard back to its place");
 }

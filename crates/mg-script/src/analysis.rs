@@ -15,7 +15,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use crate::lex::{Token, TokenKind, tokenize};
-use crate::outline::{Outline, outline};
+use crate::outline::Outline;
 
 /// The engine's implicit include.
 pub const NWSCRIPT: &str = "nwscript";
@@ -177,7 +177,7 @@ impl File {
             };
             members.push(MemberUse { span: t.span.clone(), of });
         }
-        let outline = outline(text.as_bytes());
+        let outline = crate::outline::outline_with_tokens(&text, &toks);
         let mut locals = Vec::new();
         for f in &outline.functions {
             let Some(body) = f.body.clone() else { continue };
@@ -207,11 +207,40 @@ impl File {
         File { text, outline, idents, locals, members, toks }
     }
 
-    /// A local's documentation: the comments above its statement.
+    /// A local's documentation: the comments above its statement, then the
+    /// one that trails the statement's `;` on its line.
     fn local_doc(&self, l: &Local) -> (String, String) {
         let Some(at) = l.statement else { return Default::default() };
         let raw = self.toks.partition_point(|t| t.span.start < at);
-        crate::outline::doc_before(&self.text, &self.toks, raw)
+        let above = crate::outline::doc_before(&self.text, &self.toks, raw);
+        // The statement's `;`: the first after the name outside brackets
+        // (a `for` header's `;` is inside its parentheses, a block's `{`
+        // ends the search).
+        let mut depth = 0i32;
+        let mut semi = None;
+        for (k, t) in self
+            .toks
+            .iter()
+            .enumerate()
+            .skip(self.toks.partition_point(|t| t.span.start < l.decl.start))
+        {
+            match &self.text[t.span.clone()] {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth -= 1,
+                "{" | "}" => break,
+                ";" if depth <= 0 => {
+                    semi = Some(k);
+                    break;
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+        let trailing =
+            semi.and_then(|k| crate::outline::trailing_comment(&self.text, &self.toks, k));
+        crate::outline::doc_with_trailing(&self.text, &self.toks, above, trailing)
     }
 
     /// The member name after `.` at (or just before) a byte offset.
@@ -225,25 +254,30 @@ impl File {
 
     /// The identifier at (or just before) a byte offset.
     fn ident_at(&self, offset: usize) -> Option<Range<usize>> {
-        self.idents.iter().find(|r| r.start <= offset && offset <= r.end).cloned()
+        let i = self.idents.partition_point(|r| r.start <= offset);
+        i.checked_sub(1).and_then(|k| self.idents.get(k)).filter(|r| offset <= r.end).cloned()
     }
 
     /// The local or parameter a name at `at` refers to.
     fn local(&self, name: &str, at: usize) -> Option<&Local> {
         self.locals
             .iter()
-            .filter(|l| l.name == name && l.decl.start <= at && l.scope.contains(&at))
+            .filter(|l| {
+                l.name == name
+                    && (l.decl.contains(&at) || (l.decl.start <= at && l.scope.contains(&at)))
+            })
             .max_by_key(|l| l.decl.start)
     }
 
     /// A name's span inside a declaration's span (after its type).
     fn name_in(&self, span: &Range<usize>, name: &str) -> Range<usize> {
-        self.idents
+        let start = self.idents.partition_point(|r| r.start < span.start);
+        self.idents[start..]
             .iter()
-            .filter(|r| r.start >= span.start && r.end <= span.end)
-            .find(|r| self.word(r) == name)
+            .take_while(|r| r.start < span.end)
+            .find(|r| r.end <= span.end && self.word(r) == name)
             .cloned()
-            .unwrap_or(span.clone())
+            .unwrap_or_else(|| span.clone())
     }
 }
 
@@ -429,6 +463,11 @@ impl Index {
         self.files.remove(&name.to_ascii_lowercase());
     }
 
+    /// The indexed source text for `name`, if cached and readable.
+    pub fn text(&self, name: &str) -> Option<&Arc<str>> {
+        self.files.get(&name.to_ascii_lowercase())?.as_ref().map(|f| &f.text)
+    }
+
     fn file(&mut self, name: &str, sources: &mut dyn Sources) -> Option<&File> {
         let name = name.to_ascii_lowercase();
         if !self.files.contains_key(&name) {
@@ -478,8 +517,17 @@ impl Index {
         sources: &mut dyn Sources,
     ) -> Option<Declaration> {
         let unit = self.unit(file, sources);
+        self.top_level_in(&unit, name, sources)
+    }
+
+    fn top_level_in(
+        &mut self,
+        unit: &[String],
+        name: &str,
+        sources: &mut dyn Sources,
+    ) -> Option<Declaration> {
         let mut prototype = None;
-        for f in &unit {
+        for f in unit {
             let Some(idx) = self.file(f, sources) else { continue };
             let o = &idx.outline;
             for func in o.functions.iter().filter(|x| x.name == name) {
@@ -941,8 +989,9 @@ impl Index {
             .chain(f.outline.globals.iter().map(|g| g.name.clone()))
             .chain(f.outline.structs.iter().map(|s| s.name.clone()))
             .collect();
+        let unit = self.unit(&name, sources);
         for n in names {
-            if let Some(d) = self.top_level(&name, &n, sources).filter(|d| d.at.file == name)
+            if let Some(d) = self.top_level_in(&unit, &n, sources).filter(|d| d.at.file == name)
                 && !out.iter().any(|o: &Declaration| o.at == d.at)
             {
                 out.push(d);
@@ -1043,7 +1092,7 @@ mod tests {
         let inner = member(&mut idx, &mut src, "mKept.inner", 0, 1).unwrap();
         assert_eq!(
             (inner.signature.as_str(), inner.doc.as_str()),
-            ("struct Inner inner (struct Mark)", "")
+            ("struct Inner inner (struct Mark)", "after inner")
         );
         for (needle, nth) in [("GetMark().vPos", 0), ("gMark.vPos", 0), ("mArg.vPos", 0)] {
             let pos = member(&mut idx, &mut src, needle, nth, 1).unwrap();
@@ -1219,5 +1268,39 @@ mod tests {
         for n in ["Twice", "LIMIT", "Pair", "GetSelf", "TRUE"] {
             assert!(names.contains(&n.to_string()), "{n}");
         }
+    }
+
+    /// A local's trailing comment documents it, and the next local takes
+    /// none of it.
+    #[test]
+    fn a_locals_trailing_comment_documents_it() {
+        const TEXT: &str = "void main()\n{\n    int nCount = 0; // How many.\n    int nOther;\n}\n";
+        const FILES: &[(&str, &str)] = &[("main", TEXT)];
+        let mut src = sources(FILES);
+        let mut idx = Index::new();
+        let d = idx.declaration_at("main", at(TEXT, "nCount", 0), &mut src).unwrap();
+        assert_eq!((d.kind, d.doc.as_str()), (DeclKind::Local, "How many."));
+        let d = idx.declaration_at("main", at(TEXT, "nOther", 0), &mut src).unwrap();
+        assert_eq!(d.doc, "");
+    }
+
+    #[test]
+    fn parameter_declaration_resolves_references_and_renames() {
+        const PARAM_SRC: &str = "void Foo(int nBar)\n{\n    int x = nBar + 1;\n}\n";
+        const FILES: &[(&str, &str)] = &[("p", PARAM_SRC)];
+        let mut src = sources(FILES);
+        let mut idx = Index::new();
+        let all = vec!["p".to_string()];
+        let decl_at = at(PARAM_SRC, "nBar)", 0);
+        let decl = idx.declaration_at("p", decl_at, &mut src).expect("param decl");
+        assert_eq!(decl.kind, DeclKind::Parameter);
+        assert_eq!(decl.at.span.start, decl_at);
+        let refs = idx.references(&decl, &all, &mut src);
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert_eq!(refs[0].span.start, decl_at);
+        assert_eq!(refs[1].span.start, at(PARAM_SRC, "nBar + 1", 0));
+        let renamed = idx.rename(&decl, "nBaz", &all, &mut src).unwrap();
+        assert_eq!(renamed.len(), 2);
+        assert_eq!(idx.text("p").map(|t| t.as_ref()), Some(PARAM_SRC));
     }
 }

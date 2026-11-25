@@ -172,15 +172,31 @@ fn cut(text: &str, width: f32, always: bool, measure: &mut dyn FnMut(&str) -> f3
     if text.ends_with('…') && measure(text) <= width {
         return text.to_string();
     }
-    let mut chars: Vec<char> = text.chars().collect();
-    loop {
-        let kept: String = chars.iter().collect::<String>().trim_end().to_string();
-        let shown = format!("{kept}…");
-        if chars.is_empty() || measure(&shown) <= width {
-            return shown;
+    let mut lo = 0;
+    let mut hi = text.len();
+    let mut buf = String::with_capacity(text.len() + '…'.len_utf8());
+    while lo < hi {
+        let mut mid = lo + (hi - lo).div_ceil(2);
+        while !text.is_char_boundary(mid) {
+            mid += 1;
         }
-        chars.pop();
+        buf.clear();
+        buf.push_str(text[..mid].trim_end());
+        buf.push('…');
+        if measure(&buf) <= width {
+            lo = mid;
+        } else {
+            let mut prev = mid - 1;
+            while !text.is_char_boundary(prev) {
+                prev -= 1;
+            }
+            hi = prev;
+        }
     }
+    buf.clear();
+    buf.push_str(text[..lo].trim_end());
+    buf.push('…');
+    buf
 }
 
 /// How cells are sized in a grid.
@@ -555,16 +571,24 @@ impl<'a> GalleryCell<'a> {
                 }
             }
         }
-        // The rim, inside the tile over the picture: hovered, selected
-        // (with the keys or without), the keys' cursor.
+        // The rim, outside the tile against the ground it stands on (the
+        // owner's ruling: the light theme's `accent` would vanish on the
+        // dark `thumb-bg` inside it): hovered, selected (with the keys or
+        // without), the keys' cursor. Hovered in the light theme it is
+        // `text-off` (2.8:1 on `panel`, 3.2:1 on `inset`; `raised-hover`
+        // there, 1.5:1, hardly showed), weaker than selected's `text-3`.
+        let hover = match crate::theme::applied(ui.ctx()) {
+            Some(crate::Theme::Light) => t.text_off,
+            _ => t.raised_hover,
+        };
         let (width, color) = match (selected, state.keys, hovered, state.cursor && state.keys) {
             (true, true, _, _) => (2.0, t.accent),
             (true, false, _, _) => (2.0, t.text_3),
             (false, _, _, true) => (1.0, t.accent),
-            (false, _, true, _) => (1.0, t.raised_hover),
+            (false, _, true, _) => (1.0, hover),
             _ => (1.0, t.line),
         };
-        painter.rect_stroke(tile, radius, Stroke::new(width, color), StrokeKind::Inside);
+        painter.rect_stroke(tile, radius, Stroke::new(width, color), StrokeKind::Outside);
         if self.no_model && tile.width() >= 40.0 {
             let font = FontId::proportional(DETAIL_SIZE);
             let galley = painter.layout_no_wrap("No model".into(), font, t.thumb_badge_text);
@@ -603,13 +627,14 @@ impl<'a> GalleryCell<'a> {
         let font = self.name_font();
         let room = rect.width();
         let shown = ui.fonts_mut(|f| {
-            let mut measure =
-                |s: &str| f.layout_no_wrap(s.to_string(), font.clone(), name_color).size().x;
+            let mut measure = |s: &str| {
+                f.layout_no_wrap(s.to_string(), font.clone(), Color32::PLACEHOLDER).size().x
+            };
             name_lines(self.name, room, lines, &mut measure)
         });
         let mut y = tile.bottom() + gap;
         for text in shown {
-            let galley = painter.layout_no_wrap(text, font.clone(), name_color);
+            let galley = painter.layout_no_wrap(text, font.clone(), Color32::PLACEHOLDER);
             let at =
                 pos2(rect.center().x - galley.size().x / 2.0, y + (line - galley.size().y) / 2.0);
             painter.galley(at, galley, name_color);
@@ -619,11 +644,12 @@ impl<'a> GalleryCell<'a> {
             let font = FontId::proportional(DETAIL_SIZE);
             let color = if enabled { t.text_3 } else { t.text_off };
             let text = ui.fonts_mut(|f| {
-                let mut measure =
-                    |s: &str| f.layout_no_wrap(s.to_string(), font.clone(), color).size().x;
+                let mut measure = |s: &str| {
+                    f.layout_no_wrap(s.to_string(), font.clone(), Color32::PLACEHOLDER).size().x
+                };
                 cut(detail, room, false, &mut measure)
             });
-            let galley = painter.layout_no_wrap(text, font, color);
+            let galley = painter.layout_no_wrap(text, font, Color32::PLACEHOLDER);
             let top = y.min(rect.bottom() - DETAIL_LINE);
             let at = pos2(rect.center().x - galley.size().x / 2.0, top);
             painter.galley(at, galley, color);

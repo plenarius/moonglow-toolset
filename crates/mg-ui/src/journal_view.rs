@@ -114,8 +114,8 @@ impl JournalView {
 struct Seen {
     revision: u64,
     /// The game's data it was read with (its talk table), by
-    /// `Moonglow::load_order`.
-    load_order: u64,
+    /// `Moonglow::game_names`.
+    names: (u64, u64),
     /// The language its words are shown in.
     language: mg_core::Language,
     /// The module has `module.jrl`.
@@ -213,15 +213,14 @@ fn set_entries(what: &str, category: usize, list: Vec<Struct>) -> Action {
 /// selection the journal no longer has let go of, the category of an
 /// entry chosen opened out. `None` without a module.
 fn begin(app: &mut Moonglow) -> Option<Arc<Seen>> {
+    let names = app.game_names();
     let ws = app.ws.as_mut()?;
     let revision = ws.revision();
     let language = crate::text::edit_language();
-    let load_order = app.load_order;
     let game = app.game.clone();
     let view = &mut app.journal_view;
-    let kept = |c: &&Arc<Seen>| {
-        c.revision == revision && c.language == language && c.load_order == load_order
-    };
+    let kept =
+        |c: &&Arc<Seen>| c.revision == revision && c.language == language && c.names == names;
     if let Some(c) = view.copy.as_ref().filter(kept) {
         return Some(c.clone());
     }
@@ -234,7 +233,7 @@ fn begin(app: &mut Moonglow) -> Option<Arc<Seen>> {
     };
     let game = game.as_deref();
     let seen = cats.as_deref().unwrap_or_default().iter().map(|c| seen_category(game, c)).collect();
-    let copy = Arc::new(Seen { revision, load_order, language, exists, cats, seen });
+    let copy = Arc::new(Seen { revision, names, language, exists, cats, seen });
     // A selection the journal no longer has (an Undo) is let go of.
     let valid = |n: &Node| match *n {
         Node::Category(c) => c < copy.seen.len(),
@@ -427,20 +426,13 @@ fn header(ui: &mut Ui, view: &JournalView, copy: &Seen) -> Asked {
     use crate::icons::editor as icon;
     use mg_uikit::header::{EditorHeader, Item};
     let selected = view.selected.is_some();
-    let can_add = !matches!(view.selected, Some(Node::Entry(..)));
+    let can_add = true;
     let can_paste = matches!(
         (&view.clipboard, view.selected),
         (Some(Clip::Category(_)), _) | (Some(Clip::Entry(_)), Some(_))
     );
     let any = !copy.seen.is_empty();
-    let tips = crate::blueprint::OK_CANCEL_TIPS;
-    let buttons = [
-        mg_uikit::KitButton::new(None, "OK").tip(tips[0]),
-        mg_uikit::KitButton::new(None, "Cancel").tip(tips[1]),
-    ];
-    let gap = mg_uikit::header::HEADER_GAP;
-    let end_width = buttons.iter().map(|b| b.width(ui)).sum::<f32>() + gap;
-    let out = EditorHeader::new(JOURNAL_HEADER)
+    let header = EditorHeader::new(JOURNAL_HEADER)
         .left(
             Item::button(icon::ADD, "Add")
                 .enabled(can_add)
@@ -458,21 +450,9 @@ fn header(ui: &mut Ui, view: &JournalView, copy: &Seen) -> Asked {
         .left(Item::icon(icon::EXPAND_ALL, "Expand All").enabled(any).tip("Open every category"))
         .left(
             Item::icon(icon::COLLAPSE_ALL, "Collapse All").enabled(any).tip("Close every category"),
-        )
-        .show_with_end(ui, end_width, |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            let mut pressed = None;
-            for b in buttons {
-                let words = b.accessible_name().to_string();
-                if ui.add(b).clicked() {
-                    pressed = Some(match words.as_str() {
-                        "Cancel" => crate::blueprint::Pressed::Cancel,
-                        _ => crate::blueprint::Pressed::Ok,
-                    });
-                }
-            }
-            pressed
-        });
+        );
+    let out =
+        crate::widgets::header_with_ok_cancel(ui, header, None, crate::blueprint::OK_CANCEL_TIPS);
     Asked {
         add: out.clicked("Add"),
         copy: out.clicked("Copy"),
@@ -505,7 +485,7 @@ fn editor(app: &mut Moonglow, ui: &mut Ui) -> Option<crate::blueprint::Pressed> 
     };
     if asked.add {
         match view.selected {
-            Some(Node::Category(c)) => {
+            Some(Node::Category(c) | Node::Entry(c, _)) => {
                 let mut list = entries(&cats[c]).to_vec();
                 list.push(new_entry(&list));
                 view.selected = Some(Node::Entry(c, list.len() - 1));
@@ -517,7 +497,6 @@ fn editor(app: &mut Moonglow, ui: &mut Ui) -> Option<crate::blueprint::Pressed> 
                 view.selected = Some(Node::Category(list.len() - 1));
                 actions.push(set_categories("Add journal category", exists, list));
             }
-            Some(Node::Entry(..)) => {}
         }
         view.reveal = true;
     }
@@ -548,16 +527,21 @@ fn editor(app: &mut Moonglow, ui: &mut Ui) -> Option<crate::blueprint::Pressed> 
             Some(Node::Category(c)) => {
                 let mut list = cats.to_vec();
                 list.remove(c);
+                view.selected = (!list.is_empty()).then(|| Node::Category(c.min(list.len() - 1)));
                 actions.push(set_categories("Delete journal category", exists, list));
             }
             Some(Node::Entry(c, e)) => {
                 let mut list = entries(&cats[c]).to_vec();
                 list.remove(e);
+                view.selected = Some(if list.is_empty() {
+                    Node::Category(c)
+                } else {
+                    Node::Entry(c, e.min(list.len() - 1))
+                });
                 actions.push(set_entries("Delete journal entry", c, list));
             }
             None => {}
         }
-        view.selected = None;
     }
     if asked.expand {
         view.open = (0..copy.seen.len()).collect();
@@ -725,8 +709,10 @@ fn draw_row(
         };
         let b = egui::Button::new("").frame(false).min_size(arrow.size());
         let r = ui.put(arrow, b).on_hover_text(hint);
-        let named = format!("{verb} {name}");
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &named));
+        r.widget_info(|| {
+            let named = format!("{verb} {name}");
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &named)
+        });
         mg_uikit::say_expanded(&r, open);
         let color = if selected { t.on_fill } else { t.text_3 };
         icon.paint(
@@ -760,10 +746,9 @@ fn draw_row(
         painter.galley(egui::pos2(at, cy - galley.size().y / 2.0), galley, color);
         w
     };
-    let said = match row {
+    match row {
         Row::Root => {
             put("Root".into(), font, text, x, right - x);
-            "Root".to_string()
         }
         Row::Category(c) => {
             let cat = &copy.seen[c];
@@ -782,13 +767,11 @@ fn draw_row(
                 + if count.is_empty() { 0.0 } else { 4.0 + GAP + measure(&count, &small) };
             let name_w = put(cat.name.clone(), font, text, x, right - x - tail - GAP);
             x += name_w + GAP;
-            let tag_w = put(tag.clone(), small.clone(), text_3, x, right - x);
+            let tag_w = put(tag, small.clone(), text_3, x, right - x);
             x += tag_w + GAP + 4.0;
             if !count.is_empty() {
-                put(count.clone(), small, text_3, x, right - x);
+                put(count, small, text_3, x, right - x);
             }
-            // (Its name and tag alone: whether it is open its arrow says.)
-            format!("{} {tag}", cat.name)
         }
         Row::Entry(c, e) => {
             let entry = &copy.seen[c].entries[e];
@@ -803,10 +786,10 @@ fn draw_row(
                 (1.0, guide),
             );
             let id = format!("[{:04}]", entry.id);
-            put(id.clone(), mono, text_2, x, 48.0);
+            put(id, mono, text_2, x, 48.0);
             x += 48.0 + GAP;
             if entry.end {
-                let words = painter.layout_no_wrap("End".into(), small.clone(), t.on_status);
+                let words = painter.layout_no_wrap("End".into(), small, t.on_status);
                 let size = words.size() + egui::vec2(8.0, 2.0);
                 let badge = egui::Rect::from_min_size(egui::pos2(x, cy - size.y / 2.0), size);
                 painter.rect_filled(badge, 3.0, t.ok);
@@ -814,14 +797,26 @@ fn draw_row(
             }
             x += 32.0 + GAP;
             put(entry.text.clone(), font, text_2, x, right - x);
-            match entry.end {
-                true => format!("{id} {}, finishes the category", entry.text),
-                false => format!("{id} {}", entry.text),
-            }
         }
-        Row::Empty => String::new(),
-    };
+        Row::Empty => {}
+    }
     r.widget_info(|| {
+        // (Its name and tag alone: whether it is open its arrow says.)
+        let said = match row {
+            Row::Root => "Root".to_string(),
+            Row::Category(c) => {
+                let cat = &copy.seen[c];
+                format!("{} [{}]", cat.name, cat.tag)
+            }
+            Row::Entry(c, e) => {
+                let entry = &copy.seen[c].entries[e];
+                match entry.end {
+                    true => format!("[{:04}] {}, finishes the category", entry.id, entry.text),
+                    false => format!("[{:04}] {}", entry.id, entry.text),
+                }
+            }
+            Row::Empty => String::new(),
+        };
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &said)
     });
     match (

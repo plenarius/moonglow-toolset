@@ -292,8 +292,10 @@ impl WaveInfo {
             let body = pos + 8;
             match &head[..4] {
                 b"fmt " if info.format.is_none() => {
-                    info.format =
-                        data.get(body..body + 2).map(|t| u16::from_le_bytes([t[0], t[1]]));
+                    info.format = (size >= 2)
+                        .then(|| data.get(body..body + 2))
+                        .flatten()
+                        .map(|t| u16::from_le_bytes([t[0], t[1]]));
                     info.channels = (size >= 4)
                         .then(|| data.get(body + 2..body + 4))
                         .flatten()
@@ -379,7 +381,9 @@ pub fn container_of_start(start: &[u8], whole: bool) -> Result<Option<Container>
     let Some(head) = start.get(..12) else { return more(12) };
     if &head[..4] == b"RIFF" && &head[8..12] == b"WAVE" {
         // (The chunks walked as `WaveInfo::read` walks them, to the first
-        // `fmt `'s tag, or a `data` chunk before any.)
+        // `fmt `'s tag, or a `data` chunk before any: past the RIFF size,
+        // which it doesn't believe, and asking for as far as a chunk says
+        // it goes, which `read` gives no more of than the file has.)
         let mut pos = 12usize;
         loop {
             let Some(chunk) = start.get(pos..pos.saturating_add(8)) else {
@@ -388,9 +392,12 @@ pub fn container_of_start(start: &[u8], whole: bool) -> Result<Option<Container>
             let size = u64::from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]));
             let body = pos + 8;
             match &chunk[..4] {
-                b"fmt " => {
-                    // (Its channels too, which follow the tag.)
-                    let Some(tag) = start.get(body..body + 4) else { return more(body + 4) };
+                // (One too short for a tag is walked past, as `WaveInfo::read`
+                // does, to a later `fmt `'s.)
+                b"fmt " if size >= 2 => {
+                    // (Its channels too when present, following the tag.)
+                    let need = if size >= 4 { 4 } else { 2 };
+                    let Some(tag) = start.get(body..body + need) else { return more(body + need) };
                     return Ok(Some(match u16::from_le_bytes([tag[0], tag[1]]) {
                         WAVE_MPEGLAYER3 => Container::Mp3,
                         _ => Container::Wave,
@@ -1439,5 +1446,47 @@ mod tests {
         let (told, read) = by_start(&noise, 4096);
         assert_eq!(told, None);
         assert!(read < 2 << 20, "{read}");
+    }
+
+    #[test]
+    fn malformed_riff_chunk_sizes_are_bounded_and_short_fmt_checked() {
+        // 1-byte fmt chunk followed by an MP3-tag-like chunk must not read past fmt.
+        let one_byte_fmt = riff(&[chunk(b"fmt ", &[0x55]), chunk(b"JUNK", &[0, 0])]);
+        assert_eq!(WaveInfo::read(&one_byte_fmt).format, None);
+
+        // Minimal 2-byte fmt chunk succeeds without demanding 4 bytes.
+        let two_byte_fmt = riff(&[chunk(b"fmt ", &[1, 0])]);
+        assert_eq!(container_of_start(&two_byte_fmt, false), Ok(Some(Container::Wave)));
+
+        // A start says what the whole file says, however a size lies: a
+        // chunk claiming 4 GiB (what is read stops at the file's end), a
+        // RIFF size short of the chunks (not believed, as `WaveInfo::read`
+        // and the decoder don't), a `fmt ` too short for a tag before one
+        // that has it.
+        let mut bogus = b"RIFF\x24\x00\x00\x00WAVEJUNK".to_vec();
+        bogus.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut short_riff = riff(&[
+            chunk(b"JUNK", &[0; 6]),
+            chunk(b"fmt ", &mpeglayer3_fmt(1)),
+            chunk(b"data", &mp3(2, false)),
+        ]);
+        short_riff[4..8].copy_from_slice(&4u32.to_le_bytes());
+        let two_fmts = riff(&[
+            chunk(b"fmt ", &[0x55]),
+            chunk(b"fmt ", &mpeglayer3_fmt(1)),
+            chunk(b"data", &mp3(2, false)),
+        ]);
+        for (name, bytes) in
+            [("bogus", &bogus), ("short riff", &short_riff), ("two fmts", &two_fmts)]
+        {
+            let whole = container(bytes).map(|c| c.0);
+            for first in [1, 12, 20, 4096] {
+                let (told, most) = by_start(bytes, first);
+                assert_eq!(told, whole, "{name}, first ask {first}");
+                assert!(most <= bytes.len(), "{name}");
+            }
+        }
+        assert_eq!(container(&short_riff).map(|c| c.0), Some(Container::Mp3));
+        assert_eq!(container(&two_fmts).map(|c| c.0), Some(Container::Mp3));
     }
 }
