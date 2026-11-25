@@ -3030,12 +3030,8 @@ fn a_plugin_s_command_makes_a_module_from_the_welcome_page() {
     let made = h.get_all_by_label("New Made Module…").last().unwrap();
     assert!(folder.bottom() <= made.rect().top(), "after Open Folder…");
     assert!(!made.accesskit_node().is_disabled(), "enabled with no module");
-    let picture = mg_testkit::scratch_dir("ui-plugin-new-module-shots");
-    h.render().expect("render").save(picture.join("file-menu.png")).unwrap();
     h.key_press(egui::Key::Escape);
     settle(&mut h);
-    h.render().expect("render").save(picture.join("welcome.png")).unwrap();
-    eprintln!("the menu and the page: {}", picture.display());
     // On the Welcome page: it runs, writes the folder and opens it.
     let answers = &mut h.state_mut().plugins.answers;
     answers.push_back(Some(mg_plugin::Answer::Path(target.clone())));
