@@ -288,5 +288,8 @@ Privacy & Security › Open Anyway (since macOS 15, right-click › Open no
 longer does it). For a Gatekeeper-clean release, sign with a Developer ID
 (`CODESIGN_IDENTITY="Developer ID Application: ..."`) and notarize the disk
 image (`xcrun notarytool submit --wait`, then `xcrun stapler staple`).
+The release workflow does both on a `v*` tag when the repository's
+`release` environment holds a Developer ID certificate and a notary API
+key (`.github/workflows/release.yml`); without them it signs ad hoc.
 Opening a module by double-clicking it in the Finder is not supported yet
 (the app would start without it); open modules from the app.
