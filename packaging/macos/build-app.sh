@@ -5,8 +5,8 @@
 #   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 # The app is signed ad hoc, so Gatekeeper refuses its first start until the
 # user allows it (System Settings > Privacy & Security > Open Anyway); to
-# pass Gatekeeper, sign it with a Developer ID (CODESIGN_IDENTITY) and
-# notarize the dmg.
+# pass Gatekeeper, sign it with a Developer ID (CODESIGN_IDENTITY, which
+# also signs the dmg) and notarize the dmg.
 set -eu
 cd "$(dirname "$0")/../.."
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -29,7 +29,14 @@ cp LICENSE "$APP/Contents/Resources/"
 python3 packaging/third_party_licenses.py --target aarch64-apple-darwin \
     --output "$APP/Contents/Resources/THIRD-PARTY-LICENSES.txt"
 [ -d docs/manual ] && cp -R docs/manual "$APP/Contents/Resources/manual"
-codesign --force --deep --options runtime --sign "${CODESIGN_IDENTITY:--}" "$APP"
+# Inside-out, not --deep (which Apple advises against); notarization takes
+# only Developer ID signatures with a secure timestamp.
+sign() {
+    codesign --force --options runtime ${CODESIGN_IDENTITY:+--timestamp} \
+        --sign "${CODESIGN_IDENTITY:--}" "$@"
+}
+sign "$APP/Contents/MacOS/mg"
+sign "$APP"
 
 DMG="$OUT/Moonglow-$VERSION-macos.dmg"
 STAGE="$OUT/dmg"
@@ -39,4 +46,7 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Moonglow Toolset" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG"
+fi
 echo "$DMG"
