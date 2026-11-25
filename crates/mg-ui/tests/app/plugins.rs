@@ -2972,3 +2972,78 @@ fn a_test_s_window_keeps_sign_ins_in_memory() {
     app.plugins.system_keychain = true;
     assert!(app.plugin_network().sign_ins.in_system_keychain());
 }
+
+/// API 0.12: a plugin's command that makes a module is in File and on
+/// the Welcome page with no module open; the folder it unzips opens as
+/// the module, as the nasher target it names.
+#[test]
+fn a_plugin_s_command_makes_a_module_from_the_welcome_page() {
+    use std::io::Write;
+    let dir = mg_testkit::scratch_dir("ui-plugin-new-module");
+    let _ = std::fs::remove_dir_all(&dir);
+    let (plugins, target) = (dir.join("plugins"), dir.join("made"));
+    std::fs::create_dir_all(plugins.join("maker")).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    // The module's folder as a zip: two targets, the second opened.
+    let cfg = "[Package]\nname = \"Made\"\n\n[Sources]\ninclude = \"**/*.json\"\n\n\
+               [Target]\nname = \"core\"\nfile = \"made.mod\"\ninclude = \"**/*.json\"\n\n\
+               [Target]\nname = \"bare\"\nfile = \"made.mod\"\ninclude = \"**/*.json\"\n";
+    let ifo = mg_gff::to_json(&mg_gff::Gff::new(*b"IFO "), mg_core::Codepage::default()).unwrap();
+    let ifo = mg_gff::to_json_text(&ifo, mg_gff::TextStyle::NASHER);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, text) in [("top/nasher.cfg", cfg), ("top/module.ifo.json", ifo.as_str())] {
+        zip.start_file(name, opts).unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    let zip = zip.finish().unwrap().into_inner();
+    let hex: String = zip.iter().map(|b| format!("\\x{b:02x}")).collect();
+    std::fs::write(
+        plugins.join("maker/plugin.cfg"),
+        "[plugin]\nid = \"test.maker\"\nname = \"Maker\"\nversion = \"1\"\napi = \"0.12\"\n\
+         license = \"MIT\"\n\n[command]\nid = \"make\"\ntitle = \"New Made Module…\"\n\
+         menu = \"Maker\"\nnew = \"module\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plugins.join("maker/main.luau"),
+        format!(
+            "local mg = require(\"@moonglow\")\nmg.command(\"make\", function(ctx)\n\
+             local folder = ctx.ui:open_folder()\n\
+             folder:unzip(\"{hex}\", {{ strip = 1 }})\n\
+             folder:open({{ target = \"bare\" }})\nend)\n"
+        ),
+    )
+    .unwrap();
+    let mut app = app_with(Vec::new());
+    app.plugin_dir = Some(plugins);
+    app.load_plugins();
+    app.enable_plugin("test.maker", true);
+    let mut h = harness(app, 1600.0, 900.0);
+    settle(&mut h);
+    assert!(h.state().ws.is_none());
+    // In File, after Open Folder…, and enabled with no module.
+    h.get_by_label("File").click();
+    h.run();
+    // (The menu's rows are the last: the Welcome page has both too.)
+    let folder = h.get_all_by_label("Open Folder…").last().unwrap().rect();
+    let made = h.get_all_by_label("New Made Module…").last().unwrap();
+    assert!(folder.bottom() <= made.rect().top(), "after Open Folder…");
+    assert!(!made.accesskit_node().is_disabled(), "enabled with no module");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    // On the Welcome page: it runs, writes the folder and opens it.
+    let answers = &mut h.state_mut().plugins.answers;
+    answers.push_back(Some(mg_plugin::Answer::Path(target.clone())));
+    answers.push_back(Some(mg_plugin::Answer::Yes));
+    h.get_by_label("New Made Module…").click();
+    h.run_steps(4);
+    settle(&mut h);
+    assert!(target.join("nasher.cfg").is_file() && target.join("module.ifo.json").is_file());
+    let location = h.state().ws.as_ref().and_then(|ws| ws.module.location.clone());
+    let opened = matches!(&location,
+        Some(mg_module::ModuleLocation::Project { root, target: t })
+            if t == "bare" && root.canonicalize().ok() == target.canonicalize().ok());
+    assert!(opened, "{location:?}; log {:?}", h.state().log.entries);
+    let _ = std::fs::remove_dir_all(&dir);
+}

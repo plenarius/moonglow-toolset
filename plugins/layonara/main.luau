@@ -4,6 +4,7 @@ local mg = require("@moonglow")
 local api = require("api")
 local res = require("res")
 local forge = require("forge")
+local newmodule = require("newmodule")
 
 local KEEP_LIVE, TAKE_MINE = "Keep live's", "Take mine"
 local UPDATE, ANYWAY, CANCEL =
@@ -207,6 +208,8 @@ mg.command("fetch", api.command(function(ctx)
 end))
 
 mg.command("forge", api.command(forge.fetch))
+
+mg.command("new-module", api.command(newmodule.run))
 
 -- The items to send: each with its docs, the revision its copy came from, and (for review) its Forge export.
 local function items_of(ctx, chosen, with_forge: boolean)

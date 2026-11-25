@@ -76,6 +76,7 @@ fn outcome(sh: &Shared, label: String) -> Outcome {
         settings: sh.settings_set.take(),
         said: Vec::new(),
         above_nwsync: sh.above_nwsync.take(),
+        open: sh.open.take(),
     }
 }
 

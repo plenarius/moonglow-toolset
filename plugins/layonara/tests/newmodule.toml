@@ -1,0 +1,72 @@
+# New Layonara Module…: the module folder's zip from a stub of the builder service, unzipped into a folder chosen.
+module = "module"
+root = false
+
+[[test]]
+name = "the zip goes into an empty folder, which opens as target bare"
+command = "new-module"
+signed_in = "alice"
+yes = true
+files = ["new-empty"]
+written = ["nasher.cfg", "moonglow.toml", "module.ifo.json", "areas/bare/start.are.json", "core/uti/sword.uti.json", "README.txt"]
+opened = "new-empty"
+opened_as = "bare"
+log = ["layonara-module-20261124-abc1234: 6 files into new-empty, opened as the module (nasher target bare)"]
+edits = 0
+[[test.reply]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/module-folder"
+file = "replies/module-folder.zip"
+headers = { content-type = "application/zip", content-disposition = 'attachment; filename="layonara-module-20261124-abc1234.zip"' }
+[[test.request]]
+method = "GET"
+url = "https://builders.layonara.com/api/v1/builder/module-folder"
+signin = true
+
+[[test]]
+name = "a folder with files in it: asked first, and nothing is written on no"
+command = "new-module"
+signed_in = "alice"
+files = ["new-full"]
+written = []
+opened = ""
+log = ["Nothing was written into new-full: choose an empty folder."]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/module-folder"
+file = "replies/module-folder.zip"
+
+[[test]]
+name = "a 403 says who the routes are for, and asks for no folder"
+command = "new-module"
+signed_in = "carol"
+files = ["new-empty"]
+written = []
+opened = ""
+log = ["You are not a builder. (Layonara's builder routes are for the Builders group)"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/module-folder"
+status = 403
+json = { detail = "You are not a builder." }
+
+[[test]]
+name = "a 429 says when to try again"
+command = "new-module"
+signed_in = "alice"
+files = ["new-empty"]
+written = []
+opened = ""
+log = ["20 module folder downloads a day (try again in 3600 s)"]
+[[test.reply]]
+url = "https://builders.layonara.com/api/v1/builder/module-folder"
+status = 429
+headers = { retry-after = "3600" }
+json = { detail = "20 module folder downloads a day", retry_after = 3600 }
+
+[[test]]
+name = "not signed in: offered Sign In, and stops when it is declined"
+command = "new-module"
+files = ["new-empty"]
+written = []
+opened = ""
+log = ["Not signed in to Layonara (Plugins › Layonara › Sign In)"]
+request = []

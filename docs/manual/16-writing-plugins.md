@@ -17,7 +17,7 @@ plugin can call. What plugins are to the people who use them is in
 
 You need a text editor and Moonglow. Nothing is compiled or built.
 
-The plugin API is **experimental** (version 0.11): it may change in a
+The plugin API is **experimental** (version 0.12): it may change in a
 later release, and Versions, below, says what that means for a plugin.
 
 ## A first plugin
@@ -237,7 +237,7 @@ running the plugin, to list what it adds.
 | `id` | Needed. The plugin's name for programs, the same wherever it is installed: `author.plugin-name`, in lower-case letters, digits, `.`, `-` and `_`. Settings and keys are kept under it, so don't change it between versions. |
 | `name` | Needed. Its name for people. |
 | `version` | Needed. The plugin's own version, as you number it. |
-| `api` | Needed. The plugin API it was written for: `"0.11"`, or an earlier one (`"0.10"`, `"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
+| `api` | Needed. The plugin API it was written for: `"0.12"`, or an earlier one (`"0.11"`, `"0.10"`, `"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
 | `license` | Needed. Its license, as an [SPDX](https://spdx.org/licenses/) name. Moonglow is GPL-3.0, and a plugin runs inside it: choose a license compatible with the GPL (`GPL-3.0-or-later`, `MIT`, `Apache-2.0`…). |
 | `description` | One or two sentences on what it does, shown on the Plugins tab. |
 | `author` | Who wrote it. Repeat the line for each author. |
@@ -253,6 +253,7 @@ running the plugin, to list what it adds.
 | `key` | A key it has until the user chooses another: `Ctrl+Alt+T` (`Ctrl`, `Alt`, `Shift` and a key's name; Ctrl is Cmd on macOS). A key something else has already is reported as a conflict in Options › Keyboard, so choose an unusual one, or none. |
 | `for` | What it is for (since API 0.4): kinds of object, `creature`, `door`, `encounter`, `item`, `placeable`, `sound`, `store`, `trigger`, `waypoint`, and `area`, as a list (`"placeable, creature"`) or one to a line; since API 0.5 also a kind's placed objects alone (`"placed creature"`) or its blueprints alone (`"creature blueprint"`), `tile`, and another resource's type (`nss`, `dlg`, `ifo`, `fac`, `jrl`, `2da`, `gui`, `jui`). It is then in their right-click menus too, and runs on what was clicked ([Commands on what is selected](#commands-on-what-is-selected)). |
 | `menu` | The submenu it is in (since API 0.7), in every menu it is in (the right-click menus and the Plugins menu): `"Make"`, or nested with `›` (or `>`) between the names, `"Make › Crafting"`. Each submenu is made once, where the first command naming it is, and holds the commands that name it in the manifest's order; the title is then the command's name within it (`Workbench…`). Quick Open, Options › Keyboard and `mg plugin list` name it by the whole path, `Make › Crafting › Workbench`, so it is still found by name. Left out, the command is in the menu itself, as before. |
+| `new` | `"module"`: the command makes a module (since API 0.12, in Moonglow's Layonara build). It runs with no module open, as well as with one (its `ctx.module` is empty either way, and it may not edit: its job writes a folder with `folder:unzip` or `folder:write` and opens it with `folder:open`), and it is in **File** after **Open Folder…** and on the Welcome page's Start, besides the Plugins menu. |
 
 `[check]`, once for each check:
 
@@ -736,6 +737,26 @@ The files are written when the handler returns, in place of those of the
 same names (no copy is kept, and Undo does not take them back). A name
 is a name: not a path into a folder of the folder, nothing above it,
 nothing hidden.
+
+A zip's files go into the folder whole (since API 0.12, in Moonglow's
+Layonara build), with the same leave, and the folder may then be opened
+as the module, once its files are written:
+
+```lua
+local got = folder:unzip(zip_bytes, { strip = 1 })  -- the zip's top folder left off
+got.files, got.skipped                              -- 42, { "top/.editorconfig" }
+folder:open({ target = "bare" })                    -- a nasher project, as its target bare
+```
+
+`unzip` keeps the zip's folders (`areas/bare/start.are.json`); hidden
+files and links are left out and listed in `skipped`, and a path that
+leads out of the folder (`..`, a drive) is an error, with nothing of the
+zip written. `open` is for a command's job or a wizard's: when the
+handler has returned and the files are written, Moonglow opens the
+folder as **File › Open Folder…** does (asking first to save the open
+module's changes), as the nasher target named, or the one it opens by
+default. A command that makes a module (`new = "module"`, above) is the
+one to do it from: it is offered with no module open.
 
 The hak is written when the handler returns, before its edits go in (they
 may name it). Resources are added to a hak that is already there, and a
@@ -1457,7 +1478,8 @@ and says what is to come of it (each key may be left out):
 | `downloaded` | The haks the job downloads (API 0.11), all of them, by name: `downloaded = ["tb_intro_"]`. Nothing is put in the hak folder. |
 | `above_nwsync` | The haks it puts over NWSync (API 0.11), all of them. |
 | `hak_folder` | A folder (from the test file's) whose files are in the test's scratch hak folder before the job (API 0.11): a hak there already, which a download of the same SHA-256 leaves as it is. |
-| `written` | The files the job writes into folders the user chose (`folder:write`, or an export's `out:write`), by their names, every one in any order (since 3.3.0). Nothing is written. |
+| `written` | The files the job writes into folders the user chose (`folder:write`, `folder:unzip` by their paths with `/`, or an export's `out:write`), by their names, every one in any order (since 3.3.0). Nothing is written. |
+| `opened`, `opened_as` | The folder the job opens as the module (`folder:open`, API 0.12), by its name in the test file's folder, and the nasher target it names (left out: none); `opened = ""`, none. A command that makes a module runs on an empty module. |
 | `content` | For an export: what the files it writes have, by name, each text part of the file (`content = { "creatures.csv" = ["guard,gate_guard"] }`; since API 0.6). |
 | `shows` | For a panel: texts it shows, each part of one of its texts (a value's as `Areas: 1`, a button's, a list item's; since API 0.6; a field's as its label and the value it is given, `Tint: #2a4d8f`, since API 0.9). |
 | `log` | Lines the log must have: each is part of one. |

@@ -8,7 +8,7 @@ generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
 
 # Plugin API reference
 
-Everything a plugin's code can use, for plugin API 0.11. The API is
+Everything a plugin's code can use, for plugin API 0.12. The API is
 experimental: a later release may change it, and each change is listed
 in the API's [change list](https://github.com/jadzziaa/moonglow-toolset/tree/develop/docs/plugins).
 How plugins work and how to write one is in
@@ -29,7 +29,7 @@ nothing, and a check is reported as failed.
 
 | | |
 | --- | --- |
-| `mg.api` | The plugin API of the Moonglow running, as text: `"0.11"`. |
+| `mg.api` | The plugin API of the Moonglow running, as text: `"0.12"`. |
 | `mg.command(id, handler)` | Registers the function for the command the manifest declares as `id`. `handler(ctx)` makes its edits with `ctx.edit`. It may return what Undo calls the change, as `{ label = "…" }` or the text alone; else that is the command's title. |
 | `mg.check(id, handler)` | Registers the function for the check the manifest declares as `id`. `handler(ctx)` returns a list of findings (below), or nothing for none. A check that edits fails. |
 | `mg.on(id, handler)` | Registers the function for the event the manifest declares as `id` (`[event]`, its `on` one of the events of [`ctx.event`](#ctxevent)). `handler(ctx)` is called when it happens, as a command's is, with what happened as `ctx.event`: `ctx.event.name`, and what the event is of. It may return what Undo calls its change. |
@@ -755,6 +755,8 @@ fails. A file of more than 64 MB is not read.
 | `folder:bytes(name)` | A file's bytes. |
 | `folder:text(name)` | A file as text: UTF-8 if it is, else from the module's codepage (Windows-1252, unless a hak of the module has an `encoding.2da`). |
 | `folder:write(name, bytes)` | Writes a file into the folder, when the handler has returned: as `name` (a name alone, not a path; not one that begins with a dot), in place of a file of that name there. The first time a job writes into a folder the user is asked whether to allow it, and a refusal ends the job. Undo does not take it back, and a check can't write. |
+| `folder:unzip(bytes, options?)` | Writes a zip's files into the folder when the handler has returned (since API 0.12, Moonglow's Layonara build), with the leave `write` asks, by their paths in it: `options` is `{ strip = 1 }`, the folders to leave off the front of each (the zip's top folder). Hidden files and links are left out, and so is a file `strip` leaves nothing of; a path that leads out of the folder, a file over 64 MB or more than 20,000 of them is an error, and nothing of the zip is written. Returns `{ files, skipped }`: how many go in, and the zip's names of those left out. |
+| `folder:open(options?)` | Opens the folder as the module when the handler has returned, after the files written into it (since API 0.12, Moonglow's Layonara build; a command's or a wizard's job only), as File › Open Folder does (the open module's changes asked about first): a nasher project as `options.target` (`{ target = "bare" }`), else the target Moonglow opens by default. |
 | `folder:to_hak(hak, file, name?)` | Puts a file of the folder into a hak as `ctx.hak:write` does, without reading it into the plugin's memory: as `name`, or under its own. It may be larger than a plugin reads (`ctx.game:has` then says it is there, and `ctx.game:bytes` fails as `folder:bytes` does). |
 
 An `image`, from `mg.image`:

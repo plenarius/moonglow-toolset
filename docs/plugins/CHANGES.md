@@ -14,6 +14,27 @@ each version may change what the one before had. This file lists each
 version's changes and what a plugin written for the version before has
 to change.
 
+## 0.12
+
+In Moonglow's Layonara build (the fork's `layonara` branch), not in
+upstream Moonglow. Only an addition: a plugin written for 0.11 or before
+runs as it is. A plugin that uses what is new says `api = "0.12"`.
+
+- **A command that makes a module.** `[command] new = "module"`: it
+  runs with no module open as well as with one (an empty `ctx.module`,
+  and no edits), and is in File after Open Folder… and on the Welcome
+  page's Start, besides the Plugins menu.
+- **Unzipping into a folder.** `folder:unzip(bytes, { strip })` writes a
+  zip's files, folders and all, into a folder the user chose, when the
+  handler returns, with `folder:write`'s leave; hidden files and links
+  are left out (`skipped`), a path out of the folder is an error.
+  Returns `{ files, skipped }`.
+- **Opening it.** `folder:open({ target })` opens the folder as the
+  module once its files are written, as File › Open Folder does, a
+  nasher project as the target named.
+- **Tests.** `written` lists `unzip`'s files by their paths;
+  `opened` and `opened_as` hold the job to the folder it opens.
+
 ## 0.11
 
 In Moonglow's Layonara build (the fork's `layonara` branch), not in

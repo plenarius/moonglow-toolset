@@ -221,6 +221,8 @@ pub(crate) struct Shared {
     pub(crate) hak_leave: RefCell<std::collections::BTreeSet<String>>,
     /// The haks it downloaded to go above NWSync (API 0.11).
     pub(crate) above_nwsync: RefCell<Vec<String>>,
+    /// The folder to open as the module (`folder:open`, API 0.12).
+    pub(crate) open: RefCell<Option<crate::OpenModule>>,
 }
 
 pub(crate) fn fail<T>(message: impl std::fmt::Display) -> mlua::Result<T> {
@@ -1834,6 +1836,7 @@ fn shared_holding(
         net: crate::net::NetJob::default(),
         hak_leave: RefCell::default(),
         above_nwsync: RefCell::default(),
+        open: RefCell::default(),
     })
 }
 
@@ -1871,6 +1874,15 @@ pub(crate) fn run_command(
     if host.cancelled() {
         return Err(PluginError::Canceled(plugin.manifest.name.clone()));
     }
+    // (One that makes a module has none open to edit.)
+    if decl.new_module && !sh.edits.borrow().is_empty() {
+        let e = mlua::Error::runtime(format!(
+            "{} makes a module (new = \"module\"): it edits none (ctx.edit), it writes \
+             a folder (folder:unzip) and opens it (folder:open)",
+            decl.id
+        ));
+        return Err(failed(plugin, &sh, e));
+    }
     Ok(Outcome {
         label,
         edits: sh.edits.take(),
@@ -1879,6 +1891,7 @@ pub(crate) fn run_command(
         settings: sh.settings_set.take(),
         said: Vec::new(),
         above_nwsync: sh.above_nwsync.take(),
+        open: sh.open.take(),
     })
 }
 
@@ -2068,6 +2081,7 @@ pub(crate) fn run_event(
         settings: Vec::new(),
         said: Vec::new(),
         above_nwsync: Vec::new(),
+        open: None,
     };
     // (Nothing it is for: its code does not run.)
     if (kind.per_resource() && keys.is_empty()) || (objects_event && objects.is_empty()) {
@@ -2140,6 +2154,7 @@ pub(crate) fn run_event(
         settings: sh.settings_set.take(),
         said: said.take(),
         above_nwsync: sh.above_nwsync.take(),
+        open: sh.open.take(),
     })
 }
 
@@ -2526,6 +2541,7 @@ pub(crate) fn run_console(
         settings: Vec::new(),
         said: Vec::new(),
         above_nwsync: sh.above_nwsync.take(),
+        open: sh.open.take(),
     })
 }
 

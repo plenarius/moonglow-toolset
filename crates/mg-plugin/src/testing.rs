@@ -231,6 +231,11 @@ struct Test {
     /// The files the job writes into folders the user chose, by their
     /// names, all of them, in any order; nothing is written.
     written: Option<Vec<String>>,
+    /// The folder it opens as the module (`folder:open`, API 0.12), from
+    /// the test file's folder, and as which nasher target (`"bare"`;
+    /// `""`, the one Moonglow opens by default); `opened = ""`: none.
+    opened: Option<String>,
+    opened_as: Option<String>,
     /// Lines the log must have: each is part of one.
     #[serde(default)]
     log: Vec<String>,
@@ -466,6 +471,23 @@ fn outside_as_wanted(t: &Test, outcome: &crate::Outcome, problems: &mut Vec<Stri
         );
         if wrote != sorted(wanted.clone()) {
             problems.push(format!("it writes {wrote:?} into folders, not {wanted:?}"));
+        }
+    }
+    if let Some(wanted) = &t.opened {
+        let got = outcome.open.as_ref();
+        let named = |o: &crate::OpenModule| {
+            o.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        };
+        let as_wanted = match got {
+            None => wanted.is_empty(),
+            Some(o) => {
+                Path::new(wanted).file_name().is_some_and(|w| w.to_string_lossy() == named(o))
+                    && t.opened_as.as_deref().unwrap_or("") == o.target.as_deref().unwrap_or("")
+            }
+        };
+        if !as_wanted {
+            let got = got.map(|o| format!("{} (target {:?})", named(o), o.target));
+            problems.push(format!("it opens {got:?}, not {wanted:?} (target {:?})", t.opened_as));
         }
     }
 }
@@ -1313,7 +1335,12 @@ fn held(
         Run::Wizard(id) => crate::run_wizard(plugin, id, input, host.clone()).map(Err),
         Run::Check(id) => crate::run_check(plugin, id, input, host.clone()).map(Ok),
         Run::Builtin(b) => Ok(Ok(run_builtin(b, module, fixture))),
-        Run::Command(id) => crate::run_command(plugin, id, input, host.clone()).map(Err),
+        Run::Command(id) => {
+            // (One that makes a module runs with none open, API 0.12.)
+            let new = plugin.manifest.commands.iter().any(|c| c.id == *id && c.new_module);
+            let input = if new { Input { module: Module::new(), ..input } } else { input };
+            crate::run_command(plugin, id, input, host.clone()).map(Err)
+        }
         Run::Event(id) => {
             let kind = plugin.manifest.events.iter().find(|e| e.id == *id).map(|e| e.on);
             let kind = kind.unwrap_or(crate::EventKind::ModuleSaved);

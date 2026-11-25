@@ -1,5 +1,5 @@
 --!strict
--- The types of Moonglow's plugin API, version 0.11, for editors that check
+-- The types of Moonglow's plugin API, version 0.12, for editors that check
 -- Luau (luau-lsp): point the alias "moonglow" at this file in a `.luaurc`
 -- in or above your plugin's folder, and `require("@moonglow")` is typed
 -- and completed:
@@ -177,6 +177,10 @@ export type Folder = {
     text: (self: Folder, name: string) -> string,
     to_hak: (self: Folder, hak: string, file: string, name: string?) -> (),
     write: (self: Folder, name: string, bytes: string) -> (),
+    -- A zip's files into the folder, `strip` folders off each path (API 0.12, the Layonara build).
+    unzip: (self: Folder, bytes: string, options: { strip: number? }?) -> { files: number, skipped: { string } },
+    -- Opened as the module once its files are written, a nasher project as `target` (API 0.12).
+    open: (self: Folder, options: { target: string? }?) -> (),
 }
 
 export type Ui = {
@@ -427,7 +431,7 @@ export type Element = string | {
 
 local mg = {}
 
-mg.api = "0.11"
+mg.api = "0.12"
 
 -- A command's handler may return what Undo calls the change:
 -- { label = "..." }, or the text alone.
