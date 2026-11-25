@@ -90,6 +90,13 @@ jobs:
     name: Windows installer
     needs: version
     runs-on: windows-latest
+    # Tags sign with Azure Artifact Signing (packaging/windows/sign.ps1),
+    # signed in with GitHub's OIDC token; the release environment holds the
+    # Azure ids. Other runs build unsigned, as before.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -99,7 +106,12 @@ jobs:
       - name: Inno Setup
         run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
       - name: Build
-        run: packaging\windows\build-installer.ps1
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          if ($env:GITHUB_REF.StartsWith('refs/tags/v')) { packaging\windows\build-installer.ps1 -Sign }
+          else { packaging\windows\build-installer.ps1 }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -111,6 +123,9 @@ jobs:
     name: macOS disk image
     needs: version
     runs-on: macos-latest
+    # The Developer ID secrets live in the release environment, which only
+    # v* tags may use; other runs build ad hoc signed, as before.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -119,8 +134,70 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/layonara' }}
+      - name: Signing keychain
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$P12" ]; then
+            echo "::warning::No Developer ID certificate: the app is signed ad hoc"
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(openssl rand -hex 24)
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          (umask 077; printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12")
+          security import "$RUNNER_TEMP/id.p12" -k "$kc" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/id.p12"
+          # Lets codesign use the key without a prompt nobody can answer.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" > /dev/null
+          # shellcheck disable=SC2046 # one keychain path per line, no spaces
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          # By hash: the team's Developer ID Application identity, no other.
+          id=$(security find-identity -v -p codesigning "$kc" \
+            | awk -v t="($TEAM_ID)\"" '/"Developer ID Application: / && index($0, t) { print $2; exit }')
+          if [ -z "$id" ]; then
+            echo "::error::No Developer ID Application identity for team $TEAM_ID"
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$id" >> "$GITHUB_ENV"
       - name: Build
         run: packaging/macos/build-app.sh
+      - name: Notarize
+        if: env.CODESIGN_IDENTITY != ''
+        env:
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          dmg=$(ls target/dist/*.dmg)
+          key="$RUNNER_TEMP/notary.p8"
+          (umask 077; printf '%s\n' "$NOTARY_KEY" > "$key")
+          auth=(--key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+          xcrun notarytool submit "$dmg" "${auth[@]}" --wait --timeout 1h \
+            --output-format json > notary.json || true
+          cat notary.json
+          sub=$(plutil -extract id raw notary.json)
+          status=$(plutil -extract status raw notary.json)
+          if [ "$status" != Accepted ]; then
+            # Apple's log names each file it refused and why.
+            xcrun notarytool log "$sub" "${auth[@]}" || true
+            echo "::error::Notarization: $status"
+            exit 1
+          fi
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature -vv "$dmg"
+          spctl --assess --type execute -vv "target/dist/Moonglow Toolset.app"
+      - name: Remove the signing keys
+        if: always() && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP/id.p12" "$RUNNER_TEMP/notary.p8"
       - uses: actions/upload-artifact@v4
         with:
           name: macos

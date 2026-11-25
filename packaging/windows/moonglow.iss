@@ -37,6 +37,10 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ChangesAssociations=yes
+#ifdef Sign
+; The installer and its uninstaller (build-installer.ps1 -Sign defines "sign").
+SignTool=sign
+#endif
 
 [Tasks]
 Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
