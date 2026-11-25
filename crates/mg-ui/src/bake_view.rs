@@ -340,16 +340,58 @@ const BEFORE: egui::Color32 = egui::Color32::from_rgb(255, 150, 40);
 /// After: as baked.
 const AFTER: egui::Color32 = egui::Color32::from_rgb(80, 220, 110);
 
+/// Indexes placeables by their GIT list index so batch lookups stay O(N + M).
+fn placeable_indices(area: &mg_area::AreaModel) -> std::collections::HashMap<usize, usize> {
+    area.objects
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.kind == ObjectKind::Placeable)
+        .map(|(pos, o)| (o.index, pos))
+        .collect()
+}
+
+/// Returns a compact change stamp for the active bake preview overlay in `area`
+/// without rebuilding all transformed triangles every frame.
+pub(crate) fn after_stamp(app: &Moonglow, area: &mg_area::AreaModel, at: ResRef) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let d = app.bake.draft.as_ref().filter(|d| d.area == at)?;
+    let Ok(plan) = &d.plan else { return None };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    d.area.hash(&mut h);
+    d.objects.hash(&mut h);
+    d.planned_at.hash(&mut h);
+    let by_idx = (d.objects.len() > 4).then(|| placeable_indices(area));
+    for (&i, b) in d.objects.iter().zip(&plan.each) {
+        let Ok(b) = b else { continue };
+        let o = match &by_idx {
+            Some(m) => m.get(&i).map(|&pos| &area.objects[pos]),
+            None => area.objects.iter().find(|o| o.kind == ObjectKind::Placeable && o.index == i),
+        };
+        let Some(o) = o else { continue };
+        i.hash(&mut h);
+        b.after.len().hash(&mut h);
+        b.after.first().map(|f| f.map(|c| c.map(f32::to_bits))).hash(&mut h);
+        for c in o.transform().to_cols_array() {
+            c.to_bits().hash(&mut h);
+        }
+    }
+    Some(h.finish())
+}
+
 /// The baked walkmeshes the panel would make in `area`, in the area's
 /// space, each with its object's place among the area's objects: drawn
 /// green over the area view's own.
 pub(crate) fn after_faces(app: &Moonglow, area: &mg_area::AreaModel, at: ResRef) -> Vec<[Vec3; 3]> {
     let Some(d) = app.bake.draft.as_ref().filter(|d| d.area == at) else { return Vec::new() };
     let Ok(plan) = &d.plan else { return Vec::new() };
+    let by_idx = (d.objects.len() > 4).then(|| placeable_indices(area));
     let mut out = Vec::new();
     for (&i, b) in d.objects.iter().zip(&plan.each) {
         let Ok(b) = b else { continue };
-        let o = area.objects.iter().find(|o| o.kind == ObjectKind::Placeable && o.index == i);
+        let o = match &by_idx {
+            Some(m) => m.get(&i).map(|&pos| &area.objects[pos]),
+            None => area.objects.iter().find(|o| o.kind == ObjectKind::Placeable && o.index == i),
+        };
         let Some(o) = o else { continue };
         let to = o.transform();
         out.extend(b.after.iter().map(|f| f.map(|c| to.transform_point3(Vec3::from(c)))));
@@ -565,18 +607,21 @@ pub(crate) fn save_window(app: &mut Moonglow, ctx: &egui::Context) {
             crate::widgets::fit_width(ui, 460.0);
             ui.label("No placeable of this module uses these any longer:");
             ui.add_space(4.0);
-            for r in &ask.unused.rows {
-                ui.label(format!("  •  row {} ({}): {}", r.row, r.model, r.label));
-            }
-            let in_rows = |m: &str| ask.unused.rows.iter().any(|r| r.model.eq_ignore_ascii_case(m));
-            for m in ask.unused.models.iter().filter(|m| !in_rows(m)) {
-                ui.label(format!("  •  {m} in {hak}.hak, which no row names"));
-            }
+            egui::ScrollArea::vertical().id_salt("bake-unused").max_height(240.0).show(ui, |ui| {
+                for r in &ask.unused.rows {
+                    ui.label(format!("  •  row {} ({}): {}", r.row, r.model, r.label));
+                }
+                let in_rows =
+                    |m: &str| ask.unused.rows.iter().any(|r| r.model.eq_ignore_ascii_case(m));
+                for m in ask.unused.models.iter().filter(|m| !in_rows(m)) {
+                    ui.label(format!("  •  {m} in {hak}.hak, which no row names"));
+                }
+            });
             ui.add_space(4.0);
             ui.weak(
                 "This module alone was looked at: another module, or a blueprint in a hak, may \
                  still use one. Tidy Up takes them out of the rows file and the hak (kept \
-                 beside itself as .bak); Keep Them leaves them.",
+                 beside itself as .bak). Keep Them leaves them.",
             );
             (
                 (),
@@ -632,4 +677,55 @@ fn tidy_up(app: &mut Moonglow, unused: &bake::Unused) {
         ws.module.reread_project_file();
     }
     after_files(app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The save's question with many baked rows no longer used (Wave 3's
+    /// scroll area): the window stays a screen's height or less, and the
+    /// last row is reached by scrolling the list.
+    #[test]
+    fn the_unused_rows_scroll_in_a_bounded_list() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        let rows: Vec<bake::BakedRow> = (0..60)
+            .map(|i| bake::BakedRow {
+                row: 50000 + i,
+                copy_of: 7,
+                model: format!("mgbk_{i:04}"),
+                label: format!("Baked {i}"),
+            })
+            .collect();
+        let unused = bake::Unused { rows, models: vec!["mgbk_lone".into()] };
+        app.bake.ask = Some(TidyAsk { unused, then: Action::Save });
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(|ui, app: &mut Moonglow| save_window(app, ui.ctx()), app);
+        h.run();
+        let first = h.get_by_label_contains("row 50000 (mgbk_0000)").rect();
+        let tidy = h.get_by_label("Tidy Up").rect();
+        assert!(tidy.bottom() <= 700.0, "the buttons are on the screen: {tidy:?}");
+        assert!(tidy.top() - first.top() < 400.0, "the list is bounded: {first:?} {tidy:?}");
+        // (The rows past the list's height lie under the buttons until
+        // scrolled to.)
+        let last_of = |h: &Harness<'_, Moonglow>| h.get_by_label_contains("mgbk_lone in").rect();
+        assert!(last_of(&h).top() > tidy.top(), "the last row is below, scrolled out");
+        for _ in 0..40 {
+            h.hover_at(first.center());
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run();
+        }
+        let last = last_of(&h);
+        assert!(last.bottom() < tidy.top(), "the last row is reached: {last:?} {tidy:?}");
+        assert!(last.top() >= first.top() - 1.0, "and shown in the list: {last:?} {first:?}");
+        assert!(h.query_by_label_contains("row 50000 (mgbk_0000)").is_some());
+    }
 }

@@ -59,24 +59,22 @@ impl Icon {
         // fine enough for 32 px, and at 16 px each icon was hundreds of
         // vertices.)
         let level = simplify_level(scale * ppp);
-        let mut shapes = Vec::new();
         for s in simplified(self, level).iter() {
             let points: Vec<Pos2> = s.points.iter().map(at).collect();
             if s.filled && points.len() > 2 {
-                shapes.push(Shape::convex_polygon(points.clone(), color, Stroke::NONE));
+                painter.add(Shape::convex_polygon(points.clone(), color, Stroke::NONE));
             }
             // Round caps and sharp corners: a dot as wide as the stroke
             // (a path of `h.01`, a dot, is all cap).
             for &i in &s.dots {
-                shapes.push(Shape::circle_filled(points[i], width / 2.0, color));
+                painter.add(Shape::circle_filled(points[i], width / 2.0, color));
             }
             if s.closed {
-                shapes.push(Shape::closed_line(points, stroke));
+                painter.add(Shape::closed_line(points, stroke));
             } else {
-                shapes.push(Shape::line(points, stroke));
+                painter.add(Shape::line(points, stroke));
             }
         }
-        painter.extend(shapes);
     }
 }
 
@@ -98,36 +96,34 @@ fn simplify_level(px: f32) -> u8 {
     (tolerance * 64.0).clamp(0.0, 64.0) as u8
 }
 
-type Cache = std::collections::HashMap<(Icon, u8), std::sync::Arc<Vec<Painted>>>;
-
 /// `icon`'s strokes simplified to `level` ([`simplify_level`]), worked out
 /// once a size (the set is the program's own: a cache of it alone).
-fn simplified(icon: Icon, level: u8) -> std::sync::Arc<Vec<Painted>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Ok(cache) = cache.lock()
-        && let Some(found) = cache.get(&(icon, level))
-    {
-        return found.clone();
+fn simplified(icon: Icon, level: u8) -> std::rc::Rc<Vec<Painted>> {
+    type SimplifiedCache = std::collections::HashMap<(Icon, u8), std::rc::Rc<Vec<Painted>>>;
+    thread_local! {
+        static CACHE: std::cell::RefCell<SimplifiedCache> = Default::default();
     }
-    let tolerance = f32::from(level) / 64.0;
-    let made: Vec<Painted> = strokes(icon)
-        .iter()
-        .map(|s| {
-            let points = if s.points.len() > 2 && !s.filled {
-                douglas_peucker(s.points, tolerance, s.closed)
-            } else {
-                s.points.to_vec()
-            };
-            let dots = dots(&points, s.closed);
-            Painted { points, closed: s.closed, filled: s.filled, dots }
-        })
-        .collect();
-    let made = std::sync::Arc::new(made);
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert((icon, level), made.clone());
-    }
-    made
+    CACHE.with(|cache| {
+        if let Some(found) = cache.borrow().get(&(icon, level)) {
+            return std::rc::Rc::clone(found);
+        }
+        let tolerance = f32::from(level) / 64.0;
+        let made: Vec<Painted> = strokes(icon)
+            .iter()
+            .map(|s| {
+                let points = if s.points.len() > 2 && !s.filled {
+                    douglas_peucker(s.points, tolerance, s.closed)
+                } else {
+                    s.points.to_vec()
+                };
+                let dots = dots(&points, s.closed);
+                Painted { points, closed: s.closed, filled: s.filled, dots }
+            })
+            .collect();
+        let made = std::rc::Rc::new(made);
+        cache.borrow_mut().insert((icon, level), std::rc::Rc::clone(&made));
+        made
+    })
 }
 
 /// The points of a stroke that get a dot: an open one's ends, and every
@@ -242,7 +238,8 @@ impl ButtonState {
 /// Paints an icon button (the mock's `.btn-icon`; a toggle's `.toggle`
 /// when `on` is given) in `rect`: frameless at rest, the icon in `text-2`;
 /// hovered, `raised` and the icon in `text`; pressed or focused, an accent
-/// ring; on, `accent-fill` and the icon in `on-fill`.
+/// ring; on, `accent-fill` and the icon in `on-fill`, with no ring however
+/// pressed (a focused one's ring is the widget's own `on-fill` ring).
 pub fn paint_icon_button(
     painter: &egui::Painter,
     tokens: &Tokens,
@@ -250,6 +247,20 @@ pub fn paint_icon_button(
     icon: Icon,
     state: ButtonState,
     on: bool,
+) {
+    paint_hued_icon_button(painter, tokens, rect, icon, state, on, None);
+}
+
+/// [`paint_icon_button`], its icon in `hue` (a kind's, [`crate::hues`])
+/// where given, at rest and hovered alike, unless it is on.
+fn paint_hued_icon_button(
+    painter: &egui::Painter,
+    tokens: &Tokens,
+    rect: Rect,
+    icon: Icon,
+    state: ButtonState,
+    on: bool,
+    hue: Option<Color32>,
 ) {
     let t = tokens;
     let radius = metrics::RADIUS;
@@ -260,11 +271,29 @@ pub fn paint_icon_button(
         (false, ButtonState::Hovered) => (t.raised, t.text),
         (false, ButtonState::Pressed) => (t.raised_hover, t.text),
     };
-    let ring =
-        if state == ButtonState::Pressed { Stroke::new(1.0, t.accent) } else { Stroke::NONE };
+    let color = if on { color } else { hue.unwrap_or(color) };
+    // (On, its ring is the focus ring of `paint_on_fill_focus` alone: an
+    // accent ring there drew a second ring round a focused toggle that is
+    // on, and `accent` hardly shows on `accent-fill` in the light theme.)
+    let ring = if state == ButtonState::Pressed && !on {
+        Stroke::new(1.0, t.accent)
+    } else {
+        Stroke::NONE
+    };
     painter.rect(rect, radius, fill, ring, egui::StrokeKind::Inside);
     let square = Rect::from_center_size(rect.center(), Vec2::splat(metrics::ICON));
     icon.paint(painter, square, color);
+}
+
+/// The keyboard's focus on an icon button filled `accent-fill` (on, or a
+/// main action's fill): a 1.5 px `on-fill` ring 1.5 inside its edge, its
+/// one ring. (Off, the focus is the accent ring [`paint_icon_button`]
+/// draws for `ButtonState::Pressed`, which a focused button is.)
+fn paint_on_fill_focus(painter: &egui::Painter, t: &Tokens, rect: Rect, focused: bool) {
+    if focused {
+        let stroke = Stroke::new(1.5, t.on_fill);
+        painter.rect_stroke(rect.shrink(1.5), metrics::RADIUS, stroke, egui::StrokeKind::Inside);
+    }
 }
 
 fn icon_button_ui(ui: &mut Ui, icon: Icon, tooltip: &str, on: Option<bool>) -> Response {
@@ -278,7 +307,9 @@ fn icon_button_ui(ui: &mut Ui, icon: Icon, tooltip: &str, on: Option<bool>) -> R
     if ui.is_rect_visible(rect) {
         let tokens = ui.tokens();
         let state = ButtonState::of(&response);
-        paint_icon_button(ui.painter(), &tokens, rect, icon, state, on == Some(true));
+        let active = on == Some(true);
+        paint_icon_button(ui.painter(), &tokens, rect, icon, state, active);
+        paint_on_fill_focus(ui.painter(), &tokens, rect, active && enabled && response.has_focus());
     }
     response.on_hover_text(tooltip).on_disabled_hover_text(tooltip)
 }
@@ -404,6 +435,7 @@ pub struct IconButton {
     truncate: bool,
     join: Option<Join>,
     framed: bool,
+    hued: bool,
 }
 
 impl IconButton {
@@ -425,7 +457,16 @@ impl IconButton {
             truncate: false,
             join: None,
             framed: false,
+            hued: false,
         }
+    }
+
+    /// Its icon a kind's, in the kind's hue while icons are colored
+    /// ([`crate::hues`]), where it is an icon alone: at rest and hovered,
+    /// not while it is selected (`on-fill` then), nor read-only.
+    pub fn kind_hue(mut self) -> Self {
+        self.hued = true;
+        self
     }
 
     /// An icon alone framed as a word button is (the mock's `.btn` with an
@@ -693,8 +734,8 @@ impl egui::Widget for IconButton {
                     let t = ui.tokens();
                     let state = ButtonState::of(&response);
                     let open = self.expanded == Some(true);
-                    let fill = match (state, open) {
-                        (ButtonState::Rest, false) => t.raised,
+                    let fill = match (enabled, state, open) {
+                        (false, _, _) | (true, ButtonState::Rest, false) => t.raised,
                         _ => t.raised_hover,
                     };
                     let color = if !enabled {
@@ -710,12 +751,13 @@ impl egui::Widget for IconButton {
                     } else {
                         Stroke::NONE
                     };
-                    // (Beyond its place as a word button's frame is.)
+                    // (Beyond its place as a word button's frame is; use box_painter
+                    // when disabled so `t.text_off` is not faded a second time.)
                     let frame = rect.expand(ui.style().interact(&response).expansion);
-                    let painter = ui.painter();
+                    let painter = crate::controls::box_painter(ui, enabled);
                     painter.rect(frame, corners, fill, ring, egui::StrokeKind::Inside);
                     let square = Rect::from_center_size(rect.center(), Vec2::splat(metrics::ICON));
-                    self.icon.paint(painter, square, color);
+                    self.icon.paint(&painter, square, color);
                 }
                 self.described(response)
             }
@@ -754,9 +796,23 @@ impl egui::Widget for IconButton {
                         let square =
                             Rect::from_center_size(rect.center(), Vec2::splat(metrics::ICON));
                         self.icon.paint(painter, square, tokens.on_fill);
+                        paint_on_fill_focus(
+                            painter,
+                            &tokens,
+                            rect,
+                            enabled && response.has_focus(),
+                        );
                     } else {
                         let state = ButtonState::of(&response);
-                        paint_icon_button(ui.painter(), &tokens, rect, self.icon, state, on);
+                        let hue = self.hued.then(|| crate::hues::hue(ui.ctx(), self.icon));
+                        let (p, i) = (ui.painter(), self.icon);
+                        paint_hued_icon_button(p, &tokens, rect, i, state, on, hue.flatten());
+                        paint_on_fill_focus(
+                            p,
+                            &tokens,
+                            rect,
+                            on && enabled && response.has_focus(),
+                        );
                     }
                 }
                 self.described(response)

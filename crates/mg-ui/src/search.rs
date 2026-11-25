@@ -20,6 +20,7 @@ use mg_module::search::{
 use mg_resman::ResKey;
 use mg_rules::{Choice, ChoiceColumns, GameData, ObjectKind};
 
+use crate::row_copy;
 use crate::{Action, Moonglow, Tab};
 
 /// What the window looks for.
@@ -348,7 +349,7 @@ impl ActDraft {
                     self.entry.row.ok_or(if class { "Choose a class" } else { "Choose a feat" })?;
                 let mut c = self.entry.clone();
                 c.kind = if class { Kind::Class } else { Kind::Feat };
-                let named = c.table().map(|t| choices(game, &t)).unwrap_or_default();
+                let named = c.table().map(|t| listed(game, &t)).unwrap_or_default();
                 let name = mg_rules::choice_text(&named, row as i64);
                 let entry = if class {
                     Entry::Class { class: row as i32, level: i16::from(self.entry.levels.0.max(1)) }
@@ -680,7 +681,7 @@ impl Moonglow {
             draft.found_at = Some(ws.revision());
         }
         draft.note = Some(
-            "The module changed since this was found. Found again, everything ticked: look the \
+            "The module changed since this was found. Found again, everything checked: look the \
              list over first."
                 .into(),
         );
@@ -797,14 +798,8 @@ fn row_picker_in(
     }
 }
 
-/// The choices of a table, as the game names them.
-pub(crate) fn choices(game: Option<&GameData>, table: &mg_rules::rows::RowTable) -> Vec<Choice> {
-    listed(game, table).to_vec()
-}
-
-/// [`choices`], as the game data keeps them: the window's own rows ask
-/// every frame, and each got a copy of the whole list (feat.2da's
-/// thousand rows and more, with their names).
+/// The choices of a table as the game data keeps them (`Arc<Vec<Choice>>`),
+/// shared rather than copying whole tables on every frame.
 pub(crate) fn listed(
     game: Option<&GameData>,
     table: &mg_rules::rows::RowTable,
@@ -918,7 +913,8 @@ fn condition_ui(ui: &mut Ui, c: &mut Condition, game: Option<&GameData>, salt: &
             }
             if c.kind == Kind::Skill {
                 crate::widgets::field_label(ui, "At least");
-                ui.add(egui::DragValue::new(&mut c.min_rank).range(1..=127).suffix(" rank(s)"));
+                let suffix = rank_suffix(c.min_rank);
+                ui.add(egui::DragValue::new(&mut c.min_rank).range(1..=127).suffix(suffix));
                 ui.end_row();
             }
             if c.kind == Kind::Class {
@@ -1250,6 +1246,17 @@ fn act_ui(ui: &mut Ui, d: &mut AdvancedSearch, n: usize, game: Option<&GameData>
     go
 }
 
+/// A result as one line of text (its menu's Copy, a line of Copy All):
+/// its place as listed, the layer it is read from where it is not the
+/// module's, and what matched, "area_01 › Chest: Gold 50".
+pub fn hit_line(app: &mut Moonglow, h: &mg_module::search::Hit) -> String {
+    let place = place_shown(app, h);
+    match &h.layer {
+        Some(layer) => format!("{place} ({layer}): {}", h.matched),
+        None => format!("{place}: {}", h.matched),
+    }
+}
+
 /// A hit's place as its row shows it, with areas named as the rest of
 /// the window names them (Options › General: Show areas by name).
 fn place_shown(app: &mut Moonglow, h: &mg_module::search::Hit) -> String {
@@ -1259,6 +1266,35 @@ fn place_shown(app: &mut Moonglow, h: &mg_module::search::Hit) -> String {
     }
     let name = crate::tabs::area_label(app, h.key.resref);
     h.place.replacen(&h.key.resref.to_lowercase().to_string(), &name, 1)
+}
+
+type TogetherGroups = (std::sync::Arc<Vec<Together>>, std::sync::Arc<Vec<ResRef>>);
+
+/// Cached summary derived from the current hit list and tick vector so idle
+/// frames do not scan 8,800+ hits or rebuild `together` when collapsed.
+#[derive(Clone, Default)]
+struct SearchUiCache {
+    sig: (usize, usize, Option<u64>, Option<ResKey>, Option<ResKey>, u64),
+    ticked_count: usize,
+    outside_count: usize,
+    together: Option<TogetherGroups>,
+    /// Whether a plugin's command fits the ticked hits, for the commands
+    /// it was worked out with (held: by their list's address and length,
+    /// another list made at the same address took the old one's answer).
+    ticked_fits: Option<(std::sync::Arc<[crate::plugins::PluginCommand]>, bool)>,
+}
+
+fn ticked_hash(ticked: &[bool]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325 ^ (ticked.len() as u64);
+    for &b in ticked {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn hit_selected(h: &Hit) -> mg_plugin::Selected {
+    crate::plugins::selected_at(h.key, &h.path)
 }
 
 /// The Advanced Search tab.
@@ -1272,7 +1308,7 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui) {
     let game = app.game.clone();
     ui.weak(
         "The module's blueprints, placed objects (and the items they hold), areas and \
-         conversations, by what they hold; and, ticked below, the haks' and the game's \
+         conversations, by what they hold; and, checked below, the haks' and the game's \
          blueprints.",
     );
     if game.is_none() {
@@ -1295,6 +1331,8 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui) {
     }
     let mut open = Vec::new();
     let mut choose_areas = None;
+    // (A result's menu's Copy or Copy All: its text made after the rows.)
+    let mut copy = None;
     if draft.searched.is_some() {
         ui.separator();
         draft.ticked.resize(draft.hits.len(), true);
@@ -1304,162 +1342,253 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui) {
                 false => "Nothing in the module holds it.",
             });
         } else {
-            let chosen = draft.chosen();
-            let n = chosen.len();
-            let (groups, areas) = together(&chosen);
-            // (Areas named as the list names them.)
-            let mut area_name = |area: ResRef| match app.settings.area_names {
-                true => crate::tabs::area_label(app, area),
-                false => area.to_lowercase().to_string(),
-            };
-            let labels: Vec<String> = groups
-                .iter()
-                .map(|g| match g {
-                    Together::Blueprints(t, keys) => {
-                        let kind = ObjectKind::from_restype(*t).map_or("", ObjectKind::name);
-                        format!("Edit {} {kind} blueprint(s) Together", keys.len())
-                    }
-                    Together::Placed { area, kind, paths } => format!(
-                        "Edit {} {}(s) in {} Together",
-                        paths.len(),
-                        kind.name(),
-                        area_name(*area)
-                    ),
-                })
-                .collect();
+            let sig = (
+                draft.hits.len(),
+                draft.hits.as_ptr() as usize,
+                draft.found_at,
+                draft.hits.first().map(|h| h.key),
+                draft.hits.last().map(|h| h.key),
+                ticked_hash(&draft.ticked),
+            );
+            let cache_id = egui::Id::new("advanced-search-ui-cache");
+            let mut cache: SearchUiCache = ui.data(|d| d.get_temp(cache_id)).unwrap_or_default();
+            let mut cache_dirty = false;
+            if cache.sig != sig {
+                let ticked_count = draft
+                    .hits
+                    .iter()
+                    .zip(&draft.ticked)
+                    .filter(|(h, t)| **t && h.layer.is_none())
+                    .count();
+                let outside_count = draft.hits.iter().filter(|h| h.layer.is_some()).count();
+                cache = SearchUiCache {
+                    sig,
+                    ticked_count,
+                    outside_count,
+                    together: None,
+                    ticked_fits: None,
+                };
+                cache_dirty = true;
+            }
+            let n = cache.ticked_count;
+            let outside = cache.outside_count;
             ui.horizontal(|ui| {
                 ui.label(format!("{} found:", draft.hits.len()));
-                let outside = draft.hits.iter().filter(|h| h.layer.is_some()).count();
                 if outside > 0 {
                     ui.weak(format!("({outside} of them the haks' or the game's, read-only)"));
                 }
-                if ui.small_button("Tick All").clicked() {
+                if ui.small_button("Check All").clicked() {
                     for (t, h) in draft.ticked.iter_mut().zip(&draft.hits) {
                         *t = h.layer.is_none();
                     }
                 }
-                if ui.small_button("Tick None").clicked() {
+                if ui.small_button("Check None").clicked() {
                     draft.ticked.fill(false);
                 }
             });
-            egui::CollapsingHeader::new(format!("Change the {n} ticked"))
+            egui::CollapsingHeader::new(format!("Change the {n} checked"))
                 .icon(mg_uikit::collapsing_icon)
                 .id_salt("advanced-search-change")
                 .show(ui, |ui| change = act_ui(ui, &mut draft, n, app.game.as_deref()));
-            egui::CollapsingHeader::new(format!("Edit the {n} ticked together"))
+            let area_names = app.settings.area_names;
+            egui::CollapsingHeader::new(format!("Edit the {n} checked together"))
                 .icon(mg_uikit::collapsing_icon)
                 .id_salt("advanced-search-together")
                 .show(ui, |ui| {
+                    let (groups, areas) = cache
+                        .together
+                        .get_or_insert_with(|| {
+                            cache_dirty = true;
+                            let chosen = draft.chosen();
+                            let (g, a) = together(&chosen);
+                            (std::sync::Arc::new(g), std::sync::Arc::new(a))
+                        })
+                        .clone();
                     if groups.is_empty() && areas.is_empty() {
                         ui.weak("Blueprints of one type, objects of one kind placed in one area");
                     }
                     ui.horizontal_wrapped(|ui| {
-                        for (g, text) in groups.iter().zip(labels) {
+                        for g in groups.iter() {
+                            let text = match g {
+                                Together::Blueprints(t, keys) => {
+                                    let kind =
+                                        ObjectKind::from_restype(*t).map_or("", ObjectKind::name);
+                                    blueprints_together(kind, keys.len())
+                                }
+                                Together::Placed { area, kind, paths } => {
+                                    let aname = match area_names {
+                                        true => crate::tabs::area_label(app, *area),
+                                        false => area.to_lowercase().to_string(),
+                                    };
+                                    placed_together(*kind, paths.len(), &aname)
+                                }
+                            };
                             if ui.button(text).clicked() {
                                 open.push(g.tab());
                             }
                         }
                         if !areas.is_empty()
                             && ui
-                                .button(format!("Choose {} Area(s)…", areas.len()))
+                                .button(format!(
+                                    "Choose {} {}…",
+                                    areas.len(),
+                                    if areas.len() == 1 { "Area" } else { "Areas" }
+                                ))
                                 .on_hover_text(
-                                    "Edit Areas Together with the areas of the ticked results",
+                                    "Edit Areas Together with the areas of the checked results",
                                 )
                                 .clicked()
                         {
-                            choose_areas = Some(areas.clone());
+                            choose_areas = Some((*areas).clone());
                         }
                     });
                 });
-        }
-        let commands = app.plugin_menu_commands();
-        let on_hit = |h: &mg_module::search::Hit| {
-            // (The object or resource the hit is on: a placed object's
-            // path is its list item, then what is in it.)
-            let path = mg_edit::GffPath(h.path.0.iter().take(1).cloned().collect());
-            crate::plugins::selected_at(h.key, &path)
-        };
-        // What a plugin's command is run on from a ticked row: every
-        // ticked hit's. Made once a frame, when a ticked row in sight
-        // first asks, and whether a command fits it: it was made again
-        // for every ticked row, 8,785 times 8,785 for a world's variables.
-        let mut ticked: Option<(Vec<mg_plugin::Selected>, bool)> = None;
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            mg_uikit::list_rows(ui);
+            let commands = app.plugin_menu_commands_cached();
+            // What a plugin's command is run on from a ticked row: every
+            // ticked hit's. Whether a command fits it is worked out once,
+            // when a ticked row in sight first asks, and kept until the
+            // hits, the ticks or the commands change.
+            let for_these = |c: &std::sync::Arc<[crate::plugins::PluginCommand]>| {
+                std::sync::Arc::ptr_eq(c, &commands)
+            };
+            let mut ticked_fits =
+                cache.ticked_fits.as_ref().filter(|(c, _)| for_these(c)).map(|(_, f)| *f);
+            let mut menu_actions = Vec::new();
             // (Only the rows in sight are named and laid out; the others
             // take a row's room, as Find References' do.)
-            let row = mg_uikit::row_pitch(ui);
-            for i in 0..draft.hits.len() {
-                let room = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(1.0, row));
-                if !ui.is_rect_visible(room) {
-                    ui.add_space(row);
-                    continue;
-                }
-                let place = place_shown(app, &draft.hits[i]);
-                // (Each row exactly a row's room, as the rows out of sight
-                // are given: rows of another height made the list's height
-                // change with what is in sight, and its scroll bar came and
-                // went with each frame.)
-                let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-                let layout = egui::Layout::left_to_right(egui::Align::Center);
-                ui.allocate_ui_with_layout(size, layout, |ui| {
-                    ui.set_min_height(size.y);
-                    ui.set_max_height(size.y);
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    let h = &draft.hits[i];
-                    let mine = h.layer.is_none();
-                    let tick = mg_uikit::Checkbox::without_text(&mut draft.ticked[i]);
-                    let tick = ui.add_enabled(mine, tick);
-                    let r = ui.link(place).on_hover_ui(|ui| {
-                        ui.label(match &h.layer {
-                            Some(layer) => {
-                                format!("{} {}\nRead from {layer}: read-only", h.key, h.path)
+            mg_uikit::show_rows(
+                egui::ScrollArea::vertical().auto_shrink(false),
+                ui,
+                draft.hits.len(),
+                |ui, range| {
+                    for i in range {
+                        let place = place_shown(app, &draft.hits[i]);
+                        // (Each row exactly a row's room: rows of another
+                        // height made the list's height change with what
+                        // is in sight, and its scroll bar came and went.)
+                        let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                        let layout = egui::Layout::left_to_right(egui::Align::Center);
+                        ui.allocate_ui_with_layout(size, layout, |ui| {
+                            ui.set_min_height(size.y);
+                            ui.set_max_height(size.y);
+                            // (The row's own response first, under its tick
+                            // and link: a right click on it opens its menu
+                            // too. Not a Tab stop: its link is.)
+                            let room = egui::Rect::from_min_size(ui.cursor().min, size);
+                            let whole =
+                                ui.interact(room, ui.id().with(("hit-row", i)), egui::Sense::CLICK);
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                            let h = &draft.hits[i];
+                            let mine = h.layer.is_none();
+                            let tick = mg_uikit::Checkbox::without_text(&mut draft.ticked[i]);
+                            let tick = ui.add_enabled(mine, tick);
+                            let r = ui.link(place).on_hover_ui(|ui| {
+                                ui.label(match &h.layer {
+                                    Some(layer) => {
+                                        format!(
+                                            "{} {}\nRead from {layer}: read-only",
+                                            h.key, h.path
+                                        )
+                                    }
+                                    None => format!("{} {}", h.key, h.path),
+                                });
+                            });
+                            if h.layer.is_some() {
+                                tick.on_disabled_hover_text(
+                                    "Read-only: the module has no copy of it",
+                                );
                             }
-                            None => format!("{} {}", h.key, h.path),
+                            if r.clicked() {
+                                go = Some(i);
+                            }
+                            if let Some(layer) = &h.layer {
+                                ui.label(egui::RichText::new(format!("({layer})")).italics());
+                            }
+                            // (Cut at the row's end, whole in its tip; not
+                            // selectable, a right click on it the row's.)
+                            let matched = egui::RichText::new(&h.matched).weak();
+                            ui.add(egui::Label::new(matched).selectable(false))
+                                .on_hover_text(&h.matched);
+                            // Its menu: the plugins' commands for it, or
+                            // (one of those ticked) for each ticked; then
+                            // Copy and Copy All (every result, ticked or
+                            // not: the ticks say what a change takes, not
+                            // what is chosen).
+                            let is_ticked = draft.ticked[i];
+                            let fits = if commands.is_empty() {
+                                false
+                            } else if is_ticked {
+                                *ticked_fits.get_or_insert_with(|| {
+                                    let mut kinds: Vec<mg_plugin::Target> =
+                                        (draft.hits.iter().zip(&draft.ticked))
+                                            .filter(|(_, t)| **t)
+                                            .map(|(h, _)| hit_selected(h).target())
+                                            .collect::<Option<Vec<_>>>()
+                                            .unwrap_or_default();
+                                    kinds.sort();
+                                    kinds.dedup();
+                                    commands.iter().any(|c| c.fits(&kinds))
+                                })
+                            } else {
+                                let alone = [hit_selected(h)];
+                                commands.iter().any(|c| c.fits(&crate::plugins::kinds_of(&alone)))
+                            };
+                            // (Shift+F10 and Ctrl+C where the keyboard is
+                            // on its link, the row's menu's and its focus's
+                            // id.)
+                            let row = r | whole;
+                            let (keyed, ctrl_c) = row_copy::focused_keys(ui, &row);
+                            if ctrl_c {
+                                copy = Some((row_copy::Asked::Row, i));
+                            }
+                            let actions = &mut menu_actions;
+                            let asked = row_copy::row_menu(ui, &row, keyed, |ui| {
+                                if !fits {
+                                    return false;
+                                }
+                                let on: Vec<mg_plugin::Selected> = if is_ticked {
+                                    let mut on: Vec<mg_plugin::Selected> =
+                                        (draft.hits.iter().zip(&draft.ticked))
+                                            .filter(|(_, t)| **t)
+                                            .map(|(h, _)| hit_selected(h))
+                                            .collect();
+                                    on.dedup();
+                                    on
+                                } else {
+                                    vec![hit_selected(h)]
+                                };
+                                crate::plugins::menu_on(ui, &commands, &on, actions);
+                                true
+                            });
+                            if asked.is_some() {
+                                copy = asked.map(|a| (a, i));
+                            }
                         });
-                    });
-                    if h.layer.is_some() {
-                        tick.on_disabled_hover_text("Read-only: the module has no copy of it");
                     }
-                    if r.clicked() {
-                        go = Some(i);
-                    }
-                    if let Some(layer) = &h.layer {
-                        ui.label(egui::RichText::new(format!("({layer})")).italics());
-                    }
-                    ui.weak(&h.matched);
-                    // The plugins' commands for it, or (one of those
-                    // ticked) for each ticked.
-                    if !commands.is_empty() {
-                        let fits = |on: &[mg_plugin::Selected]| {
-                            commands.iter().any(|c| c.fits(&crate::plugins::kinds_of(on)))
-                        };
-                        let alone;
-                        let (on, fits): (&[mg_plugin::Selected], bool) = if draft.ticked[i] {
-                            let (on, fits) = ticked.get_or_insert_with(|| {
-                                let mut on: Vec<mg_plugin::Selected> =
-                                    (draft.hits.iter().zip(&draft.ticked))
-                                        .filter(|(_, t)| **t)
-                                        .map(|(h, _)| on_hit(h))
-                                        .collect();
-                                on.dedup();
-                                let fits = fits(&on);
-                                (on, fits)
-                            });
-                            (on, *fits)
-                        } else {
-                            alone = [on_hit(h)];
-                            (&alone, fits(&alone))
-                        };
-                        if fits {
-                            mg_uikit::context_menu(&r, |ui| {
-                                crate::plugins::menu_on(ui, &commands, on, &mut app.actions);
-                            });
-                        }
-                    }
-                });
+                },
+            );
+            app.actions.extend(menu_actions);
+            if let Some(fits) = ticked_fits
+                && !cache.ticked_fits.as_ref().is_some_and(|(c, f)| for_these(c) && *f == fits)
+            {
+                cache.ticked_fits = Some((commands.clone(), fits));
+                cache_dirty = true;
             }
-        });
+            if cache_dirty {
+                ui.data_mut(|d| d.insert_temp(cache_id, cache));
+            }
+        }
+    }
+    match copy {
+        Some((row_copy::Asked::Row, i)) => {
+            let line = hit_line(app, &draft.hits[i]);
+            ui.ctx().copy_text(line);
+        }
+        Some((row_copy::Asked::All, _)) => {
+            let all: Vec<String> = draft.hits.iter().map(|h| hit_line(app, h)).collect();
+            ui.ctx().copy_text(row_copy::lines(all));
+        }
+        None => {}
     }
     if find && draft.query().is_ok() {
         draft.act.said = None;
@@ -1500,9 +1629,55 @@ pub(crate) fn ui(app: &mut Moonglow, ui: &mut Ui) {
     app.advanced_search = draft;
 }
 
+/// Skill's "At least" field's suffix: " rank" for one, " ranks" else.
+fn rank_suffix(n: u8) -> &'static str {
+    if n == 1 { " rank" } else { " ranks" }
+}
+
+/// Edit Together's button for `n` blueprints of `kind` (its name).
+fn blueprints_together(kind: &str, n: usize) -> String {
+    let word = if n == 1 { "blueprint" } else { "blueprints" };
+    format!("Edit {n} {kind} {word} Together")
+}
+
+/// Edit Together's button for `n` objects of `kind` placed in the area
+/// `area` (as the window names areas).
+fn placed_together(kind: ObjectKind, n: usize, area: &str) -> String {
+    let noun = if n == 1 { kind.name().to_string() } else { kind.label().to_lowercase() };
+    format!("Edit {n} {noun} in {area} Together")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wave 3's counted words: one rank, one blueprint, one creature,
+    /// and the plurals past one.
+    #[test]
+    fn counted_labels_say_one_and_more() {
+        assert_eq!(rank_suffix(1), " rank");
+        assert_eq!(rank_suffix(2), " ranks");
+        assert_eq!(rank_suffix(127), " ranks");
+        let creature = ObjectKind::Creature.name();
+        assert_eq!(
+            blueprints_together(creature, 1),
+            format!("Edit 1 {creature} blueprint Together")
+        );
+        assert_eq!(
+            blueprints_together(creature, 3),
+            format!("Edit 3 {creature} blueprints Together")
+        );
+        assert_eq!(
+            placed_together(ObjectKind::Creature, 1, "start"),
+            "Edit 1 creature in start Together"
+        );
+        assert_eq!(
+            placed_together(ObjectKind::Creature, 2, "start"),
+            "Edit 2 creatures in start Together"
+        );
+        assert_eq!(placed_together(ObjectKind::Door, 1, "Inn"), "Edit 1 door in Inn Together");
+        assert_eq!(placed_together(ObjectKind::Door, 4, "Inn"), "Edit 4 doors in Inn Together");
+    }
 
     /// A search is kept to each placed object kind by its type and the
     /// name the toolset calls it by, then to areas, conversations and the

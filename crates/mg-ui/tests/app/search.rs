@@ -350,11 +350,32 @@ fn find_and_replace_text_across_the_module() {
     };
     assert_eq!(name(&mut h, &keys[0]), "Goblin camp");
     assert_eq!(name(&mut h, &keys[1]), "Orc camp");
+    // (The log counts one time, not "1 times".)
+    let replaced = |h: &Harness<'_, Moonglow>| -> Vec<String> {
+        let log = &h.state().log.entries;
+        log.iter().map(|(_, m)| m.clone()).filter(|m| m.starts_with("Replaced ")).collect()
+    };
+    assert!(
+        replaced(&h).last().is_some_and(|m| m.ends_with("\"orc\" 1 time")),
+        "{:?}",
+        replaced(&h)
+    );
     // Found again: what's left.
     h.get_by_label("1 string, 1 time");
     h.state_mut().actions.push(mg_ui::Action::Undo);
     h.run();
     assert_eq!(name(&mut h, &keys[0]), "Orc camp");
+    // Both replaced: two times.
+    h.get_by_label("Find").click();
+    h.run();
+    h.get_by_label("2 strings, 2 times");
+    h.get_by_label("Replace in 2").click();
+    h.run();
+    assert!(
+        replaced(&h).last().is_some_and(|m| m.ends_with("\"orc\" 2 times")),
+        "{:?}",
+        replaced(&h)
+    );
 }
 
 /// Find and Replace in the tags, by a regular expression: ticked beside
@@ -469,7 +490,7 @@ fn advanced_search_changes_what_it_found_and_takes_conditions_together() {
     let set = Edit::SetResource { key: start, data: Some(git.to_bytes().unwrap()) };
     app.ws.as_mut().unwrap().apply(Command::new("setup", vec![set])).unwrap();
     // (The window at the size it opens at, its form and the list of what
-    // it found under it: a screen of 800 by 600 has room for the form.)
+    // it found under it: a screen of 1280 by 900 has room for the form.)
     let mut h = harness(app, 1280.0, 900.0);
     h.run();
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::AdvancedSearch));
@@ -515,7 +536,7 @@ fn advanced_search_changes_what_it_found_and_takes_conditions_together() {
     // A variable set on the ticked one, in one step.
     h.state_mut().advanced_search.ticked[1] = false;
     h.run();
-    h.get_by_label("Change the 1 ticked").click();
+    h.get_by_label("Change the 1 checked").click();
     h.run();
     type_into_hint(&mut h, "its name, e.g. nQuestState", "nTest");
     type_into_hint(&mut h, "the value", "5");
@@ -551,9 +572,9 @@ fn advanced_search_changes_what_it_found_and_takes_conditions_together() {
     }
 
     // Edit Together, and their area chosen in Edit Areas Together.
-    h.get_by_label("Edit the 2 ticked together").click();
+    h.get_by_label("Edit the 2 checked together").click();
     h.run();
-    h.get_by_label("Edit 2 creature(s) in start Together").click();
+    h.get_by_label("Edit 2 creatures in start Together").click();
     h.run_steps(2);
     let paths = vec![
         mg_edit::GffPath::root().item("Creature List", 0),
@@ -565,11 +586,11 @@ fn advanced_search_changes_what_it_found_and_takes_conditions_together() {
     // (Closed: in this small screen it lies over the search's.)
     h.state_mut().actions.push(mg_ui::Action::CloseTab(both));
     h.run_steps(2);
-    h.get_by_label("Choose 1 Area(s)…").click();
+    h.get_by_label("Choose 1 Area…").click();
     h.run_steps(2);
     // (Edit Areas Together's section, in front in the Right Dock: one area
-    // ticked.)
-    h.get_by_label("1 area ticked");
+    // checked.)
+    h.get_by_label("1 area checked");
 }
 
 /// What Advanced Search found is a list of places (`start.git /Creature
@@ -697,7 +718,7 @@ fn advanced_search_lays_out_the_rows_in_sight() {
     let set = Edit::SetResource { key: start, data: Some(git.to_bytes().unwrap()) };
     app.ws.as_mut().unwrap().apply(Command::new("setup", vec![set])).unwrap();
     // (The window at the size it opens at, its form and the list of what
-    // it found under it: a screen of 800 by 600 has room for the form.)
+    // it found under it: a screen of 1280 by 900 has room for the form.)
     let mut h = harness(app, 1280.0, 900.0);
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::AdvancedSearch));
     h.run_steps(2);
@@ -820,7 +841,7 @@ fn advanced_search_adds_and_removes_list_entries_on_what_it_found() {
     let set = Edit::SetResource { key: start, data: Some(git.to_bytes().unwrap()) };
     app.ws.as_mut().unwrap().apply(Command::new("setup", vec![set])).unwrap();
     // (The window at the size it opens at, its form and the list of what
-    // it found under it: a screen of 800 by 600 has room for the form.)
+    // it found under it: a screen of 1280 by 900 has room for the form.)
     let mut h = harness(app, 1280.0, 900.0);
     h.run();
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::AdvancedSearch));
@@ -840,7 +861,7 @@ fn advanced_search_adds_and_removes_list_entries_on_what_it_found() {
     h.get_by_label("Find").click();
     h.run();
     h.get_by_label("2 found:");
-    h.get_by_label("Change the 2 ticked").click();
+    h.get_by_label("Change the 2 checked").click();
     h.run();
     let act = |h: &mut Harness<'_, Moonglow>, act: Act, row: usize| {
         // (The kind of row chosen first: a new kind starts with none.)
@@ -912,7 +933,7 @@ fn advanced_search_leaves_out_a_condition_and_finds_any_of_them() {
     let set = Edit::SetResource { key: start, data: Some(git.to_bytes().unwrap()) };
     app.ws.as_mut().unwrap().apply(Command::new("setup", vec![set])).unwrap();
     // (The window at the size it opens at, its form and the list of what
-    // it found under it: a screen of 800 by 600 has room for the form.)
+    // it found under it: a screen of 1280 by 900 has room for the form.)
     let mut h = harness(app, 1280.0, 900.0);
     h.run();
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::AdvancedSearch));
@@ -1149,7 +1170,7 @@ fn advanced_search_finds_a_spell_by_its_class_and_the_game_s_blueprints() {
     assert_eq!(d.hits[1].layer.as_deref(), Some("base"));
     assert_eq!(d.ticked, [true, false], "the game's is not ticked");
     assert_eq!(d.chosen().len(), 1);
-    h.get_by_label("Change the 1 ticked");
+    h.get_by_label("Change the 1 checked");
     // Tick All leaves it out; a tick set by hand is not taken.
     h.state_mut().advanced_search.ticked = vec![true, true];
     h.run();
@@ -1193,7 +1214,7 @@ fn advanced_search_lists_a_property_s_values_in_the_cost_table_s_order() {
 /// by its name where areas are shown by name.
 #[test]
 fn references_name_areas_as_the_window_does() {
-    let Some((mut h, area)) = area_harness("refs-area-names") else { return };
+    let Some((mut h, area)) = area_ui_harness("refs-area-names") else { return };
     let waypoint = ResKey::parse("nw_waypoint001", ResType::UTW).unwrap();
     h.state_mut().settings.area_names = false;
     h.state_mut().actions.push(mg_ui::Action::FindReferences(waypoint));
@@ -1327,4 +1348,184 @@ fn the_references_window_says_where_things_are() {
     assert_eq!(order, by_text);
     assert_eq!(order[1], "start.git /Creature List[0]/ScriptHeartbeat");
     assert_eq!(order[2], "start.git /Creature List[10]/ScriptHeartbeat");
+}
+
+/// Advanced Search's results (5.2's W4): a row's menu (a right click on
+/// its place or its row) has Copy (its place and what matched) and Copy
+/// All (every result, ticked or not, in the list's order).
+#[test]
+fn advanced_search_s_results_copy_from_their_menus() {
+    use mg_edit::{Command, Edit};
+    use mg_gff::{Struct, Value};
+    use mg_ui::row_copy::{COPY, COPY_ALL};
+    use mg_ui::search::{Condition, Kind};
+    let dir = mg_testkit::scratch_dir("w4-advanced-search-copy");
+    let path = sample_module(&dir);
+    let mut app = app_with(Vec::new());
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let creatures: Vec<Struct> = (0..3)
+        .map(|i| {
+            let mut c = Struct::new(4);
+            c.set("Tag", Value::String(format!("T{i:03}").into_bytes()));
+            let mut v = Struct::new(0);
+            v.set("Name", Value::String(b"nQuest".to_vec()));
+            v.set("Type", Value::Dword(1));
+            v.set("Value", Value::Int(i));
+            c.set("VarTable", Value::List(vec![v]));
+            c
+        })
+        .collect();
+    let mut git = Gff::new(*b"GIT ");
+    git.root.set("Creature List", Value::List(creatures));
+    let start = ResKey::parse("start", ResType::GIT).unwrap();
+    let set = Edit::SetResource { key: start, data: Some(git.to_bytes().unwrap()) };
+    app.ws.as_mut().unwrap().apply(Command::new("setup", vec![set])).unwrap();
+    let mut h = harness(app, 1280.0, 900.0);
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::AdvancedSearch));
+    h.run_steps(2);
+    h.state_mut().advanced_search.first =
+        Condition { kind: Kind::Variable, name: "nQuest".into(), ..Default::default() };
+    h.run();
+    h.get_by_label("Find").click();
+    h.run();
+    h.get_by_label("3 found:");
+    let copied = |h: &mut Harness<'_, Moonglow>, item: &str| -> Vec<String> {
+        h.get_all_by_label(item).last().unwrap_or_else(|| panic!("{item} in the menu")).click();
+        h.step();
+        let out = (h.output().platform_output.commands.iter())
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        h.run();
+        out
+    };
+    let place = |h: &Harness<'_, Moonglow>, tag: &str| {
+        h.get_by_label_contains(&format!("creature {tag}")).accesskit_node().label().unwrap()
+    };
+    let first = place(&h, "T000");
+    h.get_by_label_contains("creature T000").click_secondary();
+    h.run();
+    let one = copied(&mut h, COPY);
+    assert_eq!(one.len(), 1);
+    assert!(one[0].starts_with(&format!("{first}: ")), "its place first: {one:?}");
+    // (A right click on the row past its words opens the menu too.)
+    let r = h.get_by_label_contains("creature T001").rect();
+    let at = egui::pos2(r.right() + 3.0, r.center().y);
+    h.hover_at(at);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run();
+    let all = copied(&mut h, COPY_ALL);
+    let lines: Vec<&str> = all[0].lines().collect();
+    assert_eq!(lines.len(), 3, "every result: {lines:?}");
+    assert_eq!(lines[0], one[0], "in the list's order");
+    assert!(lines[2].starts_with(&format!("{}: ", place(&h, "T002"))), "{lines:?}");
+    // The keyboard on a result's link (its row's Tab stop): Ctrl+C copies
+    // the row, Shift+F10 opens its menu.
+    h.get_by_label_contains("creature T001").focus();
+    h.run();
+    assert!(h.get_by_label_contains("creature T001").accesskit_node().is_focused());
+    assert_eq!(copy_now(&mut h), [lines[1]], "Ctrl+C: the row the keyboard is on");
+    menu_by_keys(&mut h, &|h| {
+        h.get_by_label_contains("creature T001").accesskit_node().is_focused()
+    });
+}
+
+/// Ctrl+C (the backend's Copy): what it copied to the clipboard.
+fn copy_now(h: &mut Harness<'_, Moonglow>) -> Vec<String> {
+    h.event(egui::Event::Copy);
+    h.step();
+    let out = (h.output().platform_output.commands.iter())
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    h.run();
+    out
+}
+
+/// The open menu's `item` clicked: what it copied to the clipboard.
+fn menu_copies(h: &mut Harness<'_, Moonglow>, item: &str) -> Vec<String> {
+    h.get_all_by_label(item).last().unwrap_or_else(|| panic!("{item} in the menu")).click();
+    h.step();
+    let out = (h.output().platform_output.commands.iter())
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    h.run();
+    out
+}
+
+/// Shift+F10 with the keyboard on a row: its menu open, Copy taking the
+/// keyboard; Escape closes it and gives the keyboard back (`back` says
+/// whether it has it).
+fn menu_by_keys(h: &mut Harness<'_, Moonglow>, back: &dyn Fn(&Harness<'_, Moonglow>) -> bool) {
+    use mg_ui::row_copy::{COPY, COPY_ALL};
+    press_now(h, egui::Modifiers::SHIFT, egui::Key::F10);
+    h.run();
+    let copy = h.get_all_by_label(COPY).last().expect("Shift+F10 opens its menu");
+    assert!(copy.accesskit_node().is_focused(), "Copy has the keyboard");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.query_by_label(COPY_ALL).is_none(), "Escape closes it");
+    assert!(back(h), "Escape gives the keyboard back to the row");
+}
+
+/// References' places ("Used in N places"): a place's menu has Copy (the
+/// place, then the resource and field that name it) and Copy All (every
+/// place, in the list's order), after the plugins' commands; with the
+/// keyboard on its link, Ctrl+C copies it and Shift+F10 opens its menu.
+#[test]
+fn references_places_copy_from_their_menus_and_keys() {
+    use mg_ui::row_copy::{COPY, COPY_ALL};
+    let dir = mg_testkit::scratch_dir("w4-references-copy");
+    let path = sample_module(&dir);
+    let mut m = Module::open(&path).unwrap();
+    let mut git = Gff::new(*b"GIT ");
+    for tag in ["GREETER", "PORTER"] {
+        let mut c = mg_schema::git::CREATURE_LIST.new_item();
+        c.write(&mg_schema::git::creature_list::SCRIPT_SPAWN, ResRef::from_str("hello").unwrap());
+        c.set("Tag", mg_gff::Value::String(tag.as_bytes().to_vec()));
+        git.root.items_mut(&mg_schema::git::CREATURE_LIST).push(c);
+    }
+    m.set_gff(ResKey::parse("start", ResType::GIT).unwrap(), &git).unwrap();
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let mut h = harness(app, 1280.0, 800.0);
+    h.run();
+    let hello = ResKey::parse("hello", ResType::NSS).unwrap();
+    h.state_mut().actions.push(mg_ui::Action::FindReferences(hello));
+    h.run_steps(3);
+    h.get_by_label("Used in 2 places:");
+    let line = |tag: &str, i: usize| {
+        format!("start › creature {tag} › OnSpawn: start.git /Creature List[{i}]/ScriptSpawn")
+    };
+    let greeter = "start › creature GREETER › OnSpawn";
+    h.get_by_label(greeter).click_secondary();
+    h.run();
+    assert_eq!(menu_copies(&mut h, COPY), [line("GREETER", 0)], "Copy: the place and field");
+    h.get_by_label(greeter).click_secondary();
+    h.run();
+    let all = format!("{}\n{}", line("GREETER", 0), line("PORTER", 1));
+    assert_eq!(menu_copies(&mut h, COPY_ALL), [all], "Copy All: every place");
+    let porter = "start › creature PORTER › OnSpawn";
+    h.get_by_label(porter).focus();
+    h.run();
+    assert!(h.get_by_label(porter).accesskit_node().is_focused(), "its link has the keyboard");
+    assert_eq!(copy_now(&mut h), [line("PORTER", 1)], "Ctrl+C: the place the keyboard is on");
+    menu_by_keys(&mut h, &|h| h.get_by_label(porter).accesskit_node().is_focused());
 }

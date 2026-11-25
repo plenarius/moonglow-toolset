@@ -61,11 +61,12 @@ fn talk_window(mode: Mode, name: &str, width: f32) -> Harness<'static, Moonglow>
 /// long enough that Find looks through it over many frames.
 fn long_dialog() -> mg_tlk::Tlk {
     let mut tlk = our_dialog();
-    for n in 40..150_040 {
-        let text =
-            if n == 150_039 { "A needle in the hay".to_string() } else { format!("Hay {n}") };
-        tlk.entries.push(mg_tlk::TlkEntry::text(text.as_str()));
-    }
+    let filler = mg_tlk::TlkEntry::text(
+        "The watch patrols the outer gate until dusk and keeps an eye on passing wagons, \
+         merchants, and travelers arriving along the cobbled road from the east.",
+    );
+    tlk.entries.resize(150_039, filler);
+    tlk.entries.push(mg_tlk::TlkEntry::text("A needle in the hay"));
     tlk
 }
 
@@ -156,25 +157,6 @@ fn shows(h: &Harness<'_, Moonglow>, name: &str, value: &str) -> bool {
         matches!(n.accesskit_node().role(), Role::TextInput | Role::MultilineTextInput)
             && n.accesskit_node().value().as_deref() == Some(value)
     })
-}
-
-/// The Status Bar says each of `what` and none of `not` (waited for).
-#[track_caller]
-fn says(h: &mut Harness<'_, Moonglow>, what: &[&str], not: &[&str]) {
-    let started = std::time::Instant::now();
-    loop {
-        let now = h.state().status_said();
-        let has = |w: &&str| now.iter().any(|s| s == w);
-        let drawn = |w: &&str| h.get_by_label("Status Bar").query_by_label(w).is_some();
-        if what.iter().all(has) && !not.iter().any(has) && what.iter().all(drawn) {
-            return;
-        }
-        assert!(
-            started.elapsed().as_secs() < 10,
-            "never said {what:?} without {not:?}: it says {now:?}"
-        );
-        h.step();
-    }
 }
 
 /// `dialog.tlk` opens read-only, numbered by its own StrRefs (the plan's
@@ -607,41 +589,7 @@ fn choose_held(h: &mut Harness<'_, Moonglow>, which: Which, row: usize) {
 /// its edge, every one-line field in sight as wide as its text.
 #[track_caller]
 fn fits(h: &Harness<'_, Moonglow>, dock: egui::Rect, what: &str) {
-    let in_sight = |n: &egui_kittest::Node<'_>| {
-        let r = n.rect();
-        r.left() >= dock.left() - 0.5
-            && r.top() >= dock.top() - 0.5
-            && r.bottom() <= dock.bottom()
-            && r.width() > 0.0
-    };
-    let past: Vec<String> = h
-        .get_all_by(|n| n.bounding_box().is_some())
-        .filter(in_sight)
-        .filter(|n| n.rect().right() > dock.right() + 0.5)
-        .map(|n| {
-            let a = n.accesskit_node();
-            format!("{:?} {:?} {:?} {:?}", a.role(), a.label(), a.value(), n.rect())
-        })
-        .collect();
-    assert!(past.is_empty(), "{what}: past the edge {past:?}");
-    let margins = {
-        let m = mg_uikit::controls::FIELD_MARGIN;
-        f32::from(m.left) + f32::from(m.right)
-    };
-    let cut: Vec<String> = h
-        .get_all_by_role(egui::accesskit::Role::TextInput)
-        .filter(in_sight)
-        .filter_map(|n| {
-            let value = n.accesskit_node().value()?;
-            let font = egui::FontId::monospace(mg_uikit::metrics::BODY_SIZE);
-            let words = h.ctx.fonts_mut(|f| {
-                f.layout_no_wrap(value.clone(), font, egui::Color32::WHITE).size().x
-            });
-            (n.rect().width() + 0.5 < words + margins)
-                .then(|| format!("{value:?}: {} for {}", n.rect().width(), words + margins))
-        })
-        .collect();
-    assert!(cut.is_empty(), "{what}: cut short in their fields {cut:?}");
+    fits_dock(h, dock, what, egui::FontId::monospace(mg_uikit::metrics::BODY_SIZE), false);
 }
 
 /// Every panel of a talk table fits the Right Dock from its least width
@@ -720,38 +668,7 @@ fn the_string_panel_is_never_taller_where_wider_and_comes_to_rest() {
     h.state_mut().talk.as_mut().unwrap().set_line(9, &l, None).unwrap();
     for row in [9, 4, 6] {
         choose(&mut h, Which::Module, row);
-        let mut was: Option<(u32, f32)> = None;
-        // (The least height at any narrower width: a slow growth, a
-        // quarter point a step, is caught too.)
-        let mut least: Option<(u32, f32)> = None;
-        let mut changes = Vec::new();
-        for w in 270..=480u32 {
-            h.state_mut().settings.right_dock_width = Some(w);
-            settle(&mut h);
-            let high = string_height(&h);
-            if let Some((at, low)) = least {
-                assert!(high <= low + 0.5, "{row}: {low} at {at}, {high} at {w}");
-            }
-            if let Some((_, before)) = was
-                && (high - before).abs() > 0.5
-            {
-                changes.push(w);
-            }
-            was = Some((w, high));
-            if least.is_none_or(|(_, low)| high < low) {
-                least = Some((w, high));
-            }
-        }
-        for w in changes {
-            for at in w.saturating_sub(2)..=w + 2 {
-                h.state_mut().settings.right_dock_width = Some(at);
-                for high in (700..=900).step_by(20) {
-                    h.set_size(egui::vec2(1600.0, high as f32));
-                    settle(&mut h);
-                }
-            }
-            h.set_size(egui::vec2(1600.0, 900.0));
-        }
+        sweep_dock_heights(&mut h, &row.to_string(), string_height, true);
     }
 }
 
@@ -2026,6 +1943,97 @@ fn a_table_made_with_dialog_tlk_shown_takes_its_place() {
     assert_eq!(Which::shown(h.state()), Which::Module, "the made table shown");
     assert_eq!(h.state().talk.as_ref().unwrap().name, "mg_made");
     assert!(h.state().game_talk.is_none(), "the game's copy let go of");
+}
+
+/// A line of the module's talk table renamed and saved in the Talk Table
+/// tab: the palette's Find finds the blueprint named by it by its new name
+/// (the review's C-5: what is kept by the load order kept the old one).
+#[test]
+fn a_line_renamed_and_saved_is_found_by_its_new_name() {
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-talk-renamed-found");
+    let user = user_folder(&dir, &["tlk"]);
+    let line = |text: &str| Line { text: text.into(), ..our_line(1) };
+    let mut t = Table::create("mg_mine", &user.join("tlk"), mg_core::Language::ENGLISH, false);
+    t.add_line(&line("Grimbold the Old")).unwrap();
+    t.save().unwrap();
+    let path = sample_module(&dir);
+    let mut m = mg_module::Module::open(&path).unwrap();
+    let mut info = m.info().unwrap();
+    info.root.set("Mod_CustomTlk", mg_gff::Value::String(b"mg_mine".to_vec()));
+    m.set_info(&info).unwrap();
+    // (The game's bandit, named by the module's table's first line.)
+    let game = game_data(&root);
+    let bandit = game.resman.get_named("nw_bandit001", ResType::UTC).unwrap();
+    let mut utc = mg_gff::Gff::read(&bandit).unwrap();
+    let named = |n| mg_gff::Value::LocString(LocString::from_strref(mg_core::StrRef(n)));
+    utc.root.set("FirstName", named(16_777_216));
+    utc.root.set("LastName", named(u32::MAX));
+    utc.root.set("Tag", mg_gff::Value::String(b"C5_NAMED".to_vec()));
+    utc.root.set("TemplateResRef", mg_gff::Value::ResRef(b"c5_named".to_vec()));
+    m.set_gff(ResKey::parse("c5_named", ResType::UTC).unwrap(), &utc).unwrap();
+    m.save().unwrap();
+    let mut app = game_app(&root, Some(user.clone()));
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let file = user.join("tlk/mg_mine.tlk");
+    let found = mg_module::talk::Found {
+        source: mg_module::talk::Source::File(file.clone()),
+        data: std::fs::read(&file).unwrap(),
+    };
+    app.talk = Some(Table::open("mg_mine", found, None).unwrap());
+    app.palette.kind = mg_module::palette::BlueprintKind::Creature;
+    (app.palette.tiles, app.palette.custom) = (false, true);
+    app.palette.filter = "grimbold".into();
+    show_palette(&mut app);
+    let mut h = harness(app, 1600.0, 900.0);
+    settle(&mut h);
+    let shown = |h: &Harness<'_, Moonglow>, name: &str| {
+        let palette = right_dock_rect(h);
+        h.query_all_by_label_contains(name).any(|n| palette.contains(n.rect().center()))
+    };
+    assert!(shown(&h, "Grimbold the Old"), "found by its name");
+    h.state_mut().talk.as_mut().unwrap().set_line(0, &line("Hrothgar the Young"), None).unwrap();
+    h.state_mut().actions.push(mg_ui::Action::SaveTalkTable);
+    settle(&mut h);
+    h.state_mut().palette.filter = "hrothgar".into();
+    settle(&mut h);
+    assert!(shown(&h, "Hrothgar the Young"), "found by its new name");
+}
+
+/// Create looks for the file again as it is clicked: one that landed in
+/// the tlk folder since the panel last looked (it looks every two
+/// seconds) is not written over (the review's C-4).
+#[test]
+fn create_writes_over_no_table_that_landed_meanwhile() {
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-talk-create-landed");
+    let user = user_folder(&dir, &["tlk"]);
+    let path = sample_module(&dir);
+    let mut app = game_app_with(&root, Some(user.clone()), NoDialogs::default());
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let mut h = harness(app, 1600.0, 900.0);
+    settle(&mut h);
+    h.state_mut().actions.push(mg_ui::Action::ShowGameTalk);
+    settle(&mut h);
+    let field = h
+        .get_all_by_label("New talk table")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::TextInput);
+    field.expect("Module's Table's name").scroll_to_me();
+    settle(&mut h);
+    type_into_hint(&mut h, "name", "mg_landed");
+    h.get_by_label("Create").scroll_to_me();
+    settle(&mut h);
+    // (Theirs, written as the panel still has none there.)
+    let theirs = user.join("tlk/mg_landed.tlk");
+    std::fs::write(&theirs, b"theirs").unwrap();
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs", "not written over");
+    let log = &h.state().log.entries;
+    assert!(log.iter().any(|(_, m)| m.contains("is there already")), "said: {log:?}");
+    assert!(h.state().talk.as_ref().is_none_or(|t| t.name != "mg_landed"), "not made");
 }
 
 /// The way out of `dialog.tlk`, More › Module's Table, with no game data

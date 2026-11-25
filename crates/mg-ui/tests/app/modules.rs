@@ -251,7 +251,7 @@ fn a_first_save_builds_once_and_not_when_called_off() {
     h.state_mut().settings.build_on_save = true;
     h.run();
     let builds = |h: &Harness<'_, Moonglow>| {
-        h.state().log.entries.iter().filter(|(_, m)| m == "Building Module...").count()
+        h.state().log.entries.iter().filter(|(_, m)| m == "Building Module…").count()
     };
     let dialogs = std::mem::replace(&mut h.state_mut().dialogs, Box::new(NoDialogs::default()));
     h.state_mut().actions.push(mg_ui::Action::Save);
@@ -550,6 +550,179 @@ fn export_to_an_archive_that_is_there_asks_to_append_overwrite_or_cancel() {
     assert!(!replaced.contains(&keep) && replaced.contains(&area), "{replaced:?}");
 }
 
+/// File › Export Changed Resources… (Twohand's ask): grayed on a module
+/// just opened, with its tip; after edits and a save (the session
+/// outlives a save), the Export window with exactly the resources changed
+/// ticked (an edited area, an edited script, a new script), alone (not
+/// what they use) and said; its Export writes those, as they are now.
+#[test]
+fn export_changed_resources_ticks_what_changed_since_the_module_was_opened() {
+    let dir = mg_testkit::scratch_dir("ui-export-changed");
+    let path = sample_module(&dir);
+    let erf = dir.join("changed.erf");
+    let mut app =
+        Moonglow::new(None, Box::new(NoDialogs { save: vec![erf.clone()], ..Default::default() }));
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    h.run();
+    let menu_item = |h: &mut Harness<'_, Moonglow>| {
+        h.get_by_label("File").click();
+        h.run();
+        let item = h.get_by_label("Export Changed Resources…");
+        let off = item.accesskit_node().is_disabled();
+        item.hover();
+        h.run();
+        off
+    };
+    assert!(menu_item(&mut h), "nothing changed yet");
+    assert!(h.query_by_label("No resource has changed since the module was opened").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run();
+    // An area's field and a script edited, a script added; saved.
+    let area = ResKey::parse("start", ResType::ARE).unwrap();
+    let hello = ResKey::parse("hello", ResType::NSS).unwrap();
+    let added = ResKey::parse("mg_added", ResType::NSS).unwrap();
+    let text = |t: &str| Some(t.as_bytes().to_vec());
+    let edits = vec![
+        mg_edit::Edit::SetField {
+            key: area,
+            path: mg_gff::GffPath::root(),
+            label: "Tag".into(),
+            value: Some(mg_gff::Value::String(b"CHANGED".to_vec())),
+        },
+        mg_edit::Edit::SetResource { key: hello, data: text("void main() { int changed; }\n") },
+        mg_edit::Edit::SetResource { key: added, data: text("void main() {}\n") },
+    ];
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Edits", edits)));
+    h.run();
+    h.state_mut().actions.push(mg_ui::Action::Save);
+    settle(&mut h);
+    assert!(!h.state().ws.as_ref().unwrap().is_modified(), "saved");
+    assert!(!menu_item(&mut h), "changed since the module was opened, saved or not");
+    h.get_by_label("Export Changed Resources…").click();
+    h.run();
+    let draft = h.state().export.clone().expect("the Export window");
+    let wanted: std::collections::BTreeSet<ResKey> = [area, hello, added].into();
+    assert_eq!(draft.selected, wanted);
+    assert!(!draft.dependencies, "what changed alone, not what it uses");
+    h.get_by_label("3 resources changed since the module was opened");
+    h.run_steps(3);
+    assert!(h.get_by_label("Select Changed").accesskit_node().is_disabled(), "all ticked already");
+    h.get_by_label("Export 3…").click();
+    settle(&mut h);
+    let bytes = std::fs::read(&erf).expect("written");
+    let archive = mg_erf::Erf::read(&bytes).unwrap();
+    let held: std::collections::BTreeSet<ResKey> =
+        archive.entries.iter().map(|e| ResKey::new(e.resref, e.restype)).collect();
+    assert_eq!(held, wanted);
+    let ws = h.state().ws.as_ref().unwrap();
+    for e in &archive.entries {
+        let k = ResKey::new(e.resref, e.restype);
+        assert_eq!(archive.data(e).ok().as_deref(), ws.module.get(&k), "{k}: as it is now");
+    }
+}
+
+/// Export Changed Resources with the game's data (a save makes the
+/// custom palettes): the module opened again starts a session of its own;
+/// a save with nothing changed changes nothing; a change
+/// to module.ifo alone leaves the command grayed, and the window lists it
+/// unticked; an area's .git edited ticks its .are and .gic with it; a
+/// resource removed is said; a script typed in and not saved is warned
+/// of, and goes out as stored. The archive holds exactly what is ticked.
+#[test]
+fn export_changed_resources_leaves_module_ifo_out_and_warns_of_unsaved_scripts() {
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-export-changed-edges");
+    let path = sample_module(&dir);
+    let area = ResKey::parse("start", ResType::ARE).unwrap();
+    let git = ResKey::parse("start", ResType::GIT).unwrap();
+    let gic = ResKey::parse("start", ResType::GIC).unwrap();
+    let gone = ResKey::parse("mg_gone", ResType::NSS).unwrap();
+    let hello = ResKey::parse("hello", ResType::NSS).unwrap();
+    let ifo_key = ResKey::parse("module", ResType::IFO).unwrap();
+    let mut m = Module::open(&path).unwrap();
+    m.set(git, Gff::new(*b"GIT ").to_bytes().unwrap());
+    m.set(gic, Gff::new(*b"GIC ").to_bytes().unwrap());
+    m.set(gone, b"void main() {}\n".to_vec());
+    m.save().unwrap();
+    let erf = dir.join("changed.erf");
+    let dialogs = NoDialogs { save: vec![erf.clone()], ..Default::default() };
+    let mut app = game_app_with(&root, None, dialogs);
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    settle(&mut h);
+    let changed = |h: &Harness<'_, Moonglow>| {
+        h.state().ws.as_ref().unwrap().changed_since_opened().changed.clone()
+    };
+    let grayed = |h: &mut Harness<'_, Moonglow>| {
+        h.get_by_label("File").click();
+        h.run();
+        let off = h.get_by_label("Export Changed Resources…").accesskit_node().is_disabled();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        off
+    };
+    // The first save makes the custom palettes the module lacked: new
+    // resources, changed. Opened again (a session of its own), and saved
+    // with nothing changed: nothing changed.
+    h.state_mut().actions.push(mg_ui::Action::Save);
+    settle(&mut h);
+    assert!(changed(&h).iter().all(|k| k.restype == ResType::ITP), "{:?}", changed(&h));
+    h.state_mut().open_module(&path);
+    settle(&mut h);
+    assert_eq!(changed(&h), [], "another session");
+    h.state_mut().actions.push(mg_ui::Action::Save);
+    settle(&mut h);
+    assert_eq!(changed(&h), [], "a save alone changes nothing");
+    // module.ifo alone: grayed.
+    let field = |key: ResKey, label: &str, value: mg_gff::Value| mg_edit::Edit::SetField {
+        key,
+        path: mg_gff::GffPath::root(),
+        label: label.into(),
+        value: Some(value),
+    };
+    let xp = field(ifo_key, "Mod_XPScale", mg_gff::Value::Byte(50));
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("XP", vec![xp])));
+    h.run();
+    assert_eq!(changed(&h), [ifo_key]);
+    assert!(grayed(&mut h), "module.ifo alone is not exported");
+    // The area's .git edited, a script removed, another typed in unsaved.
+    let edits = vec![
+        field(git, "Tag", mg_gff::Value::String(b"CHANGED".to_vec())),
+        mg_edit::Edit::SetResource { key: gone, data: None },
+    ];
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Edits", edits)));
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Script(hello)));
+    h.run();
+    h.state_mut().script_tools.jump = Some((hello, 0));
+    h.run_steps(3);
+    h.event(egui::Event::Text("// typed\n".into()));
+    h.run_steps(3);
+    assert!(h.state().script_text(hello).unwrap().starts_with("// typed"));
+    assert!(!grayed(&mut h));
+    h.state_mut().actions.push(mg_ui::Action::ExportChangedDialog);
+    h.run_steps(3);
+    let draft = h.state().export.clone().expect("the Export window");
+    let wanted: std::collections::BTreeSet<ResKey> = [area, git, gic].into();
+    assert_eq!(draft.selected, wanted, "the area whole, module.ifo unticked");
+    h.get_by_label("1 resource changed since the module was opened");
+    h.get_by_label("Checked with their areas' other files (2).");
+    h.get_by_label_contains("module.ifo changed too, left unchecked");
+    h.get_by_label("1 resource was removed since, not exported.");
+    h.get_by_label_contains("Careful: open with unsaved changes, which the export leaves out");
+    h.get_by_label("Export 3…").click();
+    settle(&mut h);
+    let bytes = std::fs::read(&erf).expect("written");
+    let archive = mg_erf::Erf::read(&bytes).unwrap();
+    let held: std::collections::BTreeSet<ResKey> =
+        archive.entries.iter().map(|e| ResKey::new(e.resref, e.restype)).collect();
+    assert_eq!(held, wanted);
+    let ws = h.state().ws.as_ref().unwrap();
+    assert_eq!(ws.module.get(&hello), Some(&b"void main() { }\n"[..]), "as stored");
+}
+
 /// File dialogs that answer from `NoDialogs`' lists and note where each
 /// started (what a save suggested, where an open began).
 struct Started(NoDialogs, std::rc::Rc<std::cell::RefCell<Vec<Option<std::path::PathBuf>>>>);
@@ -779,10 +952,12 @@ fn import_resources_chooses_every_overwrite_at_once_and_resizes() {
     let pointer = corner + egui::vec2(60.0, 150.0);
     assert!((now.right_bottom() - pointer).length() < 12.0, "its corner at the pointer: {now:?}");
     // (A picture to look at, where there is a GPU.)
-    if adapter() {
+    if let Some(dir) = shot_dir("ui-import-overwrites")
+        && adapter()
+    {
         mg_testkit::gpu::hold();
         let img = h.render().expect("render");
-        img.save(mg_testkit::output_dir("ui-import-overwrites").join("resized.png")).unwrap();
+        img.save(dir.join("resized.png")).unwrap();
     }
     // Imported with every one ticked: the archive's scripts in the module.
     h.get_by_label("Select All").click();
@@ -957,10 +1132,13 @@ fn import_files_says_which_editors_hold_unsaved_changes() {
     settle(&mut h);
     assert_eq!(h.state().import.as_ref().unwrap().unsaved, [hello]);
     h.get_by_label("hello.nss (open, with unsaved changes)");
-    assert!(h.query_by_label_contains("Careful: one ticked is open").is_none());
+    assert!(h.query_by_label_contains("Careful: one checked item is open").is_none());
     h.get_by_label("Select All").click();
     settle(&mut h);
-    h.get_by_label_contains("Careful: one ticked is open with unsaved changes");
+    h.get_by_label(
+        "Careful: one checked item is open with unsaved changes. The import replaces it in the \
+         module, but its editor keeps your changes, and saving them writes over what was imported.",
+    );
     h.get_by_label("Import").click();
     settle(&mut h);
     let log = &h.state().log.entries;
@@ -2053,7 +2231,7 @@ fn text_without_an_encoding_table_is_windows_1252() {
 #[test]
 fn build_module_compiles_and_reports() {
     use mg_edit::{Command, Edit, GffPath};
-    let Some((mut h, area)) = area_harness("build") else { return };
+    let Some((mut h, area)) = area_ui_harness("build") else { return };
     // A script that does not compile, an encounter blueprint whose creature
     // entry has a stale CR, and a waypoint naming a missing script.
     let mut ute = Gff::new(*b"UTE ");
@@ -2535,7 +2713,7 @@ fn a_script_goes_to_the_scratch_folder_compiled() {
 /// with what it compiles to now, not with the older compiled script.
 #[test]
 fn a_stale_compiled_script_is_compiled_before_it_goes_out() {
-    let Some((mut h, _)) = area_harness("stale-ncs") else { return };
+    let Some((mut h, _)) = area_ui_harness("stale-ncs") else { return };
     let key = ResKey::parse("hello", ResType::NSS).unwrap();
     let ncs = ResKey::parse("hello", ResType::NCS).unwrap();
     let scratch = mg_testkit::scratch_dir("ui-stale-ncs").join("scratch");
@@ -2639,7 +2817,7 @@ fn an_area_goes_to_the_scratch_folder() {
         // (One the area doesn't use stays behind.)
         m.set(ResKey::parse("mg_other", ResType::NSS).unwrap(), b"void main() {}\n".to_vec());
     };
-    let Some((mut h, area)) = area_harness_with("area-scratch", "ttr01", None, 4, None, &enter)
+    let Some((mut h, area)) = area_ui_harness_with("area-scratch", "ttr01", None, 4, None, &enter)
     else {
         return;
     };

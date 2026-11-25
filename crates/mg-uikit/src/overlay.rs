@@ -68,6 +68,9 @@ pub fn paint_compass(painter: &Painter, t: &Tokens, center: Pos2, north: f32) {
     // `y="22" dy="-4"`: its baseline 10 above the middle, its middle some
     // 13).
     let font = FontId::proportional(9.0 * scale);
+    // (In `text`: it stands on the disc, `overlay`, the needle under
+    // its middle a point wide; `on-fill` was white on the light theme's
+    // near-white disc.)
     let galley = painter.layout_no_wrap("N".to_string(), font, t.text);
     let at = turn(0.0, -13.5);
     let half = galley.size() / 2.0;

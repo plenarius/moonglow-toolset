@@ -874,8 +874,10 @@ fn an_item_s_and_a_body_s_parts_without_models_are_said() {
     app.palette_dock = false;
     let mut h = harness(app, 1100.0, 700.0);
     h.run_steps(3);
-    let shots = mg_testkit::scratch_dir("ui-bp-part-no-model-shot");
-    h.render().expect("render").save(shots.join("item.png")).unwrap();
+    let shots = shot_dir("ui-bp-part-no-model-shot");
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("item.png")).unwrap();
+    }
     let said = |piece: &str, field: &str| {
         format!("No model: {piece} (its {field}) isn't in the module, its haks or the game")
     };
@@ -884,7 +886,9 @@ fn an_item_s_and_a_body_s_parts_without_models_are_said() {
     assert!(h.query_by_label_contains("wswls_b_").is_none(), "its hilt is there");
     h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Blueprint(man_key)));
     h.run_steps(3);
-    h.render().expect("render").save(shots.join("creature.png")).unwrap();
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("creature.png")).unwrap();
+    }
     assert!(
         h.query_by_label(&said("pmh0_shinl249", "BodyPart_LShin")).is_some(),
         "the shin under the appearance"
@@ -936,8 +940,10 @@ fn a_placeable_s_appearance_without_a_model_is_said() {
         w.set_position(egui::pos2(40.0, 40.0)).set_size(size);
     }
     h.run_steps(3);
-    let shots = mg_testkit::scratch_dir("ui-bp-no-model-shot");
-    h.render().expect("render").save(shots.join("chest.png")).unwrap();
+    let shots = shot_dir("ui-bp-no-model-shot");
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("chest.png")).unwrap();
+    }
     let warning = "No model: ";
     assert!(h.query_by_label_contains(warning).is_none(), "the chest has its model");
 
@@ -959,14 +965,18 @@ fn a_placeable_s_appearance_without_a_model_is_said() {
     h.get(egui_kittest::kittest::by().predicate(filter)).type_text("Missing_Thing");
     h.run_steps(2);
     // The list marks the row with no model (dansen9191's report).
-    h.render().expect("render").save(shots.join("list.png")).unwrap();
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("list.png")).unwrap();
+    }
     let marked = format!("Missing_Thing{}", mg_rules::appearance::NO_MODEL);
     let choice = h.get_by_label(&marked).rect().center();
     h.hover_at(choice);
     press(&h, choice, true, egui::Modifiers::NONE);
     press(&h, choice, false, egui::Modifiers::NONE);
     h.run_steps(3);
-    h.render().expect("render").save(shots.join("no-model.png")).unwrap();
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("no-model.png")).unwrap();
+    }
     assert_eq!(field(&mut h, &key).integer("Appearance"), Some(row as i64));
     let said = format!(
         "No model: plc_x99 (placeables.2da row {row}, ModelName) isn't in the module, its haks \
@@ -999,7 +1009,9 @@ fn a_placeable_s_appearance_without_a_model_is_said() {
     h.run_steps(3);
     h.state_mut().placeable_gallery.as_mut().unwrap().filter = "Missing_Thing".into();
     h.run_steps(10);
-    h.render().expect("render").save(shots.join("gallery.png")).unwrap();
+    if let Some(ref shots) = shots {
+        h.render().expect("render").save(shots.join("gallery.png")).unwrap();
+    }
     let tile = |n: &egui_kittest::Node<'_>| n.rect().height() > 90.0;
     assert!(h.get_all_by_label("Missing_Thing").any(|n| tile(&n)), "its picture in the gallery");
 }
@@ -3404,7 +3416,7 @@ fn class_spell_lists_save_clear_and_load() {
     assert!(before.iter().any(|l| !l.is_empty()), "the sorcerer knows spells");
     h.state_mut().dialogs =
         Box::new(mg_ui::NoDialogs { save: vec![path.clone()], ..Default::default() });
-    h.get_by_label("Save Class Spell List").click();
+    h.get_by_label("Save Class Spell List…").click();
     h.run();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("[Spells9]\r\nSpell000="), "{text}");
@@ -3412,7 +3424,7 @@ fn class_spell_lists_save_clear_and_load() {
     h.run();
     assert!(known(&mut h).iter().all(Vec::is_empty));
     h.state_mut().dialogs = Box::new(mg_ui::NoDialogs { open: vec![path], ..Default::default() });
-    h.get_by_label("Load Class Spell List").click();
+    h.get_by_label("Load Class Spell List…").click();
     h.run();
     assert_eq!(known(&mut h), before, "each spell back at its level");
 }
@@ -3856,9 +3868,11 @@ fn portraits_are_chosen_from_their_pictures() {
     h.get_by_label("Portraits…").click();
     h.run();
     // (Rendering opens a GPU device.)
-    mg_testkit::gpu::hold();
-    if let Ok(img) = h.render() {
-        let _ = img.save(mg_testkit::scratch_dir("ui-portraits").join("select.png"));
+    if let Some(dir) = shot_dir("ui-portraits") {
+        mg_testkit::gpu::hold();
+        if let Ok(img) = h.render() {
+            let _ = img.save(dir.join("select.png"));
+        }
     }
     // Escape is the picker's Cancel, no more: the Properties window it was
     // opened from stays open (an `egui::Modal`, the picker let the window
@@ -3879,9 +3893,12 @@ fn items_show_their_icons_and_choose_appearances_by_icon() {
     h.run();
     h.get_by_label("Icon");
     // (Rendering opens a GPU device.)
-    mg_testkit::gpu::hold();
-    if let Ok(img) = h.render() {
-        let _ = img.save(mg_testkit::output_dir("ui-item-icons").join("gem.png"));
+    let icons_dir = shot_dir("ui-item-icons");
+    if let Some(ref dir) = icons_dir {
+        mg_testkit::gpu::hold();
+        if let Ok(img) = h.render() {
+            let _ = img.save(dir.join("gem.png"));
+        }
     }
     // The grid offers each model by its icon; a click takes it.
     let before = field(&mut h, &key).integer("ModelPart1").unwrap();
@@ -3897,7 +3914,6 @@ fn items_show_their_icons_and_choose_appearances_by_icon() {
     let n: i64 = other.trim_start_matches("Appearance ").parse().unwrap();
     assert_eq!(field(&mut h, &key).integer("ModelPart1"), Some(n));
     // A look at a weapon's and an armor's icons.
-    let dir = mg_testkit::output_dir("ui-item-icons");
     for (bp, name) in [("nw_wswls001", "sword"), ("nw_aarcl001", "armor"), ("nw_arhe001", "helm")] {
         let Some((mut h, _)) = blueprint_harness(bp, &format!("icon_{name}"), ResType::UTI) else {
             return;
@@ -3906,7 +3922,9 @@ fn items_show_their_icons_and_choose_appearances_by_icon() {
         page(&mut h, "Appearance");
         h.run();
         h.get_by_label("Icon");
-        if let Ok(img) = h.render() {
+        if let Some(ref dir) = icons_dir
+            && let Ok(img) = h.render()
+        {
             let _ = img.save(dir.join(format!("{name}.png")));
         }
     }
@@ -3928,9 +3946,11 @@ fn colours_are_chosen_from_palette_swatches() {
         .click();
     h.run();
     // (Rendering opens a GPU device.)
-    mg_testkit::gpu::hold();
-    if let Ok(img) = h.render() {
-        let _ = img.save(mg_testkit::scratch_dir("ui-colours").join("swatches.png"));
+    if let Some(dir) = shot_dir("ui-colours") {
+        mg_testkit::gpu::hold();
+        if let Ok(img) = h.render() {
+            let _ = img.save(dir.join("swatches.png"));
+        }
     }
     let pick = if cloth == 5 { 6 } else { 5 };
     h.get_by_label(&format!("Cloth 1 {pick}")).click();
@@ -4090,9 +4110,11 @@ fn an_armor_s_parts_take_colors_of_their_own_and_keep_them() {
     settle(&mut h);
     page(&mut h, "Appearance");
     // (Rendering opens a GPU device.)
-    mg_testkit::gpu::hold();
-    if let Ok(img) = h.render() {
-        let _ = img.save(mg_testkit::scratch_dir("ui-part-colors").join("page.png"));
+    if let Some(dir) = shot_dir("ui-part-colors") {
+        mg_testkit::gpu::hold();
+        if let Ok(img) = h.render() {
+            let _ = img.save(dir.join("page.png"));
+        }
     }
     // The torso (shown first) has none of its own: each channel shows the
     // armor's. Its Cloth 1 is given one.
@@ -4331,8 +4353,10 @@ fn a_placeable_s_appearance_is_chosen_from_pictures() {
         let at = all.iter().position(|c| c.row as i64 == was).unwrap();
         all[at + 1].clone()
     };
-    let img = h.render().expect("render");
-    img.save(mg_testkit::scratch_dir("ui-appearances").join("appearances.png")).unwrap();
+    if let Some(dir) = shot_dir("ui-appearances") {
+        let img = h.render().expect("render");
+        img.save(dir.join("appearances.png")).unwrap();
+    }
     let tile = |n: &egui_kittest::Node<'_>| n.rect().height() > 90.0;
     h.get_all_by_label(&next.text).find(tile).expect("the next appearance's picture").click();
     h.run_steps(3);
@@ -4915,4 +4939,214 @@ fn a_viewed_blueprint_s_check_boxes_are_quiet() {
         assert_eq!(box_fills(&h, "Useable"), fills, "the same under the pointer ({light})");
         assert!(!box_fills(&h, "Useable").contains(&t.accent_fill_hover));
     }
+}
+
+/// The small button of that name in a form's field (the toolbar's own
+/// New is at the top of the window).
+fn field_button<'t>(h: &'t Harness<'_, Moonglow>, name: &'t str) -> Option<egui_kittest::Node<'t>> {
+    h.query_all_by_label(name).rfind(|n| n.rect().top() > 60.0)
+}
+
+/// Gives a blueprint's Conversation field `name` (none: empty).
+fn give_conversation(h: &mut Harness<'_, Moonglow>, key: ResKey, name: &str) {
+    let value = mg_gff::Value::resref(ResRef::from_str(name).unwrap());
+    let edit = mg_edit::Edit::SetField {
+        key,
+        path: mg_edit::GffPath::root(),
+        label: "Conversation".into(),
+        value: Some(value),
+    };
+    h.state_mut()
+        .ws
+        .as_mut()
+        .unwrap()
+        .apply(mg_edit::Command::new("conversation", vec![edit]))
+        .unwrap();
+    h.run();
+}
+
+/// An object's Conversation field with nothing in it has New: it makes
+/// the conversation (named after the blueprint), gives it to the object
+/// and opens it, in one Undo step; with a name in the field, Edit opens
+/// that conversation as before.
+#[test]
+fn an_empty_conversation_field_makes_a_new_conversation_with_new() {
+    let Some((mut h, key)) = blueprint_harness("nw_chicken", "mg_hen", ResType::UTC) else {
+        return;
+    };
+    give_conversation(&mut h, key, "");
+    settle(&mut h);
+    let dlg = ResKey::parse("mg_hen", ResType::DLG).unwrap();
+    assert!(field_button(&h, "New").is_some(), "New, with the field empty");
+    field_button(&h, "New").expect("New").click();
+    settle(&mut h);
+    // The New Conversation window, the blueprint's name in it.
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    let ws = h.state().ws.as_ref().unwrap();
+    assert!(ws.module.contains(&dlg), "the conversation is in the module");
+    assert!(h.state().dock.find_tab(&Tab::Dialog(dlg)).is_some(), "and open");
+    assert_eq!(field(&mut h, &key).resref("Conversation").unwrap().to_string(), "mg_hen");
+    // The field says Edit now.
+    assert!(field_button(&h, "Edit").is_some());
+    // One step takes both back.
+    h.state_mut().actions.push(mg_ui::Action::Undo);
+    settle(&mut h);
+    assert!(!h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert_eq!(field(&mut h, &key).resref("Conversation").unwrap().to_string(), "");
+    assert!(field_button(&h, "New").is_some(), "New again");
+    h.state_mut().actions.push(mg_ui::Action::Redo);
+    settle(&mut h);
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert_eq!(field(&mut h, &key).resref("Conversation").unwrap().to_string(), "mg_hen");
+}
+
+/// Edit opens the conversation the field names, as it did.
+#[test]
+fn a_named_conversation_is_opened_with_edit() {
+    let Some((mut h, key)) = blueprint_harness("nw_chicken", "mg_hen_edit", ResType::UTC) else {
+        return;
+    };
+    let dlg = ResKey::parse("mg_talk_a", ResType::DLG).unwrap();
+    h.state_mut()
+        .ws
+        .as_mut()
+        .unwrap()
+        .apply(mg_edit::Command::new(
+            "talk",
+            vec![mg_edit::Edit::SetResource {
+                key: dlg,
+                data: Some(mg_module::dialog::new_dialog().to_bytes().unwrap()),
+            }],
+        ))
+        .unwrap();
+    give_conversation(&mut h, key, "mg_talk_a");
+    settle(&mut h);
+    assert!(field_button(&h, "New").is_none(), "a conversation the module has");
+    field_button(&h, "Edit").expect("Edit").click();
+    settle(&mut h);
+    assert!(h.state().dock.find_tab(&Tab::Dialog(dlg)).is_some());
+}
+
+/// A placeable's Advanced page has New too, and a name nothing has is
+/// offered to be made.
+#[test]
+fn a_placeable_makes_its_conversation_and_a_missing_one_is_offered() {
+    let Some((mut h, key)) = blueprint_harness("plc_chest1", "mg_chest_talk", ResType::UTP) else {
+        return;
+    };
+    give_conversation(&mut h, key, "");
+    page(&mut h, "Advanced");
+    settle(&mut h);
+    field_button(&h, "New").expect("New").click();
+    settle(&mut h);
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    let dlg = ResKey::parse("mg_chest_talk", ResType::DLG).unwrap();
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert_eq!(field(&mut h, &key).resref("Conversation").unwrap().to_string(), "mg_chest_talk");
+    // A name no conversation has: New, with that name.
+    // (The conversation's window over the form: closed.)
+    close_tab(h.state_mut(), &Tab::Dialog(dlg));
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(Tab::Blueprint(key)));
+    give_conversation(&mut h, key, "not_there_yet");
+    page(&mut h, "Advanced");
+    settle(&mut h);
+    field_button(&h, "New").expect("New").click();
+    settle(&mut h);
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    let made = ResKey::parse("not_there_yet", ResType::DLG).unwrap();
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&made));
+}
+
+/// A door blueprint's Advanced page has New with the field empty too.
+#[test]
+fn a_door_makes_its_conversation_with_new() {
+    let Some((mut h, key)) = blueprint_harness("nw_door_ttr_01", "mg_door_talk", ResType::UTD)
+    else {
+        return;
+    };
+    give_conversation(&mut h, key, "");
+    page(&mut h, "Advanced");
+    settle(&mut h);
+    let new = field_button(&h, "New").expect("New with the field empty");
+    assert!(!new.accesskit_node().is_disabled());
+    new.click();
+    settle(&mut h);
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    let dlg = ResKey::parse("mg_door_talk", ResType::DLG).unwrap();
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert!(h.state().dock.find_tab(&Tab::Dialog(dlg)).is_some());
+    assert_eq!(field(&mut h, &key).resref("Conversation").unwrap().to_string(), "mg_door_talk");
+}
+
+/// A creature placed in an area: its Properties' New makes the
+/// conversation, sets the instance's field in the area's GIT and opens
+/// it, one Undo step for both (Redo puts both back); the blueprint it was
+/// placed from is not touched.
+#[test]
+fn a_placed_creature_makes_its_conversation_with_new() {
+    use mg_module::instances::{Placement, Placing, instance};
+    let Some((mut h, area)) = area_ui_harness("placed-conversation") else { return };
+    let git = ResKey::new(area, ResType::GIT);
+    let bp = ResKey::parse("mg_hen_bp", ResType::UTC).unwrap();
+    let path = mg_edit::GffPath::root().item("Creature List", 0);
+    {
+        let app = h.state_mut();
+        let game = app.game.as_deref().unwrap();
+        let data = game.resman.get_named("nw_chicken", ResType::UTC).unwrap().into_owned();
+        let mut creature = Gff::read(&data).unwrap().root;
+        creature.set("Conversation", mg_gff::Value::resref(ResRef::EMPTY));
+        let none = |_: ResRef| None;
+        let placing = Placing { game, item: &none };
+        let at = Placement { position: [12.0, 30.0, 0.0], rotation: 0.0 };
+        let item = instance(&placing, ResType::UTC, &creature, at, &[]).unwrap();
+        let make = mg_edit::Edit::SetResource { key: bp, data: Some(data) };
+        let put = mg_edit::Edit::InsertItem {
+            key: git,
+            path: mg_edit::GffPath::root(),
+            list: "Creature List".into(),
+            index: 0,
+            item,
+        };
+        app.actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Setup", vec![make, put])));
+        app.blueprint_pages.insert((git, path.clone()), "Basic");
+        app.actions.push(mg_ui::Action::OpenTab(Tab::Instance { area, path: path.clone() }));
+    }
+    h.run_steps(4);
+    let at = h.state().dock.find_tab(&Tab::Instance { area, path: path.clone() }).unwrap();
+    if let Some(w) = h.state_mut().dock.get_window_state_mut(at.surface) {
+        w.set_position(egui::pos2(20.0, 60.0)).set_size(egui::vec2(1000.0, 700.0));
+    }
+    settle(&mut h);
+    let blueprint_before = field(&mut h, &bp);
+    let placed = |h: &mut Harness<'_, Moonglow>| {
+        let root = field(h, &git);
+        path.get(&root).unwrap().resref("Conversation").unwrap().to_string()
+    };
+    let depth = |h: &Harness<'_, Moonglow>| h.state().ws.as_ref().unwrap().undo_depth();
+    let before = depth(&h);
+    field_button(&h, "New").expect("New on the instance").click();
+    settle(&mut h);
+    h.get_by_label("Create").click();
+    settle(&mut h);
+    let name = placed(&mut h);
+    assert!(!name.is_empty(), "the instance's field is set");
+    let dlg = ResKey::parse(&name, ResType::DLG).unwrap();
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert!(h.state().dock.find_tab(&Tab::Dialog(dlg)).is_some(), "the editor is open");
+    assert_eq!(depth(&h), before + 1, "one command for both");
+    assert_eq!(field(&mut h, &bp), blueprint_before, "the blueprint is as it was");
+    h.state_mut().actions.push(mg_ui::Action::Undo);
+    settle(&mut h);
+    assert_eq!(depth(&h), before, "one Undo takes both");
+    assert!(!h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert_eq!(placed(&mut h), "");
+    h.state_mut().actions.push(mg_ui::Action::Redo);
+    settle(&mut h);
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&dlg));
+    assert_eq!(placed(&mut h), name);
+    assert_eq!(field(&mut h, &bp), blueprint_before);
 }

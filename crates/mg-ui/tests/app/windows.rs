@@ -420,7 +420,7 @@ fn panels_fold_away_and_come_back() {
 /// place. Enter on it folds the dock.
 #[test]
 fn tab_reaches_the_right_dock_s_fold_button_after_its_controls() {
-    let Some((mut h, _)) = area_harness("right-dock-tab-order") else { return };
+    let Some((mut h, _)) = area_ui_harness("right-dock-tab-order") else { return };
     // (1600 wide: no width folds a dock.)
     wide_window(&mut h);
     h.state_mut().palette.selected = ResKey::parse("nw_bandit001", ResType::UTC);
@@ -631,7 +631,7 @@ fn each_side_dock_folds_by_one_button_on_its_tab_bar() {
 /// tabs, the dock's, are not egui_dock's and cannot be dragged at all.)
 #[test]
 fn the_palette_is_a_panel_not_a_tab() {
-    let Some((mut h, area)) = area_harness("palette-panel") else { return };
+    let Some((mut h, area)) = area_ui_harness("palette-panel") else { return };
     let path = h.state().module_path().expect("saved");
     let kept = mg_testkit::scratch_dir("ui-palette-panel-tabs");
     h.state_mut().open_tabs_dir = Some(kept.clone());
@@ -779,7 +779,7 @@ fn tool_tab_dropped_on_a_side(tool: &Tab) {
 /// The editor area keeps the middle as it was, its panes and their tabs.
 #[test]
 fn the_resource_browser_is_a_panel_not_a_tab() {
-    let Some((mut h, area)) = area_harness("browser-panel") else { return };
+    let Some((mut h, area)) = area_ui_harness("browser-panel") else { return };
     // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
     unfold_left_dock(&mut h);
     settle(&mut h);
@@ -816,7 +816,7 @@ fn the_resource_browser_is_a_panel_not_a_tab() {
 /// as it was.
 #[test]
 fn the_middle_keeps_the_editor_area_whatever_the_left_dock_shows() {
-    let Some((mut h, area)) = area_harness("browser-panel-middle") else { return };
+    let Some((mut h, area)) = area_ui_harness("browser-panel-middle") else { return };
     // (A window wide enough that no width folds a dock: the test reads the
     // docks as the builder left them, M3 T14.)
     wide_window(&mut h);
@@ -862,7 +862,7 @@ fn a_tool_reopens_in_its_split_of_the_middle_as_tabs() {
 }
 
 fn reopens_in_its_split(mode: Mode) {
-    let Some((mut h, area)) = area_harness(&mode.dir("dock-splits")) else { return };
+    let Some((mut h, area)) = area_ui_harness(&mode.dir("dock-splits")) else { return };
     put_in(h.state_mut(), mode);
     let middle = |h: &Harness<'_, Moonglow>| {
         let dock = &h.state().dock;
@@ -1313,7 +1313,7 @@ fn a_window_of_tabs_moves_by_its_tab_bar_alone() {
 /// has both).
 #[test]
 fn editors_open_in_windows_over_the_area() {
-    let Some((mut h, area)) = area_harness("editor-windows") else { return };
+    let Some((mut h, area)) = area_ui_harness("editor-windows") else { return };
     assert_eq!(h.state().settings.open_editors, mg_ui::OpenEditors::Floating);
     h.run_steps(3);
     for tab in [Tab::Factions, Tab::ModuleProperties] {
@@ -1335,14 +1335,16 @@ fn editors_open_in_windows_over_the_area() {
     let toolbar = h.get_by_label_contains("Verify").rect().bottom();
     let top = h.get_all_by_label("Factions").map(|n| n.rect().top()).fold(f32::MAX, f32::min);
     assert!(top > toolbar, "the window starts below the toolbar ({top} vs {toolbar})");
-    let img = h.render().expect("render");
-    let _ = img.save(mg_testkit::scratch_dir("ui-editor-windows").join("windows.png"));
+    if let Some(dir) = shot_dir("ui-editor-windows") {
+        let img = h.render().expect("render");
+        let _ = img.save(dir.join("windows.png"));
+    }
 }
 
 /// A module opens with the area that was opened last in it.
 #[test]
 fn a_module_opens_on_the_area_opened_last_in_it() {
-    let Some((mut h, area)) = area_harness("last-area") else { return };
+    let Some((mut h, area)) = area_ui_harness("last-area") else { return };
     let path = h.state().module_path().expect("saved");
     assert_eq!(h.state().settings.last_area(&path), Some("field"));
     h.state_mut().open_module(&path);
@@ -1607,7 +1609,7 @@ fn a_kept_tab_whose_resource_is_gone_is_passed_over() {
 /// the pane is gone.)
 #[test]
 fn a_tab_kept_in_the_palettes_pane_opens_where_its_kind_opens() {
-    let Some((mut h, area)) = area_harness("open-tabs-palettes") else { return };
+    let Some((mut h, area)) = area_ui_harness("open-tabs-palettes") else { return };
     let path = h.state().module_path().expect("saved");
     let kept = mg_testkit::scratch_dir("ui-open-tabs-palettes");
     h.state_mut().open_tabs_dir = Some(kept.clone());
@@ -2457,7 +2459,7 @@ fn escape_closes_a_models_window() {
 /// panes' room and puts it back.
 #[test]
 fn windows_remember_their_size_and_maximize() {
-    let Some((mut h, area)) = area_harness("window-sizes") else { return };
+    let Some((mut h, area)) = area_ui_harness("window-sizes") else { return };
     let props = Tab::AreaProperties(area);
     // The room the window's pane takes.
     let pane = |h: &Harness<'_, Moonglow>, tab: &Tab| {
@@ -2550,7 +2552,7 @@ fn windows_remember_their_size_and_maximize() {
 /// window's corner, is the next window's of its kind.
 #[test]
 fn a_window_is_maximized_by_its_key_and_button_and_stays_so() {
-    let Some((mut h, area)) = area_harness("window-maximize-keys") else { return };
+    let Some((mut h, area)) = area_ui_harness("window-maximize-keys") else { return };
     let props = Tab::AreaProperties(area);
     let pane = |h: &Harness<'_, Moonglow>| {
         let s = h.state();
@@ -2629,6 +2631,129 @@ fn a_window_is_maximized_by_its_key_and_button_and_stays_so() {
     assert!(kept[0] as f32 <= first.width() - 80.0, "the dragged size kept: {kept:?}");
 }
 
+/// A double click on a floating window's tab maximizes the window and a
+/// second puts it back (Wave 2's review: it looked the tab up in the dock,
+/// which is empty while tabs are drawn, and never found it). A docked tab
+/// double-clicked maximizes nothing. (Its menu: [`a_maximized_window_s_tab_menu_says_restore`].)
+#[test]
+fn a_window_s_tab_double_clicked_is_maximized_and_put_back() {
+    let Some((mut h, area)) = area_ui_harness("window-maximize-tab") else { return };
+    let props = Tab::AreaProperties(area);
+    let pane = |h: &Harness<'_, Moonglow>, tab: &Tab| {
+        let s = h.state();
+        let path = s.dock.find_tab(tab).expect("open");
+        s.dock.iter_leaves().find(|(p, _)| p.surface == path.surface).unwrap().1.rect
+    };
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(props.clone()));
+    h.run_steps(8);
+    assert!(!h.state().dock.find_tab(&props).unwrap().surface.is_main(), "in a window");
+    let first = pane(&h, &props);
+    // The tab itself (its node of role Tab in the window's bar), not the
+    // bar beside it, which has a double click of its own; its part in
+    // sight (a docked tab's, beside the window over it).
+    let tab_at = |h: &Harness<'_, Moonglow>, tab: &Tab| {
+        let bar = pane(h, tab);
+        let bar = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width(), 30.0));
+        let r = (h.get_all_by_role(egui::accesskit::Role::Tab))
+            .map(|n| n.rect())
+            .find(|r| r.left() >= bar.left() - 1.0 && bar.contains(r.center()))
+            .unwrap_or_else(|| panic!("{tab:?}'s tab in {bar:?}"));
+        let window = pane(h, &props);
+        let right = match tab.clone() == props || r.left() >= window.left() {
+            true => r.right(),
+            false => r.right().min(window.left()),
+        };
+        egui::pos2((r.left() + right) / 2.0, r.center().y)
+    };
+    let double_click = |h: &mut Harness<'_, Moonglow>, at: egui::Pos2| {
+        h.hover_at(at);
+        for _ in 0..2 {
+            press(h, at, true, egui::Modifiers::NONE);
+            press(h, at, false, egui::Modifiers::NONE);
+        }
+        h.run_steps(8);
+        // (Later: not a third click of the same.)
+        h.hover_at(at + egui::vec2(0.0, 200.0));
+        h.run_steps(30);
+    };
+    let at = tab_at(&h, &props);
+    double_click(&mut h, at);
+    let big = pane(&h, &props);
+    assert!(big.area() > first.area() + 1000.0, "maximized: {big:?} from {first:?}");
+    // Double-clicked again: put back.
+    let at = tab_at(&h, &props);
+    double_click(&mut h, at);
+    let back = pane(&h, &props);
+    assert!((back.size() - first.size()).length() < 3.0, "put back: {back:?}, {first:?}");
+    // A docked tab (Module Properties, docked as the module opened): its
+    // double click maximizes nothing.
+    let module_props = Tab::ModuleProperties;
+    assert!(h.state().dock.find_tab(&module_props).unwrap().surface.is_main(), "docked");
+    // (Chosen first, alone: Module Properties in front lets the Right
+    // Dock go, which an area in front showed, and its pane widens.)
+    let at = tab_at(&h, &module_props);
+    h.hover_at(at);
+    press(&h, at, true, egui::Modifiers::NONE);
+    press(&h, at, false, egui::Modifiers::NONE);
+    h.run_steps(8);
+    h.hover_at(at + egui::vec2(0.0, 200.0));
+    h.run_steps(30);
+    let docked = pane(&h, &module_props);
+    let at = tab_at(&h, &module_props);
+    double_click(&mut h, at);
+    assert_eq!(pane(&h, &module_props), docked, "a docked tab stays as it was");
+    assert!(h.query_by_label("Restore").is_none(), "no window maximized");
+}
+
+/// A floating editor's tab menu says Maximize, and Restore while its
+/// window is maximized (Wave 2's review: it read whether the window was
+/// maximized from the dock, which is empty while tabs are drawn).
+#[test]
+fn a_maximized_window_s_tab_menu_says_restore() {
+    let dir = mg_testkit::scratch_dir("ui-window-tab-menu-restore");
+    let path = sample_module(&dir);
+    let key = ResKey::parse("hello", ResType::NSS).unwrap();
+    let tab = Tab::Script(key);
+    let mut app = app_with(Vec::new());
+    app.settings.no_last_area = true;
+    app.open_module(&path);
+    app.actions.push(mg_ui::Action::OpenTab(tab.clone()));
+    let mut h = window_harness(app);
+    settle(&mut h);
+    assert!(!h.state().dock.find_tab(&tab).unwrap().surface.is_main(), "in a window");
+    // The menu's entry, between Show in Module Tree and Close (the
+    // window's bar has a button of each name too).
+    let menu_says = |h: &mut Harness<'_, Moonglow>| -> Vec<String> {
+        doc_tab(h, "hello.nss").click_secondary();
+        until(h, "the tab's menu", |h| h.query_by_label("Close Others").is_some());
+        let (above, below) =
+            (popup_item(h, "Show in Module Tree").rect(), popup_item(h, "Close Others").rect());
+        let said = ["Maximize", "Restore"]
+            .into_iter()
+            .filter(|l| {
+                h.query_all_by_label(l).any(|n| {
+                    let r = n.rect();
+                    r.top() > above.top()
+                        && r.top() < below.top()
+                        && above.x_range().contains(r.center().x)
+                })
+            })
+            .map(str::to_string)
+            .collect();
+        h.key_press(egui::Key::Escape);
+        settle(h);
+        said
+    };
+    assert_eq!(menu_says(&mut h), ["Maximize"]);
+    h.state_mut().actions.push(mg_ui::Action::ToggleMaximize(tab.clone()));
+    settle(&mut h);
+    h.get_by_label("Restore");
+    assert_eq!(menu_says(&mut h), ["Restore"], "maximized");
+    h.state_mut().actions.push(mg_ui::Action::ToggleMaximize(tab.clone()));
+    settle(&mut h);
+    assert_eq!(menu_says(&mut h), ["Maximize"], "put back");
+}
+
 /// El Grillo's report: Module Properties, docked in the main pane as a
 /// module opens, "ejected" (its tab dragged out into a window of its own)
 /// was maximized neither by a double click on the window's bar nor by its
@@ -2639,7 +2764,7 @@ fn a_window_is_maximized_by_its_key_and_button_and_stays_so() {
 /// on its bar; and a window Moonglow opened (Area Properties) still is.
 #[test]
 fn a_tab_dragged_out_into_its_own_window_is_maximized() {
-    let Some((mut h, area)) = area_harness("window-maximize-dragged-out") else { return };
+    let Some((mut h, area)) = area_ui_harness("window-maximize-dragged-out") else { return };
     let (area_props, module_props) = (Tab::AreaProperties(area), Tab::ModuleProperties);
     let pane = |h: &Harness<'_, Moonglow>, tab: &Tab| {
         let s = h.state();
@@ -2878,12 +3003,8 @@ fn the_editors_lower_halves_are_held_to_a_share_of_the_editor() {
     let dir = mg_testkit::scratch_dir("ui-lower-halves");
     let path = sample_module(&dir);
     let script = ResKey::parse("held", ResType::NSS).unwrap();
-    let talk = ResKey::parse("held", ResType::DLG).unwrap();
     let mut m = Module::open(&path).unwrap();
     m.set(script, b"void main()\n{\n}\n".to_vec());
-    let mut g = mg_module::dialog::new_dialog();
-    mg_module::dialog::add_node(&mut g, mg_module::dialog::Parent::Root, "Hello there.");
-    m.set_gff(talk, &g).unwrap();
     m.save().unwrap();
     let (tab, panel, share) =
         (Tab::Script(script), egui::Id::new(("window-bottom", Tab::Script(script))), 1.0 / 3.0);
@@ -2895,10 +3016,8 @@ fn the_editors_lower_halves_are_held_to_a_share_of_the_editor() {
         let mut h = harness(app, 1200.0, 900.0);
         h.run_steps(4);
         // (The script's in a window as tall as the harness has room for.)
-        if matches!(tab, Tab::Script(_)) {
-            own_window(&mut h, &tab, egui::pos2(20.0, 20.0), egui::vec2(1100.0, 860.0));
-            h.run_steps(4);
-        }
+        own_window(&mut h, &tab, egui::pos2(20.0, 20.0), egui::vec2(1100.0, 860.0));
+        h.run_steps(4);
         let rect = |h: &Harness<'_, Moonglow>| {
             egui::containers::panel::PanelState::load(&h.ctx, panel)
                 .unwrap_or_else(|| panic!("{tab:?}: no lower half"))

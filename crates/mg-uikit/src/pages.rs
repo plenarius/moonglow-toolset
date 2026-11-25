@@ -41,7 +41,7 @@
 
 use std::ops::Range;
 
-use egui::{Rect, Response, Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2};
+use egui::{Color32, Rect, Response, Sense, Stroke, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2};
 
 use crate::icons::{ButtonState, Icon};
 use crate::metrics;
@@ -129,7 +129,7 @@ impl PageRail {
         // sight as it changes.)
         let kept = child.ctx().data(|d| d.get_temp::<usize>(self.id.with("shown")));
         let mut in_sight = false;
-        egui::ScrollArea::vertical()
+        let out = egui::ScrollArea::vertical()
             .id_salt(self.id.with("scroll"))
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
@@ -164,34 +164,79 @@ impl PageRail {
                 }
                 ui.allocate_exact_size(vec2(PAGE_BUTTON, RAIL_PADDING - RAIL_GAP), Sense::hover());
             });
+        paint_overflow_cues(
+            &child,
+            inner,
+            t.bar,
+            out.state.offset.y > 1.0,
+            out.state.offset.y + out.inner_rect.height() < out.content_size.y - 1.0,
+        );
         // (Noted once it is in sight: until then each frame brings it in.)
         if in_sight {
             child.ctx().data_mut(|d| d.insert_temp(self.id.with("shown"), shown));
         }
-        // (Up and Down on the page that has the keyboard: the page before or
-        // after, the keyboard going with it; not egui's move to the widget
-        // above or below, which left the panel.)
-        if let Some(k) = pages.iter().position(Response::has_focus) {
-            let filter = egui::EventFilter { vertical_arrows: true, ..Default::default() };
-            ui.memory_mut(|m| m.set_focus_lock_filter(pages[k].id, filter));
-            let none = egui::Modifiers::NONE;
-            let down = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowDown));
-            let up = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowUp));
-            let to = match (up, down) {
-                (true, false) => k.checked_sub(1),
-                (false, true) => (k + 1 < pages.len()).then_some(k + 1),
-                _ => None,
-            };
-            if let Some(to) = to {
-                *page = to;
-                changed = true;
-                pages[to].request_focus();
-                pages[to].scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
-            }
-        }
+        changed |= move_focus_with_arrows(ui, &pages, page);
         ui.advance_cursor_after_rect(rect);
         RailOutput { response, changed, pages }
     }
+}
+
+/// Paints a band with a chevron (`text-3`) at the top and the bottom of a
+/// vertical page selector where its pages go on beyond `rect`, the band
+/// filled `surface`, the selector's own ground (a rail's `bar`, a
+/// list's `panel`), so that the pages pass under it.
+fn paint_overflow_cues(ui: &Ui, rect: Rect, surface: Color32, more_above: bool, more_below: bool) {
+    if !more_above && !more_below {
+        return;
+    }
+    let t = ui.tokens();
+    let painter = ui.painter_at(rect);
+    let band_h = 14.0;
+    if more_above {
+        let band = Rect::from_min_max(
+            rect.min,
+            pos2(rect.right(), (rect.top() + band_h).min(rect.bottom())),
+        );
+        painter.rect_filled(band, 0.0, surface);
+        Icon::ChevronUp.paint(
+            &painter,
+            Rect::from_center_size(band.center(), vec2(12.0, 12.0)),
+            t.text_3,
+        );
+    }
+    if more_below {
+        let band = Rect::from_min_max(
+            pos2(rect.left(), (rect.bottom() - band_h).max(rect.top())),
+            rect.max,
+        );
+        painter.rect_filled(band, 0.0, surface);
+        Icon::ChevronDown.paint(
+            &painter,
+            Rect::from_center_size(band.center(), vec2(12.0, 12.0)),
+            t.text_3,
+        );
+    }
+}
+
+/// Moves focus and selection with `ArrowUp`/`ArrowDown` while keeping focus
+/// inside a vertical page selector (`PageRail` or `PageList`).
+fn move_focus_with_arrows(ui: &Ui, pages: &[Response], page: &mut usize) -> bool {
+    let Some(k) = pages.iter().position(Response::has_focus) else { return false };
+    let filter = egui::EventFilter { vertical_arrows: true, ..Default::default() };
+    ui.memory_mut(|m| m.set_focus_lock_filter(pages[k].id, filter));
+    let none = egui::Modifiers::NONE;
+    let down = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowDown));
+    let up = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowUp));
+    let to = match (up, down) {
+        (true, false) => k.checked_sub(1),
+        (false, true) => (k + 1 < pages.len()).then_some(k + 1),
+        _ => None,
+    };
+    let Some(to) = to else { return false };
+    *page = to;
+    pages[to].request_focus();
+    pages[to].scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+    true
 }
 
 /// A [`PageList`]'s width, its line included (the Creature board's
@@ -326,7 +371,7 @@ impl PageList {
         let name = self.name.clone();
         let kept = child.ctx().data(|d| d.get_temp::<usize>(self.id.with("shown")));
         let mut brought = false;
-        egui::ScrollArea::vertical()
+        let out = egui::ScrollArea::vertical()
             .id_salt(self.id.with("scroll"))
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
@@ -357,29 +402,17 @@ impl PageList {
                 }
                 ui.allocate_exact_size(vec2(1.0, RAIL_PADDING), Sense::hover());
             });
+        paint_overflow_cues(
+            &child,
+            inner,
+            t.panel,
+            out.state.offset.y > 1.0,
+            out.state.offset.y + out.inner_rect.height() < out.content_size.y - 1.0,
+        );
         if brought {
             child.ctx().data_mut(|d| d.insert_temp(self.id.with("shown"), shown));
         }
-        // (Up and Down on the row that has the keyboard, as the rail has
-        // them.)
-        if let Some(k) = pages.iter().position(Response::has_focus) {
-            let filter = egui::EventFilter { vertical_arrows: true, ..Default::default() };
-            ui.memory_mut(|m| m.set_focus_lock_filter(pages[k].id, filter));
-            let none = egui::Modifiers::NONE;
-            let down = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowDown));
-            let up = ui.input_mut(|i| i.consume_key(none, egui::Key::ArrowUp));
-            let to = match (up, down) {
-                (true, false) => k.checked_sub(1),
-                (false, true) => (k + 1 < pages.len()).then_some(k + 1),
-                _ => None,
-            };
-            if let Some(to) = to {
-                *page = to;
-                changed = true;
-                pages[to].request_focus();
-                pages[to].scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
-            }
-        }
+        changed |= move_focus_with_arrows(ui, &pages, page);
         ui.advance_cursor_after_rect(rect);
         ListOutput { response, changed, pages }
     }
@@ -407,12 +440,12 @@ fn list_row_ui(ui: &mut Ui, icon: Icon, name: &str, on: bool, marked: bool) -> R
             painter.rect_filled(mark, 0.0, t.line_soft);
         }
         if response.has_focus() {
-            painter.rect_stroke(
-                rect.shrink(0.5),
-                metrics::RADIUS,
-                Stroke::new(1.0, t.accent),
-                egui::StrokeKind::Inside,
-            );
+            let (ring_rect, stroke) = if on {
+                (rect.shrink(1.5), Stroke::new(1.5, t.on_fill))
+            } else {
+                (rect.shrink(0.5), Stroke::new(1.0, t.accent))
+            };
+            painter.rect_stroke(ring_rect, metrics::RADIUS, stroke, egui::StrokeKind::Inside);
         }
         let x = rect.left() + PAGE_ROW_INDENT;
         let square = Rect::from_center_size(
@@ -1352,9 +1385,16 @@ fn page_ui(ui: &mut Ui, icon: Icon, name: &str, on: bool) -> Response {
             (false, ButtonState::Rest) => (egui::Color32::TRANSPARENT, t.text_2),
             (false, _) => (t.raised, t.text),
         };
-        let ring = if response.has_focus() { Stroke::new(1.0, t.accent) } else { Stroke::NONE };
         let painter = ui.painter();
-        painter.rect(rect, metrics::RADIUS, fill, ring, egui::StrokeKind::Inside);
+        painter.rect(rect, metrics::RADIUS, fill, Stroke::NONE, egui::StrokeKind::Inside);
+        if response.has_focus() {
+            let (ring_rect, stroke) = if on {
+                (rect.shrink(1.5), Stroke::new(1.5, t.on_fill))
+            } else {
+                (rect, Stroke::new(1.0, t.accent))
+            };
+            painter.rect_stroke(ring_rect, metrics::RADIUS, stroke, egui::StrokeKind::Inside);
+        }
         let square = Rect::from_center_size(rect.center(), vec2(metrics::ICON, metrics::ICON));
         icon.paint(painter, square, color);
     }
@@ -2311,5 +2351,64 @@ mod tests {
         h.run();
         let three = h.get_by_label("Three page").rect();
         assert!(three.height() < 300.0, "the list given less in a shorter view: {three:?}");
+    }
+
+    /// A rail and a list whose pages go on below them show the cue at
+    /// their foot: a band of their own ground (the rail's `bar`, the
+    /// list's `panel`, opaque, so the pages pass under it) with a chevron
+    /// in `text-3`; nothing at their top.
+    #[test]
+    fn overflowing_rail_and_list_settle_cleanly() {
+        for theme in crate::Theme::ALL {
+            let t = theme.tokens();
+            let (rail_room, list_room, h) = overflowing(theme);
+            let bands: Vec<(Rect, Color32)> = (h.output().shapes.iter())
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Rect(r) if (r.rect.height() - 14.0).abs() < 0.5 => {
+                        Some((r.rect, r.fill))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (room, surface) in [(rail_room, t.bar), (list_room, t.panel)] {
+                // (A list is as wide as its own width, past a narrower room.)
+                let here: Vec<_> =
+                    bands.iter().filter(|(r, _)| room.x_range().contains(r.left())).collect();
+                assert_eq!(here.len(), 1, "{theme:?}: one band, at the foot: {bands:?}");
+                let (band, fill) = here[0];
+                assert_eq!(*fill, surface, "{theme:?}: the band on its own ground");
+                assert!((band.bottom() - room.bottom()).abs() < 0.5, "{theme:?}: {band:?}");
+            }
+        }
+    }
+
+    /// A rail and a list of four pages in rooms too short for them.
+    fn overflowing(theme: crate::Theme) -> (Rect, Rect, Harness<'static>) {
+        let mut page = 0usize;
+        let rail_room = egui::Rect::from_min_size(pos2(10.0, 10.0), vec2(44.0, 52.0));
+        let list_room = egui::Rect::from_min_size(pos2(70.0, 10.0), vec2(120.0, 60.0));
+        let mut h = Harness::builder().with_size(vec2(220.0, 100.0)).build_ui(move |ui| {
+            crate::apply(ui.ctx(), theme);
+            let mut r_ui = ui.new_child(egui::UiBuilder::new().max_rect(rail_room));
+            r_ui.set_clip_rect(rail_room);
+            let _ = PageRail::new("cue-rail")
+                .page(Icon::Info, "One")
+                .page(Icon::Inventory, "Two")
+                .page(Icon::Lock, "Three")
+                .page(Icon::Trap, "Four")
+                .show(&mut r_ui, &mut page);
+
+            let mut l_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_room));
+            l_ui.set_clip_rect(list_room);
+            let _ = PageList::new("cue-list")
+                .page(Icon::Info, "One")
+                .page(Icon::Inventory, "Two")
+                .page(Icon::Lock, "Three")
+                .page(Icon::Trap, "Four")
+                .show(&mut l_ui, &mut page);
+        });
+        h.run();
+        h.run();
+        (rail_room, list_room, h)
     }
 }

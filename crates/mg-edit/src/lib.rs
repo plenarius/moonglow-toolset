@@ -175,6 +175,32 @@ pub struct Workspace {
     /// the module saved; [`Workspace::forget_saved_copies`] drops those of
     /// resources no longer shown.
     saved_read: std::sync::Mutex<HashMap<ResKey, SavedCopy>>,
+    /// The resources as the module was opened (or made), sharing their
+    /// data: never moved by a save, for [`Workspace::changed_since_opened`].
+    opened: Module,
+    /// [`Workspace::changed_since_opened`]'s answer at a revision, and its
+    /// verdict on each resource that differs from the opened one by its
+    /// data, with the data it was told from (held, as `saved_read`'s are):
+    /// a change then costs the resources it changed, not every GFF of the
+    /// session read again.
+    opened_diff: std::sync::Mutex<OpenedDiff>,
+}
+
+/// [`Workspace::opened_diff`].
+#[derive(Debug, Default)]
+struct OpenedDiff {
+    answer: Option<(u64, std::sync::Arc<ChangedSinceOpened>)>,
+    verdicts: HashMap<ResKey, (std::sync::Arc<[u8]>, bool)>,
+}
+
+/// What [`Workspace::changed_since_opened`] finds: the resources the
+/// module has whose content is not what it was when the module was opened
+/// (new ones among them), in the module's order, and those it had then and
+/// has no longer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChangedSinceOpened {
+    pub changed: Vec<ResKey>,
+    pub removed: Vec<ResKey>,
 }
 
 /// A saved resource's data and the document read from it
@@ -227,6 +253,7 @@ impl Workspace {
         let first = first_revision();
         Workspace {
             saved: resources_of(&module),
+            opened: resources_of(&module),
             module,
             docs: HashMap::new(),
             edited: HashSet::new(),
@@ -243,7 +270,85 @@ impl Workspace {
             last_touched: HashMap::new(),
             outside: 0,
             saved_read: Default::default(),
+            opened_diff: Default::default(),
         }
+    }
+
+    /// The resources changed since the module was opened in this
+    /// workspace (or made), by any route (commands, files read again from
+    /// outside, what is made at a save), saves or not: compared by content
+    /// with what they were then, so an edit undone, or a field set back
+    /// by hand, does not count, and a GFF written out in Moonglow's layout
+    /// of what it held then does not either. Documents edited and not yet
+    /// flushed are compared by what they hold. Kept by revision (a menu
+    /// asks every frame it is open): every change of content moves it (a
+    /// flush writes what the documents held already).
+    pub fn changed_since_opened(&self) -> std::sync::Arc<ChangedSinceOpened> {
+        let mut diff = self.opened_diff.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, answer)) = &diff.answer
+            && *at == self.revision
+        {
+            return answer.clone();
+        }
+        let mut changed = Vec::new();
+        for key in self.module.keys() {
+            let differs = match self.docs.get(key).filter(|_| self.edited.contains(key)) {
+                Some(doc) => self.doc_differs_from_opened(key, doc),
+                None => self.data_differs_from_opened(key, &mut diff.verdicts),
+            };
+            if differs {
+                changed.push(*key);
+            }
+        }
+        let removed: Vec<ResKey> =
+            self.opened.keys().filter(|k| !self.module.contains(k)).copied().collect();
+        // (Verdicts on resources since set back or taken out let go.)
+        let module = &self.module;
+        diff.verdicts.retain(|k, (data, _)| {
+            module.shared(k).is_some_and(|d| std::sync::Arc::ptr_eq(d, data))
+        });
+        let answer = std::sync::Arc::new(ChangedSinceOpened { changed, removed });
+        diff.answer = Some((self.revision, answer.clone()));
+        answer
+    }
+
+    /// Whether resource `key`'s data in the module is not what it was
+    /// opened with: by its data, or, for a GFF whose bytes differ, by what
+    /// the two documents hold (`verdicts` keeps that answer by the data).
+    fn data_differs_from_opened(
+        &self,
+        key: &ResKey,
+        verdicts: &mut HashMap<ResKey, (std::sync::Arc<[u8]>, bool)>,
+    ) -> bool {
+        let (Some(now), Some(then)) = (self.module.shared(key), self.opened.shared(key)) else {
+            return true;
+        };
+        if std::sync::Arc::ptr_eq(now, then) {
+            return false;
+        }
+        if let Some((data, differs)) = verdicts.get(key)
+            && std::sync::Arc::ptr_eq(data, now)
+        {
+            return *differs;
+        }
+        let differs = now[..] != then[..]
+            && (!key.restype.is_gff()
+                || match (Gff::read(now), Gff::read(then)) {
+                    (Ok(a), Ok(b)) => a != b,
+                    _ => true,
+                });
+        verdicts.insert(*key, (now.clone(), differs));
+        differs
+    }
+
+    /// Whether an edited document holds other than the resource it was
+    /// opened with.
+    fn doc_differs_from_opened(&self, key: &ResKey, doc: &Gff) -> bool {
+        let Some(then) = self.opened.shared(key) else { return true };
+        if doc.to_bytes().is_ok_and(|b| b[..] == then[..]) {
+            return false;
+        }
+        !Gff::read(then).is_ok_and(|g| g == *doc)
     }
 
     /// The revision at which resource `key` last changed (an edit of it,
@@ -552,6 +657,9 @@ impl Workspace {
     /// Runs the edits in order and returns the command that reverses them.
     /// If one fails, the ones already run are reverted.
     fn run(&mut self, cmd: &Command) -> Result<Command, EditError> {
+        let saved_edited = self.edited.clone();
+        let saved_rewrites = self.rewrites.clone();
+        let saved_touching_len = self.touching.len();
         let mut inverses: Vec<Vec<Edit>> = Vec::with_capacity(cmd.edits.len());
         for e in &cmd.edits {
             match self.run_edit(e) {
@@ -560,10 +668,16 @@ impl Workspace {
                     for inv in inverses.into_iter().rev().flatten() {
                         let _ = self.run_edit(&inv);
                     }
-                    // (Nothing changed: nothing touched.)
-                    self.touching.clear();
+                    self.edited = saved_edited;
+                    self.rewrites = saved_rewrites;
+                    self.touching.truncate(saved_touching_len);
                     return Err(err);
                 }
+            }
+        }
+        for e in &cmd.edits {
+            if let Edit::SetResource { key, data: None } = e {
+                self.forget_saved_copies(|k| k != key);
             }
         }
         let edits = inverses.into_iter().rev().flatten().collect();
@@ -579,9 +693,6 @@ impl Workspace {
                 // the undo copy must include them.
                 self.write_back(key)?;
                 self.docs.remove(key);
-                if data.is_none() {
-                    self.forget_saved_copies(|k| k != key);
-                }
                 self.touch(key, &GffPath::root(), "", true);
                 let old = self.module.get(key).map(<[u8]>::to_vec);
                 match data {
@@ -742,10 +853,13 @@ impl Workspace {
     /// The struct at `path` of document `key`, to change: the document
     /// counts as edited ([`Workspace::flush`] writes it back).
     fn struct_at(&mut self, key: &ResKey, path: &GffPath) -> Result<&mut Struct, EditError> {
-        self.edited.insert(*key);
         let doc = self.doc_mut(key)?;
-        path.get_mut(&mut doc.root)
-            .ok_or_else(|| EditError::BadPath { key: *key, path: path.clone() })
+        if path.get(&doc.root).is_none() {
+            return Err(EditError::BadPath { key: *key, path: path.clone() });
+        }
+        self.edited.insert(*key);
+        let doc = self.docs.get_mut(key).expect("just loaded");
+        Ok(path.get_mut(&mut doc.root).expect("path validated"))
     }
 
     /// Writes the documents edited since the last flush back into the
@@ -779,17 +893,45 @@ impl Workspace {
         // tries it again.)
         let bytes =
             gff.to_bytes().map_err(|e| EditError::Invalid { key: *key, message: e.to_string() })?;
-        let holds = |data: &[u8]| data == &bytes[..] || Gff::read(data).is_ok_and(|g| g == *gff);
-        if let Some(saved) = self.saved.get(key).filter(|d| holds(d)) {
-            if self.module.get(key) != Some(saved) {
-                let saved = saved.to_vec();
-                self.module.set(*key, saved);
+        let saved = self.saved.shared(key);
+        let matches_saved = match saved {
+            Some(s) if s[..] == bytes[..] => true,
+            Some(_) => self.parsed_saved(key).is_some_and(|parsed| *parsed == *gff),
+            None => false,
+        };
+        if matches_saved {
+            let saved = saved.expect("matched above");
+            let current = self.module.shared(key);
+            if !current.is_some_and(|c| std::sync::Arc::ptr_eq(c, saved) || c[..] == saved[..]) {
+                self.module.set(*key, saved.to_vec());
             }
-        } else if !self.module.get(key).is_some_and(holds) {
-            self.module.set(*key, bytes);
+        } else {
+            match self.module.shared(key) {
+                Some(cur) if cur[..] == bytes[..] => {}
+                Some(cur) if saved.is_some_and(|s| std::sync::Arc::ptr_eq(cur, s)) => {
+                    self.module.set(*key, bytes);
+                }
+                Some(cur) if Gff::read(cur).is_ok_and(|g| g == *gff) => {}
+                _ => {
+                    self.module.set(*key, bytes);
+                }
+            }
         }
         self.edited.remove(key);
         Ok(())
+    }
+
+    fn parsed_saved(&self, key: &ResKey) -> Option<std::sync::Arc<Gff>> {
+        let saved = self.saved.shared(key)?;
+        let Ok(mut read) = self.saved_read.lock() else { return None };
+        match read.get(key) {
+            Some((was, g)) if std::sync::Arc::ptr_eq(was, saved) => Some(g.clone()),
+            _ => {
+                let g = std::sync::Arc::new(Gff::read(saved).ok()?);
+                read.insert(*key, (saved.clone(), g.clone()));
+                Some(g)
+            }
+        }
     }
 
     /// Whether resource `key` differs from the module as opened or last
@@ -810,20 +952,11 @@ impl Workspace {
         if let Some(differs) = self.differs_from_saved_at_once(key) {
             return differs;
         }
-        let (Some(gff), Some(saved)) = (self.docs.get(key), self.saved.shared(key)) else {
+        let Some(gff) = self.docs.get(key) else {
             return true;
         };
-        let Ok(mut read) = self.saved_read.lock() else { return true };
-        let parsed = match read.get(key) {
-            Some((was, g)) if std::sync::Arc::ptr_eq(was, saved) => g.clone(),
-            _ => match Gff::read(saved) {
-                Ok(g) => {
-                    let g = std::sync::Arc::new(g);
-                    read.insert(*key, (saved.clone(), g.clone()));
-                    g
-                }
-                Err(_) => return true,
-            },
+        let Some(parsed) = self.parsed_saved(key) else {
+            return true;
         };
         *parsed != *gff
     }
@@ -1971,5 +2104,150 @@ mod tests {
         ws.undo().unwrap();
         ws.flush().unwrap();
         assert_eq!(ws.module.get(&k), Some(&bytes[..]), "both undone");
+    }
+
+    #[test]
+    fn failed_command_rollback_preserves_rewrites_edited_and_saved_copies() {
+        let dir = mg_testkit::scratch_dir("mg-edit-rollback-saved");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("m.mod");
+        let k1 = key("one", ResType::ARE);
+        let k2 = key("two", ResType::ARE);
+        let k3 = key("three", ResType::ARE);
+        let mut m = Module::new();
+        for k in [k1, k2, k3] {
+            m.set_gff(k, &Gff::new(*b"ARE ")).unwrap();
+        }
+        m.save_as(&mg_module::ModuleLocation::Archive(path.clone())).unwrap();
+        let mut ws = Workspace::new(Module::open(&path).unwrap());
+        ws.apply(Command::new(
+            "Touch k1",
+            vec![Edit::SetField {
+                key: k1,
+                path: GffPath::root(),
+                label: "Extra".into(),
+                value: Some(Value::Int(2)),
+            }],
+        ))
+        .unwrap();
+        assert!(ws.differs_from_saved(&k1));
+        assert_eq!(ws.saved_copies(), 1);
+        assert_eq!(ws.unflushed(), 1);
+        assert_eq!(ws.rewrites(&k2), 0);
+
+        let err = ws
+            .apply(Command::new(
+                "Partial fail",
+                vec![
+                    Edit::insert_item(k2, GffPath::root(), "VarTable", 0, Struct::new(0)),
+                    Edit::SetResource { key: k3, data: None },
+                    Edit::SetField {
+                        key: k2,
+                        path: GffPath::root().field("Missing"),
+                        label: "X".into(),
+                        value: Some(Value::Int(1)),
+                    },
+                ],
+            ))
+            .unwrap_err();
+        assert!(matches!(err, EditError::BadPath { .. }), "{err:?}");
+        assert_eq!(ws.rewrites(&k2), 0);
+        assert_eq!(ws.rewrites(&k3), 0);
+        assert_eq!(ws.unflushed(), 1);
+        assert_eq!(ws.saved_copies(), 1);
+        assert!(ws.module.contains(&k3));
+    }
+
+    /// What changed since the module was opened: an edit, and not once it
+    /// is undone; still after a save (the session is the workspace's, not
+    /// the save's); not a GFF set back to what it held, written out in
+    /// another layout; a new resource, one imported (a command setting it
+    /// whole), one read again from outside and one made outside the
+    /// history (a compiled script); not one taken out (`removed`). Another
+    /// workspace (the module opened again) starts with none.
+    #[test]
+    fn what_changed_since_the_module_was_opened() {
+        let mut ws = workspace();
+        let git = key("area", ResType::GIT);
+        let ifo_key = key("module", ResType::IFO);
+        let none = ChangedSinceOpened::default();
+        assert_eq!(*ws.changed_since_opened(), none);
+        let tag = |v: &str| Edit::SetField {
+            key: git,
+            path: GffPath::root().item("Creature List", 0),
+            label: "Tag".into(),
+            value: Some(Value::String(v.as_bytes().to_vec())),
+        };
+        // An edit, not flushed: told by the document.
+        ws.apply(Command::new("tag", vec![tag("A")])).unwrap();
+        assert_eq!(ws.unflushed(), 1);
+        assert_eq!(ws.changed_since_opened().changed, [git]);
+        // Undone: as opened.
+        ws.undo().unwrap();
+        assert_eq!(*ws.changed_since_opened(), none);
+        ws.redo().unwrap();
+        // Saved: still changed in the session.
+        let dir = mg_testkit::scratch_dir("mg-edit-changed-since-opened");
+        ws.save_as(&mg_module::ModuleLocation::Archive(dir.join("m.mod"))).unwrap();
+        assert!(!ws.is_modified());
+        assert_eq!(ws.changed_since_opened().changed, [git]);
+        // Undone after the save, and saved again: the GIT is written as
+        // Moonglow lays it out, but holds what it held when opened.
+        ws.undo().unwrap();
+        ws.save().unwrap();
+        assert_eq!(*ws.changed_since_opened(), none);
+        // A new resource, and one imported over another (set whole).
+        let script = key("new_script", ResType::NSS);
+        let fresh = |k: ResKey, data: &[u8]| Edit::SetResource { key: k, data: Some(data.into()) };
+        ws.apply(Command::new("new", vec![fresh(script, b"void main() {}")])).unwrap();
+        let mut info = Gff::new(*b"IFO ");
+        info.root.write(&ifo::MOD_XP_SCALE, 50);
+        let info = info.to_bytes().unwrap();
+        ws.apply(Command::new("import", vec![fresh(ifo_key, &info)])).unwrap();
+        let changed = ws.changed_since_opened();
+        assert_eq!(changed.changed, [ifo_key, script], "in the module's order");
+        // Taken out: removed, not changed; a new one taken out is neither.
+        let gone = |k: ResKey| Edit::SetResource { key: k, data: None };
+        ws.apply(Command::new("delete", vec![gone(git), gone(script)])).unwrap();
+        let changed = ws.changed_since_opened();
+        assert_eq!(changed.changed, [ifo_key]);
+        assert_eq!(changed.removed, [git]);
+        // Outside the history: a compiled script made (derive), a file read
+        // again from outside (adopt).
+        let ncs = key("compiled", ResType::NCS);
+        ws.derive(|m| m.set(ncs, b"NCS V1.0".to_vec())).unwrap();
+        let outside = key("outside", ResType::NSS);
+        ws.adopt(&[(outside, Some(b"void main() {}".to_vec().into()))]).unwrap();
+        let changed = ws.changed_since_opened();
+        assert_eq!(changed.changed, [ifo_key, ncs, outside]);
+        // The module opened again: a new session.
+        let again = Workspace::new(ws.module.clone());
+        assert_eq!(*again.changed_since_opened(), none);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A field set back by hand counts as unchanged, edited or flushed; a
+    /// resource whose bytes differ but reads as the same document does
+    /// too, and the answer is kept while nothing changes.
+    #[test]
+    fn a_field_set_back_by_hand_is_not_a_change() {
+        let mut ws = workspace();
+        let ifo_key = key("module", ResType::IFO);
+        let xp = |v: u8| Edit::SetField {
+            key: ifo_key,
+            path: GffPath::root(),
+            label: "Mod_XPScale".into(),
+            value: Some(Value::Byte(v)),
+        };
+        ws.apply(Command::new("xp", vec![xp(20)])).unwrap();
+        assert_eq!(ws.changed_since_opened().changed, [ifo_key]);
+        ws.flush().unwrap();
+        assert_eq!(ws.changed_since_opened().changed, [ifo_key]);
+        ws.apply(Command::new("xp", vec![xp(10)])).unwrap();
+        assert!(ws.changed_since_opened().changed.is_empty());
+        ws.flush().unwrap();
+        let first = ws.changed_since_opened();
+        assert!(first.changed.is_empty());
+        assert!(std::sync::Arc::ptr_eq(&first, &ws.changed_since_opened()), "kept");
     }
 }

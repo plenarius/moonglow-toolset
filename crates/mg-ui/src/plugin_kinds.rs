@@ -322,6 +322,9 @@ impl Moonglow {
             ));
             return;
         }
+        if self.plugin_run_refused(&p.manifest.name, &decl.title, false) {
+            return;
+        }
         let to = if decl.folder {
             self.dialogs.pick_folder(&title, None)
         } else {
@@ -357,6 +360,9 @@ impl Moonglow {
             self.log.error(format!("{} has no importer {id}", p.manifest.name));
             return;
         };
+        if self.plugin_run_refused(&p.manifest.name, &decl.title, false) {
+            return;
+        }
         let title = decl.title.trim_end_matches('…').to_string();
         let from = match decl.folder {
             true => self.dialogs.pick_folder(&title, None),
@@ -416,67 +422,79 @@ impl Moonglow {
         }
         let revision = self.ws.as_ref().map(mg_edit::Workspace::revision);
         for key in open {
-            let Some(plugin) =
-                self.enabled_plugins().into_iter().find(|p| p.manifest.id == key.0).cloned()
-            else {
-                continue;
+            let (on_edits, on_selection) = match self
+                .enabled_plugins()
+                .into_iter()
+                .find(|p| p.manifest.id == key.0)
+                .and_then(|p| p.manifest.panels.iter().find(|d| d.id == key.1))
+            {
+                Some(decl) => (decl.on_edits, decl.on_selection),
+                None => continue,
             };
-            let Some(decl) = plugin.manifest.panels.iter().find(|d| d.id == key.1).cloned() else {
-                continue;
-            };
-            let selection = decl.on_selection.then(|| self.plugin_selection());
-            let state = self.plugins.panels.entry(key.clone()).or_default();
-            // Its render's result, when it has come.
-            if let Some((rx, _)) = &state.running {
-                match rx.try_recv() {
-                    Ok(result) => {
-                        state.running = None;
-                        state.took = state.began.map(|b| b.elapsed());
-                        match result {
-                            // (Stopped for the game's data: drawn again.)
-                            Err(PluginError::Canceled(_)) => state.stale = true,
-                            r => state.took(r.map_err(|e| e.to_string())),
+            let selection = on_selection.then(|| self.plugin_selection());
+            let (should_start, sel_snapshot) = {
+                let state = self.plugins.panels.entry(key.clone()).or_default();
+                // Its render's result, when it has come.
+                if let Some((rx, _)) = &state.running {
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            state.running = None;
+                            state.took = state.began.map(|b| b.elapsed());
+                            match result {
+                                // (Stopped for the game's data: drawn again.)
+                                Err(PluginError::Canceled(_)) => state.stale = true,
+                                r => state.took(r.map_err(|e| e.to_string())),
+                            }
+                        }
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => {
+                            state.running = None;
+                            state.shown = Some(Err("its render stopped".into()));
                         }
                     }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {
-                        state.running = None;
-                        state.shown = Some(Err("its render stopped".into()));
+                }
+                if on_edits && state.revision.is_some() && state.revision != revision {
+                    // (Edits that come one after another, a drag's, draw it
+                    // once, when they stop; with jobs run to their end at
+                    // once, at once.)
+                    let now = Instant::now();
+                    if state.seen != revision {
+                        state.seen = revision;
+                        state.quiet_at = Some(now + PANEL_QUIET);
+                    }
+                    match state.quiet_at {
+                        _ if !self.background_jobs => state.stale = true,
+                        Some(t) if now >= t => state.stale = true,
+                        Some(t) => ctx.request_repaint_after(t - now),
+                        None => state.stale = true,
                     }
                 }
-            }
-            if decl.on_edits && state.revision.is_some() && state.revision != revision {
-                // (Edits that come one after another, a drag's, draw it
-                // once, when they stop; with jobs run to their end at
-                // once, at once.)
-                let now = Instant::now();
-                if state.seen != revision {
+                if let Some(s) = &selection
+                    && *s != state.selection
+                {
+                    state.stale = true;
+                }
+                if !state.stale || state.running.is_some() || self.job.is_some() {
+                    (false, None)
+                } else {
+                    state.stale = false;
+                    state.drawn += 1;
+                    state.quiet_at = None;
+                    state.revision = revision;
                     state.seen = revision;
-                    state.quiet_at = Some(now + PANEL_QUIET);
+                    state.selection = selection.unwrap_or_default();
+                    state.began = Some(Instant::now());
+                    (true, Some(()))
                 }
-                match state.quiet_at {
-                    _ if !self.background_jobs => state.stale = true,
-                    Some(t) if now >= t => state.stale = true,
-                    Some(t) => ctx.request_repaint_after(t - now),
-                    None => state.stale = true,
-                }
+            };
+            if should_start && sel_snapshot.is_some() {
+                let Some(plugin) =
+                    self.enabled_plugins().into_iter().find(|p| p.manifest.id == key.0).cloned()
+                else {
+                    continue;
+                };
+                self.start_panel(plugin, &key.1.clone(), key, ctx);
             }
-            if let Some(s) = &selection
-                && *s != state.selection
-            {
-                state.stale = true;
-            }
-            if !state.stale || state.running.is_some() || self.job.is_some() {
-                continue;
-            }
-            state.stale = false;
-            state.drawn += 1;
-            state.quiet_at = None;
-            state.revision = revision;
-            state.seen = revision;
-            state.selection = selection.clone().unwrap_or_default();
-            state.began = Some(Instant::now());
-            self.start_panel(plugin, &decl.id, key, ctx);
         }
     }
 
@@ -589,7 +607,7 @@ pub(crate) fn panel_ui(app: &mut Moonglow, ui: &mut egui::Ui, plugin: &str, pane
         (p.manifest.name.clone(), p.manifest.panels.iter().find(|d| d.id == panel).cloned())
     });
     let Some((name, Some(decl))) = found else {
-        ui.weak("Its plugin is not enabled (Plugins › Manage Plugins…).");
+        ui.weak("Its plugin is not enabled (Plugins › Manage Plugins).");
         return;
     };
     ui.horizontal(|ui| {
@@ -737,8 +755,6 @@ pub(crate) fn panel_ui(app: &mut Moonglow, ui: &mut egui::Ui, plugin: &str, pane
             }
         }
     });
-    let values: BTreeMap<String, serde_json::Value> =
-        fields.iter().map(|(id, v)| (id.clone(), v.value.clone())).collect();
     let revision = app.ws.as_ref().map(mg_edit::Workspace::revision);
     let mut outdated = false;
     if let Some(state) = app.plugins.panels.get_mut(&key) {
@@ -767,6 +783,12 @@ pub(crate) fn panel_ui(app: &mut Moonglow, ui: &mut egui::Ui, plugin: &str, pane
     // A button's command (or an item's, or a field's), on what it names,
     // else on what is selected, with the fields' values.
     if let Some((command, on)) = chosen {
+        let values: BTreeMap<String, serde_json::Value> = app
+            .plugins
+            .panels
+            .get(&key)
+            .map(|s| s.fields.iter().map(|(id, v)| (id.clone(), v.value.clone())).collect())
+            .unwrap_or_default();
         let selected = if on.is_empty() { app.plugin_selection() } else { on };
         let (plugin, command) = (plugin.to_string(), command);
         app.actions.push(Action::RunPluginCommand { plugin, command, selected, values });

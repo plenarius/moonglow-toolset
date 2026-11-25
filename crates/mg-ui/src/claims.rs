@@ -40,17 +40,20 @@ pub(crate) struct ClaimsState {
     let_through: Vec<Pass>,
     /// A command was held just now (for the window): Apply says no more.
     pub(crate) held: bool,
-    /// The Claims Table tab (Edit › Claims Table…; a window before U28).
+    /// The Claims Table tab.
     pub(crate) table: Option<TableTab>,
     /// Counted up as the listing is made again: the table's order follows.
     pub(crate) listed_revision: u64,
-    /// The Claims Table's listing, kept while the claims and the
-    /// module's areas are what it was made by ([`listing`]).
-    listed: Option<(ClaimsNow, Vec<ResRef>, std::sync::Arc<Vec<mg_module::claims::Listed>>)>,
+    /// The Claims Table's listing, kept while the claims, workspace
+    /// `(identity, revision)`, and module's areas match ([`listing`]).
+    listed: Option<ListedClaims>,
 }
 
-/// The Claims Table tab (M4's U28; a window before): what is being
-/// answered in it, and its table's sort and row chosen.
+type ListedClaims =
+    (ClaimsNow, Option<(u64, u64)>, Vec<ResRef>, std::sync::Arc<Vec<mg_module::claims::Listed>>);
+
+/// The Claims Table tab: what is being answered in it, and its table's sort
+/// and row chosen.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TableTab {
     /// An area being handed on, and the code typed for whom.
@@ -265,6 +268,19 @@ pub(crate) fn gate(app: &mut Moonglow, cmd: &Command) -> Result<(), EditError> {
         app.claims.let_through.clear();
         return Ok(());
     }
+    // (Another held for the window already, whose follow-ups wait for its
+    // answer: this one is refused, not put in its place. Whatever held it:
+    // a plugin job's change took a builder's Rename's place.)
+    if app.claims.protected_ask.is_some() {
+        return Err(EditError::Invalid {
+            key: ResKey::new(area, ResType::ARE),
+            message: format!(
+                "not changed: {area}'s {} is kept, and the Protected Area window waits for an \
+                 answer about another change",
+                what.noun()
+            ),
+        });
+    }
     app.claims.protected_ask = Some(ProtectedAsk { changes, then: Action::Apply(cmd.clone()) });
     app.claims.held = true;
     Err(EditError::Invalid {
@@ -326,6 +342,16 @@ pub(crate) fn asks_first(app: &mut Moonglow, action: &Action) -> bool {
         return false;
     }
     let Some(why) = project(app).and_then(|p| p.protected(key.resref)) else { return false };
+    // (Another held for the window already: this one is not done, nor put
+    // in its place, as in `gate`.)
+    if app.claims.protected_ask.is_some() {
+        app.log.warn(format!(
+            "Not done: {} is protected, and the Protected Area window waits for an answer about \
+             another change",
+            key.resref
+        ));
+        return true;
+    }
     let changes = vec![(key.resref, why, what)];
     app.claims.protected_ask = Some(ProtectedAsk { changes, then: action.clone() });
     true
@@ -631,18 +657,32 @@ pub(crate) fn windows(app: &mut Moonglow, ctx: &egui::Context) {
 /// comparisons a frame for a world of 1,400 areas.
 fn listing(app: &mut Moonglow) -> Option<std::sync::Arc<Vec<mg_module::claims::Listed>>> {
     let p = project(app).filter(|p| p.claim_table.is_some() || p.claims.file.is_some())?;
-    let areas: Vec<ResRef> = (app.ws.as_ref())
-        .map(|ws| ws.module.keys_of(ResType::ARE).map(|k| k.resref).collect())
-        .unwrap_or_default();
+    let ws_key = app.ws.as_ref().map(|ws| (ws.identity(), ws.revision()));
     let by = whose(p);
-    if let Some((was, of, listed)) = &app.claims.listed
+    if let Some((was, was_ws, _, listed)) = &app.claims.listed
         && *was == by
-        && *of == areas
+        && *was_ws == ws_key
     {
         return Some(listed.clone());
     }
+    let areas: Vec<ResRef> = (app.ws.as_ref())
+        .map(|ws| ws.module.keys_of(ResType::ARE).map(|k| k.resref).collect())
+        .unwrap_or_default();
+    let mut matched = None;
+    if let Some((was, _, of, listed)) = &app.claims.listed
+        && *was == by
+        && *of == areas
+    {
+        matched = Some(listed.clone());
+    }
+    if let Some(listed) = matched {
+        if let Some((_, was_ws, _, _)) = &mut app.claims.listed {
+            *was_ws = ws_key;
+        }
+        return Some(listed);
+    }
     let listed = std::sync::Arc::new(p.claims_listing(Some(&areas)));
-    app.claims.listed = Some((by, areas, listed.clone()));
+    app.claims.listed = Some((by, ws_key, areas, listed.clone()));
     app.claims.listed_revision += 1;
     Some(listed)
 }
@@ -772,11 +812,23 @@ pub(crate) fn table_body(app: &mut Moonglow, ui: &mut egui::Ui) {
     // (The row's actions as wide as its widest pair, Release and Hand To…;
     // where the room is too narrow for them, a row's menu button.)
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let words = |w: &str| {
-        let g = ui.fonts_mut(|f| f.layout_no_wrap(w.into(), font.clone(), egui::Color32::WHITE));
-        g.size().x + 2.0 * ui.spacing().button_padding.x
-    };
-    let actions = (words(RELEASE) + words(HAND_TO) + 4.0).max(words(TAKE_OVER)) + 12.0;
+    let pad_x = ui.spacing().button_padding.x;
+    let width_key = (font.size.to_bits(), pad_x.to_bits());
+    let width_id = egui::Id::new("claims-actions-width");
+    let actions = ui
+        .data(|d| d.get_temp::<(u32, u32, f32)>(width_id))
+        .filter(|(fs, px, _)| (*fs, *px) == width_key)
+        .map(|(_, _, w)| w)
+        .unwrap_or_else(|| {
+            let words = |w: &str| {
+                let g = ui
+                    .fonts_mut(|f| f.layout_no_wrap(w.into(), font.clone(), egui::Color32::WHITE));
+                g.size().x + 2.0 * pad_x
+            };
+            let w = (words(RELEASE) + words(HAND_TO) + 4.0).max(words(TAKE_OVER)) + 12.0;
+            ui.data_mut(|d| d.insert_temp(width_id, (width_key.0, width_key.1, w)));
+            w
+        });
     let (cols, folded) = crate::dock_reports::claim_columns(ui.available_width(), actions);
     let spec = crate::report_table::Spec {
         id: egui::Id::new("claims-table"),
@@ -1036,8 +1088,54 @@ fn protected_window(app: &mut Moonglow, ctx: &egui::Context) {
         app.actions.push(ask.then);
     } else if copy {
         app.claims.protected_ask = None;
+        app.cancel_pending_protected();
         app.actions.push(Action::CopyDialog(ResKey::new(ask.changes[0].0, ResType::ARE)));
     } else if cancel || !open {
         app.claims.protected_ask = None;
+        app.cancel_pending_protected();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A change asked about while the Protected Area window asks about
+    /// another, which nothing holds (a builder's Rename), is refused, not
+    /// put in its place: a plugin job's change took the Rename's window
+    /// (review U's 5).
+    #[test]
+    fn a_builder_s_ask_is_not_replaced_by_another_change() {
+        let dir = mg_testkit::scratch_dir("ui-claims-ask-kept");
+        let mod_dir = dir.join("mod");
+        let area = ResKey::parse("start", ResType::ARE).unwrap();
+        let mut are = mg_gff::Gff::new(*b"ARE ");
+        are.root.set("Tag", mg_gff::Value::String(b"ORIG".to_vec()));
+        let mut m = mg_module::Module::new();
+        m.set_info(&mg_gff::Gff::new(*b"IFO ")).unwrap();
+        m.set(area, are.to_bytes().unwrap());
+        m.save_as(&mg_module::ModuleLocation::Folder(mod_dir.clone())).unwrap();
+        std::fs::write(mod_dir.join("moonglow.toml"), "[claims]\nprotected = [\"start\"]\n")
+            .unwrap();
+        let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
+        app.open_module(&mod_dir);
+
+        assert!(asks_first(&mut app, &Action::RenameDialog(area)), "asked first");
+        assert!(!app.held_for_protected(), "nothing held");
+        let retag = mg_edit::Edit::SetField {
+            key: area,
+            path: mg_edit::GffPath::root(),
+            label: "Tag".into(),
+            value: Some(mg_gff::Value::String(b"OTHER".to_vec())),
+        };
+        let other = app.apply_or_ask(Command::new("Tag", vec![retag]), None);
+        assert!(other.is_err(), "{other:?}");
+        let ask = app.claims.protected_ask.as_ref().expect("the Rename's window");
+        assert!(matches!(ask.then, Action::RenameDialog(k) if k == area), "{:?}", ask.then);
+        assert!(!app.claims.held);
+        // Nor by another window asked for.
+        assert!(asks_first(&mut app, &Action::DeleteDialog(area)), "held back");
+        let ask = app.claims.protected_ask.as_ref().expect("the Rename's window");
+        assert!(matches!(ask.then, Action::RenameDialog(k) if k == area), "{:?}", ask.then);
     }
 }

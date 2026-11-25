@@ -296,7 +296,10 @@ pub(crate) fn input(
             view.tile_box = Some((from, now));
         }
         if held.cancelled() {
+            // (One Escape, one thing: the box goes, and the tiles selected
+            // and Select Tiles stay.)
             view.tile_box = None;
+            return true;
         } else if !held.by(egui::PointerButton::Primary) {
             view.tile_box = None;
             // (With Shift, held as it began or as it ends: added to those
@@ -360,6 +363,14 @@ pub(crate) fn input(
         next_variant(app, view, t, false);
     }
     let typing = ui.ctx().memory(|m| m.focused().is_some());
+    if !typing && view.tile_box.is_none() && crate::area_view::escaped(ui, response) {
+        if !view.tile_selection.is_empty() {
+            view.tile_selection.clear();
+        } else {
+            view.tile_mode = false;
+        }
+        return true;
+    }
     if response.hovered()
         && !typing
         && ui.input(|i| i.key_pressed(egui::Key::Delete))
@@ -521,7 +532,7 @@ pub(crate) fn context_menu(
         ui.close();
     }
     // The plugins' commands for tiles, run on them.
-    let commands = app.plugin_menu_commands();
+    let commands = app.plugin_menu_commands_cached();
     if !commands.is_empty() {
         let tiles = app.tiles_of(view.area, &cells);
         crate::plugins::menu_on(ui, &commands, &tiles, &mut app.actions);
@@ -835,14 +846,19 @@ impl TileValues {
 /// tile past the area's list).
 fn read_props(app: &mut Moonglow, view: &AreaView) -> Option<TileProps> {
     let tools = view.terrain.as_ref()?;
-    let are = app.ws.as_mut().and_then(|ws| ws.doc(&ResKey::new(view.area, ResType::ARE)).ok())?;
-    let width = are.root.integer("Width").unwrap_or(0).max(0) as u32;
-    let list = are.root.list("Tile_List").unwrap_or(&[]).to_vec();
-    let rewrites =
-        app.ws.as_ref().map_or(0, |ws| ws.rewrites(&ResKey::new(view.area, ResType::ARE)));
-    let tiles: Vec<usize> =
-        view.tile_selection.iter().map(|&(x, y)| (y * width + x) as usize).collect();
-    let base: Vec<mg_gff::Struct> = tiles.iter().filter_map(|&i| list.get(i).cloned()).collect();
+    let key = ResKey::new(view.area, ResType::ARE);
+    let (rewrites, (tiles, base)) = {
+        let ws = app.ws.as_mut()?;
+        let rewrites = ws.rewrites(&key);
+        let are = ws.doc(&key).ok()?;
+        let width = are.root.integer("Width").unwrap_or(0).max(0) as u32;
+        let list = are.root.list("Tile_List").unwrap_or(&[]);
+        let tiles: Vec<usize> =
+            view.tile_selection.iter().map(|&(x, y)| (y * width + x) as usize).collect();
+        let base: Vec<mg_gff::Struct> =
+            tiles.iter().filter_map(|&i| list.get(i).cloned()).collect();
+        (rewrites, (tiles, base))
+    };
     if base.len() != tiles.len() || base.is_empty() {
         return None;
     }
@@ -946,6 +962,46 @@ pub(crate) fn light_colors(app: &Moonglow) -> Vec<Color32> {
             Color32::from_rgb(c("TOOLSETRED"), c("TOOLSETGREEN"), c("TOOLSETBLUE"))
         })
         .collect()
+}
+
+fn cached_light_colors(app: &Moonglow, ui: &egui::Ui) -> std::sync::Arc<[Color32]> {
+    let key = (app.game.is_some(), app.load_order);
+    let id = egui::Id::new("tile-light-colors-cache");
+    if let Some((was, cached)) =
+        ui.data(|d| d.get_temp::<((bool, u64), std::sync::Arc<[Color32]>)>(id))
+        && was == key
+    {
+        return cached;
+    }
+    let cached: std::sync::Arc<[Color32]> = light_colors(app).into();
+    ui.data_mut(|d| d.insert_temp(id, (key, cached.clone())));
+    cached
+}
+
+fn cached_replacetexture(app: &Moonglow, ui: &egui::Ui) -> std::sync::Arc<[mg_rules::Choice]> {
+    let key = (app.game.is_some(), app.load_order);
+    let id = egui::Id::new("tile-replacetexture-cache");
+    if let Some((was, cached)) =
+        ui.data(|d| d.get_temp::<((bool, u64), std::sync::Arc<[mg_rules::Choice]>)>(id))
+        && was == key
+    {
+        return cached;
+    }
+    let rows: Vec<mg_rules::Choice> = (app.game.as_deref())
+        .and_then(|g| g.table("replacetexture").ok())
+        .map(|t| {
+            (0..t.len())
+                .take_while(|&r| mg_area::replacement_value(r).is_some())
+                .map(|r| {
+                    let text = format!("{r}: {}", t.get(r, "TEXTURENAME").unwrap_or(""));
+                    mg_rules::Choice { row: r, text }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let cached: std::sync::Arc<[mg_rules::Choice]> = rows.into();
+    ui.data_mut(|d| d.insert_temp(id, (key, cached.clone())));
+    cached
 }
 
 /// A color swatch button (`.swatch`: 36 by 22 of `raised`, `raised-hover`
@@ -1066,7 +1122,7 @@ pub(crate) fn panel(app: &mut Moonglow, ui: &mut egui::Ui, editor: Option<&crate
     let mut dragging = false;
     // (The first control F6 gives the focus to.)
     let mut first: Option<egui::Id> = None;
-    let colors = light_colors(app);
+    let colors = cached_light_colors(app, ui);
     let color = |i: usize| colors.get(i).copied().unwrap_or(Color32::BLACK);
     egui::ScrollArea::vertical().id_salt("tile-props-scroll").auto_shrink([false, false]).show(
         ui,
@@ -1177,16 +1233,10 @@ pub(crate) fn panel(app: &mut Moonglow, ui: &mut egui::Ui, editor: Option<&crate
                 });
                 let side = variant_side(app);
                 // (Found by the search: by model name, or by number.)
-                let needle = mg_core::text::Needle::new(&props.find);
-                let found: Vec<(u32, String)> = props
-                    .every
-                    .iter()
-                    .filter(|(id, model)| needle.finds_in(&[model, &id.to_string()]))
-                    .cloned()
-                    .collect();
+                let found_list = cached_all_tiles(app, ui, &props);
                 let all = props.every.len();
                 ui.horizontal(|ui| {
-                    let count = match found.len() {
+                    let count = match found_list.len() {
                         n if n == all => format!("All tiles ({all} in the tileset)"),
                         n => format!("All tiles ({n} of {all})"),
                     };
@@ -1203,13 +1253,13 @@ pub(crate) fn panel(app: &mut Moonglow, ui: &mut egui::Ui, editor: Option<&crate
                     .find_over()
                     .width(room)
                     .show(ui);
-                if found.is_empty() {
+                if found_list.is_empty() {
                     ui.weak("No tile's model or number has that in it.");
                 }
-                if let Some(p) = all_tiles_pictures(app, ui, &props, &found, side) {
+                if let Some(p) = all_tiles_pictures(app, ui, &props, &found_list, side) {
                     pick = Some(Pick::Any(p));
                 }
-            } else if let Some((_, variants)) = props.variants.clone().filter(|(_, v)| v.len() > 1)
+            } else if let Some((_, variants)) = props.variants.as_ref().filter(|(_, v)| v.len() > 1)
             {
                 // The tile's variants: as many across as the panel is
                 // wide, in the panel's own scroll.
@@ -1223,7 +1273,7 @@ pub(crate) fn panel(app: &mut Moonglow, ui: &mut egui::Ui, editor: Option<&crate
                 // (The kit's small cells, as many across as the panel is
                 // wide, 6 apart.)
                 let id = egui::Id::new(("tile-variants", props.area));
-                if let Some(p) = variant_pictures(app, ui, id, &variants, props.variant, side) {
+                if let Some(p) = variant_pictures(app, ui, id, variants, props.variant, side) {
                     picked = Some(p);
                 }
             }
@@ -1319,7 +1369,7 @@ pub(crate) fn variant_side(app: &Moonglow) -> f32 {
 pub const ALL_TILES_SEARCH: &str = "Search model, number";
 
 /// Tile Properties' All tiles switch's name.
-pub const ALL_TILES: &str = "All tiles (ignore fit)";
+pub const ALL_TILES: &str = "All Tiles (Ignore Fit)";
 
 /// The pictures' Size slider, beside their heading.
 fn size_slider(app: &mut Moonglow, ui: &mut egui::Ui, side: f32) {
@@ -1407,18 +1457,7 @@ fn height_row(ui: &mut egui::Ui, props: &mut TileProps) -> bool {
 /// beside it in the error color. Enabled where a tile's model has
 /// `replace_tex`.
 fn replacement_row(app: &Moonglow, ui: &mut egui::Ui, props: &mut TileProps) {
-    let rows: Vec<mg_rules::Choice> = (app.game.as_deref())
-        .and_then(|g| g.table("replacetexture").ok())
-        .map(|t| {
-            (0..t.len())
-                .take_while(|&r| mg_area::replacement_value(r).is_some())
-                .map(|r| {
-                    let text = format!("{r}: {}", t.get(r, "TEXTURENAME").unwrap_or(""));
-                    mg_rules::Choice { row: r, text }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let rows = cached_replacetexture(app, ui);
     let enabled = props.has_replace;
     label_cell(ui, REPLACEMENT, enabled);
     ui.horizontal(|ui| {
@@ -1472,6 +1511,39 @@ pub const HEIGHT_LOCKED: &str = "(a group's tile, without the rest of its group)
 pub const REPLACEMENT: &str = "Replacement texture";
 
 /// Every tile of the tileset as pictures, turned as Tile Properties'
+fn cached_all_tiles(
+    app: &Moonglow,
+    ui: &egui::Ui,
+    props: &TileProps,
+) -> std::sync::Arc<Vec<(mg_tiles::Placement, String)>> {
+    let tileset =
+        app.area_views.get(&props.area).and_then(|v| v.terrain.as_ref().map(|t| t.tileset));
+    let key = (tileset, app.load_order, props.find.clone(), props.turn, props.every.len());
+    let id = egui::Id::new("tile-all-tiles-cache");
+    if let Some((was, cached)) = ui.data(|d| {
+        d.get_temp::<(
+            (Option<ResRef>, u64, String, u8, usize),
+            std::sync::Arc<Vec<(mg_tiles::Placement, String)>>,
+        )>(id)
+    }) && was == key
+    {
+        return cached;
+    }
+    let needle = mg_core::text::Needle::new(&props.find);
+    let list: Vec<(mg_tiles::Placement, String)> = props
+        .every
+        .iter()
+        .filter(|(id, model)| needle.finds_in(&[model, &id.to_string()]))
+        .map(|(id, model)| {
+            (mg_tiles::Placement { tile: *id, orientation: props.turn, height: 0 }, model.clone())
+        })
+        .collect();
+    let cached = std::sync::Arc::new(list);
+    ui.data_mut(|d| d.insert_temp(id, (key, cached.clone())));
+    cached
+}
+
+/// Every tile of the tileset as thumbnails, each turned as All tiles'
 /// Turn says, as many across as the tab is wide; only the rows in sight
 /// are drawn (and their pictures made), however many the tileset has.
 /// The tile clicked, if one is.
@@ -1479,15 +1551,9 @@ fn all_tiles_pictures(
     app: &mut Moonglow,
     ui: &mut egui::Ui,
     props: &TileProps,
-    tiles: &[(u32, String)],
+    list: &[(mg_tiles::Placement, String)],
     side: f32,
 ) -> Option<mg_tiles::Placement> {
-    let list: Vec<(mg_tiles::Placement, String)> = tiles
-        .iter()
-        .map(|(id, model)| {
-            (mg_tiles::Placement { tile: *id, orientation: props.turn, height: 0 }, model.clone())
-        })
-        .collect();
     // (A scroll of its own inside the panel's, as tall as the panel shows
     // under its top: only the rows in sight drawn, however many.)
     let shown = (ui.clip_rect().bottom() - ui.cursor().top()).max(240.0);
@@ -1497,7 +1563,7 @@ fn all_tiles_pictures(
         .max_height(shown)
         .show(ui, |ui| {
             let id = egui::Id::new(("tile-all-pictures", props.area));
-            variant_pictures(app, ui, id, &list, props.variant, side)
+            variant_pictures(app, ui, id, list, props.variant, side)
         })
         .inner
 }
@@ -1576,15 +1642,12 @@ fn pick_command(
             "Tile variant"
         }
         Pick::Any(_) | Pick::Turn(_) => {
-            let list = app
-                .ws
-                .as_mut()?
-                .doc(&ResKey::new(props.area, ResType::ARE))
-                .ok()?
-                .root
-                .list("Tile_List")
-                .unwrap_or(&[])
-                .to_vec();
+            let are_doc = if matches!(what, Pick::Turn(_)) {
+                app.ws.as_mut()?.doc(&ResKey::new(props.area, ResType::ARE)).ok()
+            } else {
+                None
+            };
+            let list = are_doc.and_then(|d| d.root.list("Tile_List")).unwrap_or(&[]);
             for &(x, y) in &props.cells {
                 let now = g.get_tile(x, y)?;
                 let q = match what {
@@ -1844,13 +1907,23 @@ pub(crate) fn overlay(ui: &egui::Ui, view: &AreaView, clip: Option<&TileClip>) {
     let painter = ui.painter_at(view.rect);
     let blue = Color32::from_rgb(70, 130, 255);
     // On the ground the pointer picks (some tilesets build theirs above the
-    // tiles' heights).
+    // tiles' heights), smoothed, and past `BOXES_MESHED` lines as one mesh
+    // (`outlines`).
+    let stroke = egui::Stroke::new(2.0, blue);
+    let mut lines = Vec::with_capacity(view.tile_selection.len() * 4);
     for &(x, y) in &view.tile_selection {
         let Some(t) = model.tiles.get((y * model.width + x) as usize) else { continue };
-        if let Some(screen) = view.square_along_ground(x as f32, y as f32, t.position.z) {
-            crate::area_view::outline(&painter, &screen, egui::Stroke::new(2.0, blue));
+        let Some(screen) = view.square_along_ground(x as f32, y as f32, t.position.z) else {
+            continue;
+        };
+        if crate::area_view::beside(&screen, view.rect) {
+            continue;
+        }
+        for k in 0..screen.len() {
+            lines.push(([screen[k], screen[(k + 1) % screen.len()]], stroke));
         }
     }
+    painter.extend(crate::area_view::outlines(&lines).iter().cloned());
     // The pasted block, under the pointer (over the view, not over a
     // window in front of it).
     if view.tile_pasting

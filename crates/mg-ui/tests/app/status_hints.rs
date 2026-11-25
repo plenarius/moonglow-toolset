@@ -14,29 +14,6 @@ fn said(h: &Harness<'_, Moonglow>) -> Vec<String> {
     h.state().status_said().to_vec()
 }
 
-/// Frames until the Status Bar says each of `what` (a hint or a count)
-/// and none of `not`, each said one a node of the bar named so (a screen
-/// reader reaches it, and it takes no focus), for ten seconds at most.
-/// (What it says is made after the editor area is drawn, and drawn by the
-/// next frame's bar.)
-fn says(h: &mut Harness<'_, Moonglow>, what: &[&str], not: &[&str]) {
-    let started = std::time::Instant::now();
-    loop {
-        let now = said(h);
-        let has = |w: &&str| now.iter().any(|s| s == w);
-        let drawn = |w: &&str| h.get_by_label("Status Bar").query_by_label(w).is_some();
-        if what.iter().all(has) && !not.iter().any(has) && what.iter().all(drawn) {
-            break;
-        }
-        let missing: Vec<&&str> = what.iter().filter(|w| !drawn(w)).collect();
-        assert!(
-            started.elapsed().as_secs() < 10,
-            "never said {what:?} without {not:?}: it says {now:?}; not drawn: {missing:?}"
-        );
-        h.step();
-    }
-}
-
 /// The view of `area`.
 fn view<'a>(h: &'a mut Harness<'_, Moonglow>, area: ResRef) -> &'a mut mg_ui::area_view::AreaView {
     h.state_mut().area_views.get_mut(&area).unwrap()
@@ -372,7 +349,26 @@ fn a_script_tab_shows_its_keys() {
         "F7: Compile all",
         "Ctrl, R: Replace",
     ];
-    says(&mut h, &keys, &["4 by 4 tiles"]);
+    // (All eight are said; at 1600 beside a script not all are drawn since
+    // 5.2.0: Help's switch joined the bar, and the live error, here the
+    // file not found without a game, is shown whole, the game folder
+    // giving way first, then the hints from the last. 5.1.0 drew all
+    // eight.)
+    let drawn = |h: &Harness<'_, Moonglow>, w: &str| {
+        h.get_by_label("Status Bar").query_by_label(w).is_some()
+    };
+    says(&mut h, &keys[..7], &["4 by 4 tiles"]);
+    assert!(said(&h).iter().any(|s| s == keys[7]), "all eight said");
+    let error = "Found as you type: hello.nss(1): ERROR: FILE NOT FOUND";
+    assert!(drawn(&h, error), "the error whole");
+    assert!(!drawn(&h, "No game install"), "the folder gone first");
+    assert!(!drawn(&h, keys[7]), "Replace gave way to the error");
+    // With no error: seven, F7's Compile all back; Ctrl+R's Replace gives
+    // way to Help's switch and the log's last line at its 170.
+    h.state_mut().settings.no_live_check = true;
+    settle(&mut h);
+    says(&mut h, &keys[..7], &["4 by 4 tiles"]);
+    assert!(!drawn(&h, keys[7]), "Replace gave way");
 }
 
 /// Places `resref`'s blueprint (of type `t`) in `area`'s GIT list `list`
@@ -416,15 +412,6 @@ fn put(
     };
     h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Setup", edits)));
     settle(h);
-}
-
-/// Frames until `done`, for ten seconds at most.
-fn until(h: &mut Harness<'_, Moonglow>, what: &str, done: impl Fn(&Harness<'_, Moonglow>) -> bool) {
-    let started = std::time::Instant::now();
-    while !done(h) {
-        assert!(started.elapsed().as_secs() < 10, "never: {what}: {:?}", said(h));
-        h.step();
-    }
 }
 
 /// The area view's other states (the review of M3 T12): what is selected
@@ -496,15 +483,15 @@ fn the_other_area_states_show_their_hints() {
     wheel(&mut h, chest);
     h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
     says(&mut h, &[refused, "Ctrl, Wheel: Zoom slowly"], &[]);
-    // (The window's own time: a frame a 60th of a second.)
-    let (started, from) = (std::time::Instant::now(), h.ctx.input(|i| i.time));
-    loop {
+    // (Advance simulated time in half-second steps rather than burning ~240 frames.)
+    let from = h.ctx.input(|i| i.time);
+    for _ in 0..20 {
         if !said(&h).iter().any(|s| s == refused) {
             break;
         }
-        assert!(started.elapsed().as_secs() < 30, "the refusal said for good");
-        h.step();
+        advance_clock(&mut h, 0.5);
     }
+    assert!(!said(&h).iter().any(|s| s == refused), "the refusal timed out");
     let said_for = h.ctx.input(|i| i.time) - from;
     assert!((3.0..5.0).contains(&said_for), "said for its four seconds: {said_for}");
     // Pasting objects: a waypoint copied and pasted over the view.
@@ -534,7 +521,10 @@ fn the_other_area_states_show_their_hints() {
         ["Placing newgeneric", "Click: Corner", "Alt, Click: Rectangle from the first corner"];
     says(&mut h, &outline, &["Click: Place"]);
     h.state_mut().palette.selected = Some(ResKey::parse("nw_door_strong", ResType::UTD).unwrap());
-    says(&mut h, &["Placing nw_door_strong", "Click: Place"], &["Q or E: Turn"]);
+    // (No hook in the field's tiles: placed freely, and Q and E turn it.)
+    let door =
+        ["Placing nw_door_strong", "Free: no door hook in reach", "Click: Place", "Q or E: Turn"];
+    says(&mut h, &door, &[]);
     h.state_mut().palette.selected = None;
     // A tile brush over an object: the press is the object's.
     h.state_mut().palette.tile_brush = Some(mg_ui::terrain_mode::TileBrush {

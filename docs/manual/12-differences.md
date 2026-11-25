@@ -3,7 +3,7 @@ type: Manual Page
 title: Differences from Aurora
 description: Where Moonglow deliberately departs from Aurora.
 tags: [manual, aurora, differences]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T04:50:05Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:44:45Z }
 ---
 
 # Differences from Aurora
@@ -70,6 +70,15 @@ it differs, it is on purpose:
   chosen, where Aurora's brushes take every click. A press on bare ground
   places as ever, and the painting brushes (terrains, crossers,
   Raise/Lower) take every press, as Aurora's do ([Areas](04-areas.md)).
+- **Doors go anywhere.** Aurora places a door only on a tile's door
+  hook; Moonglow puts it on the hook within 4 m, as Aurora does, and
+  with none in reach, or with **Alt** held, where it is clicked or
+  dropped, turned by Q and E (Aurora's way round was to place it on a
+  hook and move it with Adjust Location). A placed door dragged within
+  reach of a hook snaps to it. A change of tiles (painting, Change
+  Tileset, a resize) takes away only the doors standing on the hooks of
+  the tiles it changes, and leaves a door placed off them where it
+  stands ([Areas](04-areas.md#placing-objects)).
 - **Grass** is drawn in the area viewer, which Aurora does not draw: the
   tileset's and the area's own (Area Properties › Grass, which Aurora
   hasn't), wherever the view shows grass ground, thinner far off but
@@ -142,8 +151,8 @@ it differs, it is on purpose:
   transparent texels are black.
 
 - **Static keeps a placeable's visual transform.** Aurora takes a
-  placeable's visual transform off when **Static** is ticked; Moonglow's
-  Properties keep it in the file, so that unticking Static brings it
+  placeable's visual transform off when **Static** is checked; Moonglow's
+  Properties keep it in the file, so that unchecking Static brings it
   back. The game draws a static placeable without it either way, and
   Adjust Location and Verify say so. (**Make Static** in the area view
   takes it off, as Aurora does.)

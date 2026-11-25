@@ -524,7 +524,7 @@ fn the_gallery_s_toolbar_is_never_taller_where_wider() {
     for scale in [100, 125, 150] {
         h.state_mut().settings.ui_scale = (scale != 100).then_some(scale);
         let mut was: Option<(f32, f32)> = None;
-        for width in (280..=741).step_by(13) {
+        for width in (280..=741).step_by(39).chain(std::iter::once(741)) {
             right_dock_width(&mut h, width as f32);
             settle(&mut h);
             // (kittest gives AccessKit's boxes in points, the zoom's.)
@@ -615,6 +615,39 @@ fn each_gallery_comes_to_rest() {
     })
     .click();
     settle(&mut h);
+}
+
+/// A whole item's icons under its Appearance page take its base item's
+/// room: a tower shield made a medium miscellaneous item (142 icons, many
+/// more than the grid shows at once), its grid's rows are those of a ring
+/// made one (the review's C-7: the shield's size, the first drawn, was
+/// kept for the icons out of sight).
+#[test]
+fn a_whole_item_s_icons_take_the_room_of_its_base_item_s() {
+    let row = |h: &Harness<'_, Moonglow>, key: ResKey| {
+        let id = egui::Id::new(("uti-icons", key, "ModelPart1")).with("row");
+        h.ctx.data(|d| d.get_temp::<f32>(id))
+    };
+    let made_medium = |name: &str, copy: &str| {
+        let (mut h, key) = blueprint_harness(name, copy, ResType::UTI)?;
+        page(&mut h, "Appearance");
+        let before = row(&h, key).expect("the rows before");
+        h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new(
+            "Base item",
+            vec![mg_edit::Edit::SetField {
+                key,
+                path: mg_edit::GffPath::root(),
+                label: "BaseItem".into(),
+                value: Some(mg_gff::Value::Int(29)),
+            }],
+        )));
+        settle(&mut h);
+        Some((before, row(&h, key).expect("the rows after")))
+    };
+    let Some((tower, from_tower)) = made_medium("nw_ashto001", "c7_tower") else { return };
+    let Some((ring, from_ring)) = made_medium("nw_it_mring001", "c7_ring") else { return };
+    assert!(ring < from_ring && from_ring < tower, "{ring}, {from_ring}, {tower}");
+    assert_eq!(from_tower, from_ring, "a medium item's rows, from a shield's ({tower})");
 }
 
 /// A palette of a few of the game's placeables (a chest, a barrel, a
@@ -891,7 +924,7 @@ fn the_palette_s_toolbar_is_in_the_board_s_order() {
     assert!(at[5].1 > at[4].1 + 4.0, "the slider under the rest at 280: {at:?}");
     // (Where it wraps: the widest dock with the slider under the rest.)
     let mut wraps = None;
-    for width in 280..=440 {
+    for width in [280, 368, 369, 370, 440] {
         right_dock_width(&mut h, width as f32);
         settle(&mut h);
         let at = row(&h);

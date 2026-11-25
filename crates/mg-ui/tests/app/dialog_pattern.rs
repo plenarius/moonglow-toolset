@@ -30,7 +30,7 @@ mod openers_editors;
 mod openers_module;
 pub(crate) mod openers_shared;
 mod openers_wizards;
-mod openers_world;
+pub(crate) mod openers_world;
 pub(crate) mod table;
 
 /// A state of a dialog beyond the one it opens in (a wizard's later page):
@@ -179,6 +179,7 @@ pub(crate) const SHARED_MAKERS: &[(&str, &str, &[&str])] = &[
             "hak_view.rs:extracting_window#1",
             "model_view.rs:export_window#1",
             "nui_view.rs:windows#1",
+            "tileset_view.rs:windows#1",
         ],
     ),
     (
@@ -207,9 +208,7 @@ pub(crate) const SHARED_MAKERS: &[(&str, &str, &[&str])] = &[
         &[
             "blueprint/mod.rs:locstring_memo#1",
             "blueprint/mod.rs:locstring_memo_to#1",
-            "blueprint/mod.rs:locstring_then#1",
-            "blueprint/mod.rs:locstring_whole#1",
-            "blueprint/mod.rs:narrow_locstring#1",
+            "blueprint/mod.rs:open_loc_edit_on_click#1",
             "dialog_view.rs:text_panel#1",
         ],
     ),
@@ -772,6 +771,26 @@ fn pressed(h: &mut Harness<'static, Moonglow>, op: &Opener, key: egui::Key) {
     rested(h, op.title, op.job);
 }
 
+/// Whether `done` holds for `op`, open in `h`, after a key [`pressed`]:
+/// for a dialog of the window's, once it has rested; for a job's, by a
+/// deadline, frames stepped meanwhile. (A job's window goes, and its
+/// answer is seen, when its thread has taken the press and ended; the
+/// window is still until then, and on a busy machine longer than
+/// [`rested`]'s four frames: Windows CI saw Plugin Question still shown
+/// after its Escape.)
+fn comes_to(
+    h: &mut Harness<'static, Moonglow>,
+    op: &Opener,
+    done: impl Fn(&Harness<'static, Moonglow>) -> bool,
+) -> bool {
+    let started = std::time::Instant::now();
+    while op.job && !done(h) && started.elapsed() < SETTLE_TIME {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    done(h)
+}
+
 thread_local! {
     /// The words the dialog showed before the last Enter ([`enter`]).
     static BEFORE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -822,7 +841,7 @@ fn escape(h: &mut Harness<'static, Moonglow>, op: &Opener, seen: &mg_ui::widgets
         });
         assert!(pressed, "{title}: Escape is its {}: {presses:?}", leave.words);
     }
-    assert!(!is_shown(h, title), "{title}: closed by Escape");
+    assert!(comes_to(h, op, |h| !is_shown(h, title)), "{title}: closed by Escape");
 }
 
 /// Enter for `op`, open in `h`, the keys held by its `field`th text field
@@ -848,11 +867,11 @@ fn enter(h: &mut Harness<'static, Moonglow>, op: &Opener, field: Option<usize>, 
     let main = before.buttons.iter().find(|b| b.main && b.enabled);
     // (For the message: what the log said last.)
     let log = &h.state().log.entries;
-    let said = &log[log.len().saturating_sub(3)..];
+    let said = log[log.len().saturating_sub(3)..].to_vec();
     match main.filter(|_| !before.enter_withheld) {
         Some(main) => match op.effect {
             Some((what, done)) => assert!(
-                done(h),
+                comes_to(h, op, done),
                 "{title} ({how}): Enter is its {}: {what}: {presses:?}, the log {said:?}, \
                  the words before {:?} and after {:?}",
                 main.words,
@@ -860,7 +879,7 @@ fn enter(h: &mut Harness<'static, Moonglow>, op: &Opener, field: Option<usize>, 
                 words_in(h, title)
             ),
             None => assert!(
-                !is_shown(h, title),
+                comes_to(h, op, |h| !is_shown(h, title)),
                 "{title} ({how}): Enter is its {}, which closes it: {presses:?}, the log {said:?}",
                 main.words
             ),
@@ -872,7 +891,8 @@ fn enter(h: &mut Harness<'static, Moonglow>, op: &Opener, field: Option<usize>, 
             );
             match op.enter_when_off.filter(|_| !before.enter_withheld) {
                 Some((what, done)) => {
-                    assert!(done(h), "{title} ({how}): its main action off, Enter {what}")
+                    let done = comes_to(h, op, done);
+                    assert!(done, "{title} ({how}): its main action off, Enter {what}")
                 }
                 None => assert!(is_shown(h, title), "{title} ({how}): Enter leaves it open"),
             }
@@ -902,8 +922,12 @@ fn enter_on_the_focused_main(h: &mut Harness<'static, Moonglow>, op: &Opener) {
         main.words
     );
     match op.effect {
-        Some((what, done)) => assert!(done(h), "{title}: {}: {what}", main.words),
-        None => assert!(!is_shown(h, title), "{title}: its {} closes it", main.words),
+        Some((what, done)) => assert!(comes_to(h, op, done), "{title}: {}: {what}", main.words),
+        None => assert!(
+            comes_to(h, op, |h| !is_shown(h, title)),
+            "{title}: its {} closes it",
+            main.words
+        ),
     }
 }
 
@@ -912,8 +936,10 @@ pub(crate) fn opened(
     op: &Opener,
     size: egui::Vec2,
     zoom: f32,
-) -> Option<Harness<'static, Moonglow>> {
-    let mut h = (op.setup)()?;
+) -> Option<Box<Harness<'static, Moonglow>>> {
+    // Boxed: a test holds several of these at once, and a debug build keeps
+    // each on the stack whole (Windows' test threads overflowed theirs).
+    let mut h = Box::new((op.setup)()?);
     h.state_mut().settings.ui_scale = Some((zoom * 100.0).round() as u16);
     h.set_size(size);
     settle(&mut h);
@@ -963,17 +989,31 @@ fn hold_one(op: &Opener) {
             enter(&mut h, op, None, "its main action off");
         }
     }
-    // Whole at each size and zoom, in each of its states.
-    for (size, zoom) in
-        [(screen, 1.0), (mg_ui::LEAST_WINDOW_SIZE, 1.0), (screen, 1.25), (screen, 1.5)]
-    {
-        let at = format!("at {size:?}, zoom {zoom}");
-        let mut h = opened(op, size, zoom).expect("opened before");
-        holds_the_pattern(&mut h, op, &at);
-        for (state, step) in &op.states {
-            step(&mut h);
+    // Whole at each size and zoom, in each of its states. ((screen, 1.0) is
+    // already checked above when op.states is empty.)
+    if op.states.is_empty() {
+        let mut h = opened(op, mg_ui::LEAST_WINDOW_SIZE, 1.0).expect("opened before");
+        for (size, zoom) in
+            [(mg_ui::LEAST_WINDOW_SIZE, 1.0_f32), (screen, 1.25_f32), (screen, 1.5_f32)]
+        {
+            let at = format!("at {size:?}, zoom {zoom}");
+            h.state_mut().settings.ui_scale = Some((zoom * 100.0).round() as u16);
+            h.set_size(size);
             rested(&mut h, title, op.job);
-            holds_the_pattern(&mut h, op, &format!("{state}, {at}"));
+            holds_the_pattern(&mut h, op, &at);
+        }
+    } else {
+        for (size, zoom) in
+            [(screen, 1.0), (mg_ui::LEAST_WINDOW_SIZE, 1.0), (screen, 1.25), (screen, 1.5)]
+        {
+            let at = format!("at {size:?}, zoom {zoom}");
+            let mut h = opened(op, size, zoom).expect("opened before");
+            holds_the_pattern(&mut h, op, &at);
+            for (state, step) in &op.states {
+                step(&mut h);
+                rested(&mut h, title, op.job);
+                holds_the_pattern(&mut h, op, &format!("{state}, {at}"));
+            }
         }
     }
 }
@@ -1090,6 +1130,8 @@ fn keys_reach_the_job_window_not_the_dialog_under_it() {
         assert!(is_shown(&h, "New Module"), "{key:?}: New Module stays open");
         match key {
             egui::Key::Escape => {
+                // (The window goes once the job's thread has seen Cancel.)
+                settle(&mut h);
                 assert!(!is_shown(&h, "Held") && !h.state().busy(), "Escape calls the job off")
             }
             _ => assert!(is_shown(&h, "Held"), "Enter leaves the job running (no main action)"),
@@ -1204,7 +1246,10 @@ fn a_plugin_message_closes_by_escape_and_by_enter() {
         unfocus(&mut h);
         rested(&mut h, message.title, true);
         press_key(&mut h, key, message.title, true);
-        assert!(!is_shown(&h, message.title), "{key:?} closes the message");
+        let closed = comes_to(&mut h, &message, |h| {
+            !is_shown(h, message.title) && openers_shared::answered().is_some()
+        });
+        assert!(closed, "{key:?} closes the message");
         let answer = openers_shared::answered();
         assert_eq!(answer, Some(Some(mg_plugin::Answer::Yes)), "{key:?}: answered OK");
     }
@@ -1356,7 +1401,7 @@ fn tab_brings_a_scrolled_body_s_control_into_sight() {
 
 /// What the window says names a menu, a tab or a section as they are drawn:
 /// a menu path with "›" as the menus show it, the Plugins tab (Plugins ›
-/// Manage Plugins… opens it), the NUI Creator's Row Data section. (The
+/// Manage Plugins opens it), the NUI Creator's Row Data section. (The
 /// user manual's chapters were read against the program in M5's V2; these
 /// were the strings it found naming them otherwise.)
 #[test]

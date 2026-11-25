@@ -14,12 +14,11 @@ use egui::Key;
 
 /// A module of `count` areas, `area0000` on (named "Area 0" on), their
 /// flags by threes: none, interior, interior and underground.
-pub(crate) fn areas_module(dir: &std::path::Path, count: usize) -> std::path::PathBuf {
+fn write_areas_module(path: &std::path::Path, count: usize) {
     use mg_gff::{Struct, Value};
-    let path = dir.join("areas.mod");
     let mut m = Module::new();
     let mut info = Gff::new(*b"IFO ");
-    let mut list = Vec::new();
+    let mut list = Vec::with_capacity(count);
     for n in 0..count {
         let name = format!("area{n:04}");
         let r = ResRef::from_str(&name).unwrap();
@@ -41,7 +40,22 @@ pub(crate) fn areas_module(dir: &std::path::Path, count: usize) -> std::path::Pa
     }
     info.root.set("Mod_Area_list", Value::List(list));
     m.set_info(&info).unwrap();
-    m.save_as(&mg_module::ModuleLocation::Archive(path.clone())).unwrap();
+    m.save_as(&mg_module::ModuleLocation::Archive(path.to_path_buf())).unwrap();
+}
+
+pub(crate) fn areas_module(dir: &std::path::Path, count: usize) -> std::path::PathBuf {
+    let path = dir.join("areas.mod");
+    if count == 3000 {
+        static BIG: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let bytes = BIG.get_or_init(|| {
+            let scratch = mg_testkit::scratch_dir("u29-areas-3000-cache").join("areas.mod");
+            write_areas_module(&scratch, 3000);
+            std::fs::read(&scratch).unwrap()
+        });
+        std::fs::write(&path, bytes).unwrap();
+    } else {
+        write_areas_module(&path, count);
+    }
     path
 }
 
@@ -117,14 +131,14 @@ fn edit_areas_together_shows_the_right_dock_with_its_section() {
         assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::AreasTogether), "{name}");
         assert!(in_front(&h, "Edit Areas Together"), "{name}: its tab in front");
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        for control in ["Open in Tab", "Close", "Tick Shown", "area0000 (Area 0)"] {
+        for control in ["Open in Tab", "Close", "Check Shown", "area0000 (Area 0)"] {
             // (At the least window the page scrolls to them.)
             h.get_by_label(control).scroll_to_me();
             settle(&mut h);
             let r = h.get_by_label(control).rect();
             assert!(screen.contains_rect(r), "{name}: {control} at {r:?}, in {screen:?}");
         }
-        h.get_by_label("No areas ticked");
+        h.get_by_label("No areas checked");
         h.get_by_label("Close").click();
         settle(&mut h);
         assert!(h.state().areas_together_ticked().is_none(), "{name}: closed");
@@ -152,7 +166,7 @@ fn edit_areas_together_s_keys_move_tick_open_and_close() {
     key(&mut h, Key::ArrowDown);
     key(&mut h, Key::Space);
     assert_eq!(ticked(&h), ["area0000"], "the first row, ticked");
-    h.get_by_label("1 area ticked");
+    h.get_by_label("1 area checked");
     key(&mut h, Key::End);
     key(&mut h, Key::Space);
     assert_eq!(ticked(&h), ["area0000", "area0003"], "the last");
@@ -215,7 +229,7 @@ fn edit_areas_together_s_keys_wait_under_menus_popovers_dialogs_and_fields() {
     key(&mut h, Key::Escape);
     assert!(h.state().areas_together_ticked().is_some(), "Escape left the field alone");
     // A press in the section gives them back; one elsewhere takes them.
-    h.get_by_label_contains("Tick the areas to edit").click();
+    h.get_by_label_contains("Check the areas to edit").click();
     settle(&mut h);
     key(&mut h, Key::Space);
     assert_eq!(ticked(&h).len(), 1, "a press in it: its keys again");
@@ -318,9 +332,9 @@ fn three_thousand_areas_are_walked_only_when_they_change() {
             assert!(row.contains(&at), "{k:?}: {at}");
         }
     }
-    h.get_by_label("Tick Shown").click();
+    h.get_by_label("Check Shown").click();
     settle(&mut h);
-    h.get_by_label("3000 areas ticked");
+    h.get_by_label("3000 areas checked");
     for page in ["Areas", "Visual", "Grass", "Audio", "Events", "Advanced", "Variables"] {
         rail(&mut h, page);
         let before = h.state().areas_together_counts();
@@ -445,7 +459,7 @@ fn tab_brings_each_control_of_the_plugins_tab_into_sight_at_the_least_window() {
     h.state_mut().plugin_dir = Some(plugin_fixtures());
     h.state_mut().load_plugins();
     h.state_mut().settings.open_editors = mg_ui::OpenEditors::Tabs;
-    menu_command(&mut h, "Plugins", "Manage Plugins…");
+    menu_command(&mut h, "Plugins", "Manage Plugins");
     let tab = h.state().tab_rect(&Tab::Plugins).expect("the Plugins tab");
     let editors = h.state().editor_area_rect().expect("the editor area");
     let body = egui::Rect::from_min_max(egui::pos2(editors.left(), tab.bottom()), editors.max);
@@ -606,7 +620,7 @@ fn u29_pictures_edit_areas_together() {
             settle(&mut h);
             open_together(&mut h);
             picture_of(&mut h, "together-empty", "its intro", |h| {
-                label_in(h, right_dock_rect(h), "Tick the areas to edit together.")
+                label_in(h, right_dock_rect(h), "Check the areas to edit together.")
             });
             for _ in 0..3 {
                 key(&mut h, Key::ArrowDown);
@@ -645,7 +659,7 @@ fn u29_pictures_edit_areas_together() {
                 // (Laid out at that width before the rail is looked for.)
                 settle(&mut h);
                 for (page, mark) in [
-                    ("Areas", "Tick the areas"),
+                    ("Areas", "Check the areas"),
                     ("Visual", "Fog Amount"),
                     ("Grass", "grass"),
                     ("Audio", "Ambient Sound"),
@@ -697,7 +711,7 @@ fn a_plugin_s_buttons_wrap_in_a_narrow_plugins_tab() {
     h.state_mut().settings.open_editors = mg_ui::OpenEditors::Tabs;
     h.state_mut().enable_plugin("example.builder-tags", true);
     settle(&mut h);
-    menu_command(&mut h, "Plugins", "Manage Plugins…");
+    menu_command(&mut h, "Plugins", "Manage Plugins");
     let screen = h.ctx.content_rect();
     for button in ["Remove…", "Settings…", "Run Tests"] {
         let is = |n: &egui_kittest::Node<'_>| words(n).as_deref() == Some(button);
@@ -740,7 +754,7 @@ fn u29_pictures_plugins_enabled() {
             h.state_mut().settings.plugin_grants =
                 vec![(format!("{} {version}", ids[0]), "q".into(), "yes".into())];
             settle(&mut h);
-            menu_command(&mut h, "Plugins", "Manage Plugins…");
+            menu_command(&mut h, "Plugins", "Manage Plugins");
             let screen = h.state().editor_area_rect().expect("the editor area drawn");
             let label =
                 |l: &'static str| move |n: &egui_kittest::Node<'_>| words(n).as_deref() == Some(l);
@@ -784,7 +798,7 @@ fn u29_pictures_plugins_tab() {
                 h.state_mut().settings.light_theme = light;
                 h.state_mut().settings.open_editors = mg_ui::OpenEditors::Tabs;
                 settle(&mut h);
-                menu_command(&mut h, "Plugins", "Manage Plugins…");
+                menu_command(&mut h, "Plugins", "Manage Plugins");
                 // (What each is named for: the empty list's words, a
                 // plugin's row, the line of the one that does not read.)
                 let mark = match *name {
@@ -822,7 +836,7 @@ fn u29_pictures_plugins_tab() {
                 h.state_mut().actions.push(mg_ui::Action::CloseTabs(vec![Tab::Plugins]));
                 settle(&mut h);
                 h.state_mut().settings.open_editors = mg_ui::OpenEditors::Floating;
-                menu_command(&mut h, "Plugins", "Manage Plugins…");
+                menu_command(&mut h, "Plugins", "Manage Plugins");
                 picture_of(&mut h, "plugins-floating", "the Plugins tab in a window", |h| {
                     let at = h.state().dock.find_tab(&Tab::Plugins);
                     at.is_some_and(|a| !a.surface.is_main()) && on_screen(h, "Install from File")
@@ -1185,11 +1199,11 @@ fn cancel_all_is_the_module_s_undo_over_a_hak_editor() {
 fn cancel_reason(h: &mut Harness<'_, Moonglow>) -> &'static str {
     let at = h.get_by_label("Cancel All").rect().center();
     h.hover_at(at);
-    // (A tooltip waits a moment.)
-    h.run_steps(60);
+    h.step();
+    advance_clock(h, 1.5);
     let shows = |h: &Harness<'_, Moonglow>, words: &str| h.query_by_label_contains(words).is_some();
     let reason = match (
-        shows(h, "Nothing has been edited here since the areas were ticked"),
+        shows(h, "Nothing has been edited here since the areas were checked"),
         shows(h, "came after the edits made here"),
     ) {
         (true, false) => "none",

@@ -15,29 +15,7 @@ use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use mg_uikit::gallery::{self, CellState, GalleryCell, GalleryGrid, Picture};
 use mg_uikit::{Icon, Theme};
 
-/// Every shape drawn in a frame, flattened.
-fn shapes(h: &Harness<'_>) -> Vec<Shape> {
-    fn add(shape: &Shape, to: &mut Vec<Shape>) {
-        match shape {
-            Shape::Vec(shapes) => shapes.iter().for_each(|s| add(s, to)),
-            s => to.push(s.clone()),
-        }
-    }
-    let mut all = Vec::new();
-    h.output().shapes.iter().for_each(|s| add(&s.shape, &mut all));
-    all
-}
-
-/// The words drawn in a frame, with their color.
-fn texts(h: &Harness<'_>) -> Vec<(String, Color32)> {
-    shapes(h)
-        .into_iter()
-        .filter_map(|s| match s {
-            Shape::Text(t) => Some((t.galley.text().to_string(), t.fallback_color)),
-            _ => None,
-        })
-        .collect()
-}
+use crate::common::{colored_texts as texts, shapes};
 
 /// The rim strokes drawn: (width, color).
 fn rims(h: &Harness<'_>) -> Vec<(f32, Color32)> {
@@ -345,7 +323,9 @@ fn each_state_draws_as_quiet_tiles() {
         });
         assert!(icon_drawn, "{theme:?}: the kind's icon while it is made");
         let h = draw(&plain, CellState { hovered: true, ..rest });
-        assert!(rims(&h).contains(&(1.0, t.raised_hover)), "{theme:?} hovered");
+        // (Light: `text-off`, which shows on the panel the rim stands on.)
+        let hover = if theme == Theme::Light { t.text_off } else { t.raised_hover };
+        assert!(rims(&h).contains(&(1.0, hover)), "{theme:?} hovered");
         assert!(texts(&h).contains(&("Corpse Wagon".into(), t.text)), "{theme:?} hovered");
         let selected = || plain().selected(true);
         let h = draw(&selected, CellState { keys: true, ..rest });
