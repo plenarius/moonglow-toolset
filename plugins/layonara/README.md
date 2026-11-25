@@ -2,11 +2,14 @@
 
 Moonglow's Layonara build comes with this plugin, installed and enabled
 at its first start. Its commands are in **Plugins › Layonara**, and
-those for an area also in an area's right-click menu.
+those for an area also in an area's right-click menu. **New Layonara
+Module…** is also in **File**, after Open Folder…, and on the Welcome
+page, with no module open.
 
 | Command | What it does |
 | --- | --- |
 | **Sign In…** | Signs you in with your Layonara account (auth.layonara.com): Moonglow shows a code to enter there. Once per computer. |
+| **New Layonara Module…** | Downloads Layonara's module for builders (nwn-module's nasher target `bare`: its blueprints, palettes and bare areas, `module.ifo`, `nasher.cfg` and `moonglow.toml`, which names the NWSync server) into a folder you choose, and opens it as target `bare`. A folder with files in it is asked about first. Areas then come with Fetch Area…. |
 | **Fetch Area…** | Brings an area from Layonara's database into the open module (by its resref, tag or part of its name). An area you have already is merged with live's changes since your copy; where both changed the same thing, you choose. |
 | **From the Forge…** | Lists your own exports in the Forge (the area each becomes, when exported, the tile hak's size, and whether it was sent for review or its tiles published), and brings the one you pick into the open module: its area files, the new blueprints it uses, its tile hak and your Forge texture library (`ls_textures.hak`) into your hak folder (skipped where yours is the Forge's already), listed in the module's haks. Moonglow shows those haks over the server's NWSync content. If the module has the area already, it asks first and names what you would lose, then replaces the whole area. |
 | **Try on Dev** | Puts the selected (or open) areas on the dev server, unsaved edits included, then says how to get there (`;forge`). If live's copy changed since yours, it asks: update first (the merge), try anyway on dev, or cancel. |

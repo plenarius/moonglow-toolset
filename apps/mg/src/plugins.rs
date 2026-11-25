@@ -1225,6 +1225,11 @@ pub(crate) fn run(
         };
         notes.note(format!("{}: {new} files written, {replaced} replaced", folder.dir.display()));
     }
+    // (The window opens it; here it is said.)
+    if let Some(open) = &outcome.open {
+        let target = open.target.as_deref().map(|t| format!(", target {t}")).unwrap_or_default();
+        notes.note(format!("the plugin opens {}{target} as the module", open.dir.display()));
+    }
     let cmd = Command::new(outcome.label, outcome.edits);
     let module = m.clone();
     // (Its save asks the project's own plugins, as `mg set`'s does.)

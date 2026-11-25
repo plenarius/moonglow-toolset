@@ -14,7 +14,7 @@ doesn't have: **commands** (a batch edit, a report, a generator) and
 plugin is a folder with a few text files; anyone can write one
 ([Writing plugins](16-writing-plugins.md)).
 
-**Plugins are experimental.** The plugin API (version 0.11) may change in a
+**Plugins are experimental.** The plugin API (version 0.12) may change in a
 later release as the people who write plugins try it. A plugin written for
 an older version of the API runs (each version only adds to the one
 before); one written for a version this Moonglow doesn't have is not run:
@@ -90,6 +90,13 @@ A plugin's code runs in a sandbox. It can:
   it over the project's NWSync content (a reworked tileset over its
   released copy); take it out of that list to read the released copy
   again.
+
+A command that makes a module (since plugin API 0.12, in Moonglow's
+Layonara build) is offered with no module open too: in **File** after
+**Open Folder…** and on the Welcome page. It writes the module's files
+into a folder you choose (a zip's, with the leave asked for any folder)
+and Moonglow then opens that folder, asking first to save the open
+module's changes. The Layonara plugin's **New Layonara Module…** is one.
 
 It cannot open files of its own choosing, write any other file, reach
 any other host, start other programs, or reach anything of Moonglow's beyond

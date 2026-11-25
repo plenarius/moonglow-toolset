@@ -708,3 +708,77 @@ fn a_folder_s_files_are_written_whole() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A zip's own little archive, made here.
+fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut z = zip::ZipWriter::new(&mut out);
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, bytes) in files {
+        if name.ends_with('/') {
+            z.add_directory(*name, opts).unwrap();
+        } else {
+            z.start_file(*name, opts).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+    }
+    z.finish().unwrap();
+    out.into_inner()
+}
+
+/// API 0.12: a zip goes into the folder by its paths, its top folder left
+/// off, hidden files left out; a path out of the folder writes nothing.
+#[test]
+fn a_zip_goes_into_a_folder_the_user_chose() {
+    let dir = scratch("folder-unzip");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let zip = zip_of(&[
+        ("top/", b""),
+        ("top/nasher.cfg", b"[Package]\n"),
+        ("top/areas/bare/start.are.json", b"{}"),
+        ("top/.editorconfig", b"root = true\n"),
+        ("loose.txt", b"x"),
+    ]);
+    let code = |zip: &[u8]| {
+        let hex: String = zip.iter().map(|b| format!("\\x{b:02x}")).collect();
+        format!(
+            "local got = ctx.ui:open_folder():unzip(\"{hex}\", {{ strip = 1 }})\n\
+             return got.files, table.concat(got.skipped, \" \")"
+        )
+    };
+    let h = host([Some(Answer::Path(out.clone())), Some(Answer::Yes)]);
+    let outcome = console(&code(&zip), &h).unwrap();
+    assert_eq!(h.log.borrow().as_slice(), ["2", "\"top/.editorconfig loose.txt\""]);
+    let mut names: Vec<&str> = outcome.folders[0].files.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["areas/bare/start.are.json", "nasher.cfg"]);
+    assert_eq!(outcome.folders[0].write().unwrap(), (2, 0));
+    assert_eq!(std::fs::read(out.join("areas/bare/start.are.json")).unwrap(), b"{}");
+    // Out of the folder: an error before the leave is asked, nothing handed back.
+    for bad in ["top/../../evil.txt", "/abs.txt", "top/c:/x.txt"] {
+        let h = host([Some(Answer::Path(out.clone())), Some(Answer::Yes)]);
+        let e = console(&code(&zip_of(&[(bad, b"x")])), &h).unwrap_err().to_string();
+        assert!(e.contains("leads out of the folder"), "{bad}: {e}");
+        assert_eq!(h.asked.borrow().len(), 1, "{bad}: no leave asked");
+    }
+    assert!(!dir.join("evil.txt").exists());
+    let h = host([Some(Answer::Path(out.clone())), Some(Answer::Yes)]);
+    let e = console("ctx.ui:open_folder():unzip('not a zip')", &h).unwrap_err().to_string();
+    assert!(e.contains("not a zip"), "{e}");
+    // A folder on the way that is a link out is refused when written.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&dir, out.join("up")).unwrap();
+        let w =
+            mg_plugin::FolderWrite { dir: out.clone(), files: vec![("up/x.txt".into(), vec![1])] };
+        assert!(w.write().is_err());
+        assert!(!dir.join("x.txt").exists());
+    }
+    // Opening is for a command's job, not the console's.
+    let h = host([Some(Answer::Path(out.clone()))]);
+    let e = console("ctx.ui:open_folder():open({ target = 'bare' })", &h).unwrap_err().to_string();
+    assert!(e.contains("folder:open is for a command"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

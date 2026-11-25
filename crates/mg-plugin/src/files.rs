@@ -20,8 +20,10 @@ use crate::{Answer, HakData, HakWrite, MAX_FILE, Question};
 
 /// The names of what these functions hand out, as the reference writes
 /// them.
-pub(crate) const NAMES: [&str; 11] = [
+pub(crate) const NAMES: [&str; 13] = [
     "folder:write",
+    "folder:unzip",
+    "folder:open",
     "file.name",
     "file.bytes",
     "folder.name",
@@ -207,6 +209,39 @@ pub(crate) fn folder_table(lua: &Lua, s: &Rc<Shared>, dir: PathBuf) -> mlua::Res
                 write(&sh, &d, &name, bytes.as_bytes().to_vec())
             })?,
         )?;
+        let (d, sh) = (dir.clone(), s.clone());
+        folder.set(
+            "unzip",
+            lua.create_function(
+                move |lua, (_, bytes, options): (This, mlua::LuaString, Option<Table>)| {
+                    let strip = match &options {
+                        Some(t) => t.get::<Option<usize>>("strip")?.unwrap_or(0),
+                        None => 0,
+                    };
+                    unzip(lua, &sh, &d, &bytes.as_bytes(), strip)
+                },
+            )?,
+        )?;
+        let (d, sh) = (dir.clone(), s.clone());
+        folder.set(
+            "open",
+            lua.create_function(move |_, (_, options): (This, Option<Table>)| {
+                if !sh.net.open.get() {
+                    return fail("folder:open is for a command's job or a wizard's");
+                }
+                let target = match &options {
+                    Some(t) => t.get::<Option<String>>("target")?,
+                    None => None,
+                };
+                if let Some(t) = &target
+                    && (t.is_empty() || t.len() > 64 || t.chars().any(char::is_control))
+                {
+                    return fail(format!("{t:?} is not a nasher target's name"));
+                }
+                *sh.open.borrow_mut() = Some(crate::OpenModule { dir: d.clone(), target });
+                Ok(())
+            })?,
+        )?;
         folder.set(
             "text",
             lua.create_function(move |lua, (_, name): (This, String)| {
@@ -243,21 +278,30 @@ fn write(s: &Shared, dir: &Path, name: &str, bytes: Vec<u8>) -> mlua::Result<()>
             return fail(format!("{name} is not a file of the folder"));
         }
     }
-    let known = s.folders.borrow().iter().any(|f| f.dir == dir);
-    if !known {
-        let text = format!(
-            "{} wants to write files into the folder {} (those of the same names are \
-             replaced). Allow it?",
-            s.who,
-            dir.display()
-        );
-        if s.host.ask(&Question::Confirm(text)) != Some(Answer::Yes) {
-            return fail(format!("writing into {} was not allowed", dir.display()));
-        }
-        s.folders
-            .borrow_mut()
-            .push(crate::FolderWrite { dir: dir.to_path_buf(), files: Vec::new() });
+    folder_leave(s, dir)?;
+    add(s, dir, name, bytes)
+}
+
+/// The user's leave to write into the folder, asked the first time.
+fn folder_leave(s: &Shared, dir: &Path) -> mlua::Result<()> {
+    if s.folders.borrow().iter().any(|f| f.dir == dir) {
+        return Ok(());
     }
+    let text = format!(
+        "{} wants to write files into the folder {} (those of the same names are \
+         replaced). Allow it?",
+        s.who,
+        dir.display()
+    );
+    if s.host.ask(&Question::Confirm(text)) != Some(Answer::Yes) {
+        return fail(format!("writing into {} was not allowed", dir.display()));
+    }
+    s.folders.borrow_mut().push(crate::FolderWrite { dir: dir.to_path_buf(), files: Vec::new() });
+    Ok(())
+}
+
+/// A file among those the job writes into the folder (its leave given).
+fn add(s: &Shared, dir: &Path, name: &str, bytes: Vec<u8>) -> mlua::Result<()> {
     s.budget_held.keep(bytes.len())?;
     let mut folders = s.folders.borrow_mut();
     let files = &mut folders.iter_mut().find(|f| f.dir == dir).expect("added").files;
@@ -269,6 +313,83 @@ fn write(s: &Shared, dir: &Path, name: &str, bytes: Vec<u8>) -> mlua::Result<()>
         None => files.push((name.to_string(), bytes)),
     }
     Ok(())
+}
+
+/// Files by their paths, and their bytes.
+type Files = Vec<(String, Vec<u8>)>;
+
+/// `folder:unzip` (API 0.12): a zip's files for the folder, written when
+/// the handler has returned, `strip` folders off the front of each path.
+/// Hidden files and links are left out (`skipped`); a path that leads out
+/// of the folder is an error, and then nothing of the zip is written.
+fn unzip(lua: &Lua, s: &Shared, dir: &Path, bytes: &[u8], strip: usize) -> mlua::Result<Table> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .or_else(|e| fail(format!("not a zip archive: {e}")))?;
+    if zip.len() > MAX_LISTED {
+        return fail(format!("the zip has more than {MAX_LISTED} files"));
+    }
+    // (What is read counts to the job's budget as it goes: a small zip can
+    // unpack to a great deal.)
+    let held = std::cell::Cell::new(0usize);
+    let mut read = || -> mlua::Result<(Files, Vec<String>)> {
+        let (mut files, mut skipped) = (Vec::new(), Vec::new());
+        for i in 0..zip.len() {
+            if s.stopped() {
+                return fail("canceled");
+            }
+            let mut entry = zip.by_index(i).or_else(|e| fail(format!("the zip: {e}")))?;
+            let raw = entry.name().replace('\\', "/");
+            if entry.is_dir() || raw.ends_with('/') {
+                continue;
+            }
+            let parts: Vec<&str> = raw.split('/').collect();
+            if parts.iter().any(|p| matches!(*p, "" | "." | "..")) || raw.contains(':') {
+                return fail(format!("{raw:?} in the zip leads out of the folder"));
+            }
+            if parts.len() <= strip {
+                skipped.push(raw);
+                continue;
+            }
+            let name = parts[strip..].join("/");
+            let link = entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000);
+            if link || parts.iter().any(|p| p.starts_with('.')) {
+                skipped.push(raw);
+                continue;
+            }
+            if !crate::is_file_path(&name) {
+                return fail(format!("{raw:?} in the zip is not a file's name"));
+            }
+            if entry.size() > MAX_FILE {
+                return fail(format!("{name} is too large to write"));
+            }
+            // (The size a zip declares may be a lie: read no more than it.)
+            let mut out = Vec::with_capacity(entry.size() as usize);
+            (&mut entry)
+                .take(MAX_FILE + 1)
+                .read_to_end(&mut out)
+                .or_else(|e| fail(format!("{raw} in the zip: {e}")))?;
+            if out.len() as u64 > MAX_FILE {
+                return fail(format!("{name} is too large to write"));
+            }
+            s.budget_held.keep(out.len())?;
+            held.set(held.get() + out.len());
+            files.push((name, out));
+        }
+        Ok((files, skipped))
+    };
+    let got = read();
+    s.budget_held.give_back(held.get());
+    let (files, skipped) = got?;
+    folder_leave(s, dir)?;
+    let n = files.len();
+    for (name, bytes) in files {
+        add(s, dir, &name, bytes)?;
+    }
+    let t = lua.create_table()?;
+    t.set("files", n)?;
+    t.set("skipped", skipped)?;
+    Ok(t)
 }
 
 /// A hak's name as a plugin may give it: what a file of the hak folder

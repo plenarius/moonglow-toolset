@@ -283,7 +283,7 @@ impl Moonglow {
         self.start_job_on(title.into(), false, true, work, finish);
     }
 
-    fn start_job_on<T: Send + 'static>(
+    pub(crate) fn start_job_on<T: Send + 'static>(
         &mut self,
         title: String,
         needs_module: bool,

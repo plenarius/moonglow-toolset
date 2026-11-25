@@ -213,6 +213,8 @@ pub(crate) const LEARN: [&str; 16] = [
 /// What a click on the page does, done after it is drawn.
 enum Click {
     Command(Id),
+    /// A plugin's command that makes a module: the plugin's id and its.
+    Plugin(String, String),
     Recent(PathBuf),
     Chapter(usize),
     Offer(Offer),
@@ -229,6 +231,9 @@ enum Link {
 #[derive(Clone, Copy)]
 enum Button {
     Start(Id, Icon),
+    /// A plugin's command that makes a module (API 0.12), by its place
+    /// among them.
+    NewModule(usize),
     Without(Id, Icon),
     Manual,
     Options,
@@ -468,6 +473,15 @@ fn start_section(
         ));
         y += ACT_HIGH;
     }
+    // (After them, the plugins' commands that make one.)
+    for k in 0..new_module_commands(app).len() {
+        y += ACT_GAP;
+        parts.push(Part::Button(
+            Button::NewModule(k),
+            Rect::from_min_size(pos2(x, y), vec2(w, ACT_HIGH)),
+        ));
+        y += ACT_HIGH;
+    }
     y += PART_GAP + SUB_OVER;
     let g = ui.painter().layout_no_wrap(
         "Without a module".into(),
@@ -610,6 +624,13 @@ fn learn_section(
         y += LINK_HIGH;
     }
     y
+}
+
+/// The enabled plugins' commands that make a module (API 0.12).
+fn new_module_commands(app: &Moonglow) -> Vec<crate::plugins::PluginCommand> {
+    let mut all = app.plugin_commands();
+    all.retain(|c| c.new_module);
+    all
 }
 
 /// A Without a Module button.
@@ -759,8 +780,18 @@ pub(crate) fn welcome(app: &mut Moonglow, ui: &mut Ui) {
                 if matches!(button, Button::Offer(_)) && !told {
                     continue;
                 }
+                let made = match button {
+                    Button::NewModule(k) => new_module_commands(app).get(k).cloned(),
+                    _ => None,
+                };
+                if matches!(button, Button::NewModule(_)) && made.is_none() {
+                    continue;
+                }
                 let salt = match button {
                     Button::Start(id, _) | Button::Without(id, _) => egui::Id::new(id.id()),
+                    Button::NewModule(_) => {
+                        egui::Id::new(made.as_ref().map(|c| c.key_id.clone()).unwrap_or_default())
+                    }
                     Button::Manual => egui::Id::new("manual"),
                     Button::Options => egui::Id::new("options"),
                     Button::Offer(offer) => egui::Id::new(offer.text().0),
@@ -781,6 +812,21 @@ pub(crate) fn welcome(app: &mut Moonglow, ui: &mut Ui) {
                     }
                     Button::Without(id, icon) => {
                         (without_button(app, id, icon, r.width()), Click::Command(id))
+                    }
+                    Button::NewModule(_) => {
+                        let c = made.expect("checked above");
+                        let keys = app.keymap.label_of(&c.key_id, &ctx);
+                        let tip = match c.hint.as_str() {
+                            "" => format!("A command of the plugin {}", c.plugin_name),
+                            hint => format!("{hint}\nA command of the plugin {}", c.plugin_name),
+                        };
+                        let b = KitButton::new(Some(Icon::New), c.title.clone())
+                            .quiet_icon()
+                            .height(ACT_HIGH)
+                            .at_least(r.width())
+                            .keys(keys)
+                            .tip(tip);
+                        (b, Click::Plugin(c.plugin, c.command))
                     }
                     Button::Manual => {
                         let b = KitButton::new(Some(Icon::Book), Id::Manual.label(app))
@@ -826,6 +872,7 @@ pub(crate) fn welcome(app: &mut Moonglow, ui: &mut Ui) {
     match click {
         Some(Click::Command(id)) => id.run(app, &ctx),
         Some(Click::Recent(path)) => app.actions.push(crate::Action::OpenModule(path)),
+        Some(Click::Plugin(plugin, command)) => app.run_plugin_command(&plugin, &command),
         Some(Click::Chapter(i)) => crate::manual::open_chapter(app, i),
         Some(Click::Offer(offer)) => {
             if let Some(line) = &line {

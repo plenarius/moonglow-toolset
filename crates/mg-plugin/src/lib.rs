@@ -658,6 +658,17 @@ pub struct Outcome {
     /// (`ctx.hak:download{ above_nwsync = true }`, API 0.11), for the host
     /// to record in the builder's own project file.
     pub above_nwsync: Vec<String>,
+    /// A folder the user chose, to open as the module once its files are
+    /// written (`folder:open`, API 0.12).
+    pub open: Option<OpenModule>,
+}
+
+/// A folder to open as the module (`folder:open`, API 0.12): a nasher
+/// project's `target`, or the one Moonglow opens by default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenModule {
+    pub dir: PathBuf,
+    pub target: Option<String>,
 }
 
 /// What a `resource-saving` handler said of a resource
@@ -678,8 +689,15 @@ pub struct Said {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderWrite {
     pub dir: PathBuf,
-    /// Each file's name (a name, not a path) and bytes.
+    /// Each file's path in it (`folder:write`'s a name alone;
+    /// `folder:unzip`'s with `/`, API 0.12) and bytes.
     pub files: Vec<(String, Vec<u8>)>,
+}
+
+/// Whether `path` is a file a plugin may write in a folder: names
+/// [`is_file_name`] takes, between `/`, at most 8 deep.
+pub fn is_file_path(path: &str) -> bool {
+    path.len() <= 512 && path.split('/').count() <= 8 && path.split('/').all(is_file_name)
 }
 
 /// Whether `name` is a file's name a plugin may write in a folder: a name
@@ -701,23 +719,38 @@ impl FolderWrite {
         let root = self.dir.canonicalize().map_err(|e| format!("{}: {e}", self.dir.display()))?;
         let mut replaced = 0;
         for (name, _) in &self.files {
-            if !is_file_name(name) {
+            if !is_file_path(name) {
                 return Err(format!("{name:?} is not a file's name"));
             }
-            let path = root.join(name);
+            // (A folder on the way that is a link may lead out of it.)
+            let mut at = root.clone();
+            let dirs = name.rsplit_once('/').map_or("", |(d, _)| d);
+            for part in dirs.split('/').filter(|p| !p.is_empty()) {
+                at.push(part);
+                match at.symlink_metadata() {
+                    Err(_) => break,
+                    Ok(m) if m.file_type().is_symlink() => {
+                        return Err(format!("{name} is not a file of the folder"));
+                    }
+                    Ok(_) => {}
+                }
+            }
+            let path = root.join(name.split('/').collect::<PathBuf>());
             if path.symlink_metadata().is_ok() {
                 let real = path.canonicalize().map_err(|e| format!("{name}: {e}"))?;
-                if real.parent() != Some(&root) || !real.is_file() {
+                if real.parent() != path.parent() || !real.is_file() {
                     return Err(format!("{name} is not a file of the folder"));
                 }
                 replaced += 1;
             }
         }
         for (name, bytes) in &self.files {
-            // (Whole or not at all, and in the place of a link the file,
-            // not what the link leads to.)
-            mg_module::write_replacing(&root.join(name), bytes)
-                .map_err(|e| format!("{name}: {e}"))?;
+            let path = root.join(name.split('/').collect::<PathBuf>());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("{name}: {e}"))?;
+            }
+            // (Whole or not at all, in the place of the one there.)
+            mg_module::write_replacing(&path, bytes).map_err(|e| format!("{name}: {e}"))?;
         }
         Ok((self.files.len() - replaced, replaced))
     }

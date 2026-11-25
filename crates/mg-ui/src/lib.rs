@@ -305,6 +305,9 @@ pub enum Action {
     OpenModule(PathBuf),
     /// Opens this module as it is (the answer to that question).
     OpenModuleAsIs(PathBuf),
+    /// Opens a folder a plugin wrote (`folder:open`, API 0.12): a nasher
+    /// project as `target`, else as Open Folder does.
+    OpenPluginFolder(mg_plugin::OpenModule),
     /// Opens a recovery copy as the module it came from (Recover Unsaved
     /// Work), in place of the open one.
     Recover(recovery::Copy),
@@ -4516,7 +4519,16 @@ impl Moonglow {
     /// Opens a module: the workspace, and the game data with the module's
     /// haks and the module layered in.
     pub fn open_module(&mut self, path: &std::path::Path) {
-        match Module::open(path) {
+        self.open_module_from(path, Module::open(path));
+    }
+
+    /// [`open_module`](Self::open_module) with the module read already.
+    fn open_module_from(
+        &mut self,
+        path: &std::path::Path,
+        opened: Result<Module, mg_module::ModuleError>,
+    ) {
+        match opened {
             Ok(m) => {
                 match &m.project {
                     Some(p) => self.log.info(format!(
@@ -5154,6 +5166,7 @@ impl Moonglow {
                     | Action::OpenModuleDialog
                     | Action::OpenFolderDialog
                     | Action::OpenModule(_)
+                    | Action::OpenPluginFolder(_)
                     | Action::Recover(_)
                     | Action::Close
                     | Action::Quit
@@ -5208,7 +5221,10 @@ impl Moonglow {
     fn run_now(&mut self, action: Action) {
         if matches!(
             action,
-            Action::NewModuleDialog | Action::OpenModuleDialog | Action::OpenModule(_)
+            Action::NewModuleDialog
+                | Action::OpenModuleDialog
+                | Action::OpenModule(_)
+                | Action::OpenPluginFolder(_)
         ) {
             self.discard_asked = Some(self.unsaved_mark());
         }
@@ -5301,6 +5317,13 @@ impl Moonglow {
             }
             Action::OpenModule(p) => module_folder::open(self, &p),
             Action::OpenModuleAsIs(p) => self.open_module(&p),
+            Action::OpenPluginFolder(o) => match &o.target {
+                Some(t) => {
+                    let opened = Module::open_project(&o.dir, Some(t));
+                    self.open_module_from(&o.dir, opened);
+                }
+                None => self.open_module(&o.dir),
+            },
             Action::OpenFolderDialog => {
                 if let Some(p) =
                     self.dialogs.pick_folder("Open Module Folder or nasher Project", None)

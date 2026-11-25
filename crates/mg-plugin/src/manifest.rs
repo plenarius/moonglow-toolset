@@ -9,11 +9,11 @@ pub use mg_module::project_plugins::SettingValue;
 use mg_rules::ObjectKind;
 
 /// The plugin API this Moonglow serves (a manifest's `api`).
-pub const API: &str = "0.11";
+pub const API: &str = "0.12";
 /// The APIs a plugin may be written for: each later one has all of the
 /// ones before.
-pub const APIS: [&str; 11] =
-    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10", "0.11"];
+pub const APIS: [&str; 12] =
+    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10", "0.11", "0.12"];
 
 /// What a manifest says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -731,6 +731,9 @@ pub struct CommandDecl {
     /// Crafting"`: Crafting within Make), each name a level deeper; none:
     /// the menu itself (API 0.7).
     pub menu: Vec<String>,
+    /// It makes a module (`new = "module"`, API 0.12): it runs with no
+    /// module open, beside File › New Module and on the Welcome page.
+    pub new_module: bool,
 }
 
 impl CommandDecl {
@@ -1216,7 +1219,7 @@ impl Manifest {
                     });
                 }
                 "command" => {
-                    let get = keys(s, &["id", "title", "hint", "key", "for", "menu"])?;
+                    let get = keys(s, &["id", "title", "hint", "key", "for", "menu", "new"])?;
                     let id = id_of(s, get("id"))?;
                     if commands.iter().any(|c| c.id == id) {
                         return Err(format!("line {}: a second command {id:?}", s.line));
@@ -1229,6 +1232,17 @@ impl Manifest {
                         key: Some(get("key")).filter(|k| !k.is_empty()).map(str::to_string),
                         targets,
                         menu: menu_of(s, get("menu"))?,
+                        new_module: match get("new") {
+                            "" => false,
+                            "module" => true,
+                            other => {
+                                return Err(format!(
+                                    "line {}: new is \"module\" (a command that makes one), \
+                                     not {other:?}",
+                                    s.line
+                                ));
+                            }
+                        },
                     });
                 }
                 "check" => {
@@ -1434,6 +1448,15 @@ impl Manifest {
                 plugin.api
             ));
         }
+        if let Some(c) = commands.iter().find(|c| c.new_module)
+            && api_before(&plugin.api, "0.12")
+        {
+            return Err(format!(
+                "the command {:?} makes a module (`new = \"module\"`), which is plugin API \
+                 0.12; the manifest says api = {:?}",
+                c.id, plugin.api
+            ));
+        }
         if let Some((line, name)) = since_0_10
             && api_before(&plugin.api, "0.10")
         {
@@ -1567,8 +1590,22 @@ severity = "error"
         }
         let e = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.6\"")).unwrap_err();
         assert!(e.contains("plugin API 0.7") && e.contains("\"fix-tags\""), "{e}");
-        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.12\"")).unwrap_err();
-        assert!(later.contains("0.12"), "{later}");
+        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.13\"")).unwrap_err();
+        assert!(later.contains("0.13"), "{later}");
+    }
+
+    /// API 0.12: a command that makes a module (`new = "module"`).
+    #[test]
+    fn a_command_may_make_a_module() {
+        let text = "[plugin]\nid = \"a.b\"\nname = \"B\"\nversion = \"1\"\napi = \"0.12\"\nlicense = \"MIT\"\n\
+                    [command]\nid = \"get\"\ntitle = \"Get…\"\nnew = \"module\"\n\
+                    [command]\nid = \"other\"\ntitle = \"Other\"\n";
+        let m = Manifest::parse(text).unwrap();
+        assert!(m.commands[0].new_module && !m.commands[1].new_module);
+        let e = Manifest::parse(&text.replace("api = \"0.12\"", "api = \"0.11\"")).unwrap_err();
+        assert!(e.contains("plugin API 0.12") && e.contains("\"get\""), "{e}");
+        let e = Manifest::parse(&text.replace("new = \"module\"", "new = \"area\"")).unwrap_err();
+        assert!(e.contains("new is \"module\""), "{e}");
     }
 
     /// API 0.10: the hosts a plugin talks to, and the services it signs

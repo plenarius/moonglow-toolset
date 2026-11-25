@@ -162,6 +162,8 @@ pub enum Item {
     Wizards,
     /// The enabled plugins' commands.
     PluginCommands,
+    /// The enabled plugins' commands that make a module (API 0.12).
+    PluginNewModule,
     /// A command, and the enabled plugins' entries of a kind after it in
     /// a submenu of the command's name where there are any (File › Export
     /// › an exporter, API 0.6); else the command alone.
@@ -184,6 +186,7 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::NewModule),
             Do(Id::OpenModule),
             Do(Id::OpenFolder),
+            Item::PluginNewModule,
             Item::Recent,
             Do(Id::Save),
             Do(Id::SaveAs),
@@ -380,6 +383,7 @@ impl Id {
                     | Item::Recent
                     | Item::Prefabs
                     | Item::PluginCommands
+                    | Item::PluginNewModule
                     | Item::PluginWizards
                     | Item::PluginPanels
                     | Item::Project => {}
@@ -1318,7 +1322,7 @@ pub(crate) fn keys_pressed(app: &mut Moonglow, ui: &Ui) {
             break;
         }
         let pressed = ui.input_mut(|i| app.keymap.consume_outside_text(i, &c.key_id, typing));
-        if pressed && app.ws.is_some() {
+        if pressed && (app.ws.is_some() || c.new_module) {
             app.quick_open.close(ui.ctx(), false);
             let after = AfterText::Plugin { plugin: c.plugin, command: c.command };
             run_after_text(app, ui, after);
@@ -1799,6 +1803,14 @@ fn menu(app: &mut Moonglow, ui: &mut Ui, items: &[Item], level: usize) {
                     mg_uikit::menu_separator(ui);
                 }
             }
+            Item::PluginNewModule => {
+                let mut commands = app.plugin_commands();
+                commands.retain(|c| c.new_module);
+                for c in &mut commands {
+                    c.menu.clear();
+                }
+                plugin_command_rows(app, ui, level, &commands, 0);
+            }
             Item::PluginCommands => {
                 let commands = app.plugin_commands();
                 let several = commands.iter().any(|c| c.plugin != commands[0].plugin);
@@ -2040,8 +2052,8 @@ fn plugin_command_rows(
 ) {
     let mut made: Vec<&str> = Vec::new();
     for c in commands {
-        let enabled = app.ws.is_some();
         let Some(name) = c.menu.get(depth) else {
+            let enabled = app.ws.is_some() || c.new_module;
             let mut entry = egui::Button::new(&c.title);
             let keys = keys_of(ui, app.keymap.label_of(&c.key_id, ui.ctx()));
             if let Some(keys) = &keys {
@@ -2067,6 +2079,7 @@ fn plugin_command_rows(
         made.push(name);
         let inside: Vec<crate::plugins::PluginCommand> =
             commands.iter().filter(|d| d.menu.get(depth) == Some(name)).cloned().collect();
+        let enabled = app.ws.is_some() || inside.iter().any(|c| c.new_module);
         submenu(app, ui, level, name, enabled, |app, ui| {
             plugin_command_rows(app, ui, level + 1, &inside, depth + 1);
         });
@@ -2132,6 +2145,7 @@ fn menu_of(id: Id) -> Option<&'static str> {
             | Item::Recent
             | Item::Prefabs
             | Item::PluginCommands
+            | Item::PluginNewModule
             | Item::PluginWizards
             | Item::PluginPanels
             | Item::Project => false,
@@ -2187,7 +2201,7 @@ pub(crate) fn found(app: &Moonglow) -> Vec<Row> {
         choice: Choice::Plugin(c.plugin, c.command),
         menu: c.plugin_name,
         key_id: c.key_id,
-        enabled: app.ws.is_some(),
+        enabled: app.ws.is_some() || c.new_module,
     });
     // (Their exporters, importers, wizards and panels, by their menus.)
     use crate::plugin_kinds::Added;

@@ -357,6 +357,9 @@ pub struct PluginCommand {
     pub targets: Vec<mg_plugin::Target>,
     /// The submenus it is in, in every menu it is in (API 0.7's `menu`).
     pub menu: Vec<String>,
+    /// It makes a module (API 0.12's `new = "module"`): it runs with none
+    /// open, and is in File and on the Welcome page.
+    pub new_module: bool,
 }
 
 impl PluginCommand {
@@ -1410,6 +1413,7 @@ impl Moonglow {
                     key: c.key.clone(),
                     targets: c.targets.clone(),
                     menu: c.menu.clone(),
+                    new_module: c.new_module,
                 })
             })
             .collect()
@@ -1607,6 +1611,9 @@ impl Moonglow {
             return;
         };
         let (name, title) = (plugin.manifest.name.clone(), decl.title.clone());
+        // (One that makes a module needs none, and is given none.)
+        let anywhere = decl.new_module;
+        let selection = if anywhere { mg_plugin::Selection::default() } else { selection };
         let command = command.to_string();
         let settings = Some(self.plugin_settings(&plugin));
         let keeper = plugin.clone();
@@ -1614,7 +1621,7 @@ impl Moonglow {
             let input = Input { selection, settings, values, ..input };
             mg_plugin::run_command(&plugin, &command, input, host)
         };
-        self.run_plugin(name, title, false, None, Some(keeper), run);
+        self.run_plugin_on(name, title, false, None, Some(keeper), anywhere, run);
     }
 
     /// Notes that a module was opened, for the plugins that act on it.
@@ -1912,6 +1919,22 @@ impl Moonglow {
         plugin: Option<Plugin>,
         run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
     ) {
+        self.run_plugin_on(name, title, console, granted, plugin, false, run);
+    }
+
+    /// [`run_plugin`](Self::run_plugin), `anywhere` with no module open
+    /// too (a command that makes one, API 0.12).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_plugin_on(
+        &mut self,
+        name: String,
+        title: String,
+        console: bool,
+        granted: Option<Granted>,
+        plugin: Option<Plugin>,
+        anywhere: bool,
+        run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
+    ) {
         if self.plugin_after_text.is_some() {
             self.log.warn(format!("{name}: {title}: waiting for another job to start"));
             return;
@@ -1920,12 +1943,12 @@ impl Moonglow {
         if self.job.is_none() && granted.is_none() && !console && self.leave_keys_for_a_job() {
             let pass = self.egui_ctx.as_ref().map_or(0, egui::Context::cumulative_pass_nr);
             let start: StartLater = Box::new(move |app: &mut Moonglow| {
-                app.run_plugin_now(name, title, console, granted, plugin, run)
+                app.run_plugin_now(name, title, console, granted, plugin, anywhere, run)
             });
             self.plugin_after_text = Some((pass, start));
             return;
         }
-        self.run_plugin_now(name, title, console, granted, plugin, run);
+        self.run_plugin_now(name, title, console, granted, plugin, anywhere, run);
     }
 
     /// Whether a text field typed in has the keyboard (not a script's editor).
@@ -1944,6 +1967,7 @@ impl Moonglow {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_plugin_now(
         &mut self,
         name: String,
@@ -1951,6 +1975,7 @@ impl Moonglow {
         console: bool,
         granted: Option<Granted>,
         plugin: Option<Plugin>,
+        anywhere: bool,
         run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
     ) {
         let heading = title.trim_end_matches('…').trim_end_matches("...").trim().to_string();
@@ -1979,8 +2004,10 @@ impl Moonglow {
         let job_net = net.clone();
         let net_kept = (plugin.as_ref().map(grants_name)).zip(net.map(|n| n.allowed));
         let hak_dir = self.install.as_ref().and_then(mg_resman::GameInstall::user_hak_dir);
-        self.start_job(
+        self.start_job_on(
             format!("{name}: {heading}"),
+            !anywhere,
+            false,
             move |job| {
                 let host = Rc::new(JobHost {
                     progress: job.progress.clone(),
@@ -2138,6 +2165,10 @@ impl Moonglow {
                         ),
                     ),
                 }
+            }
+            // Then the folder it opens, once all of it is there.
+            if let Some(open) = &outcome.open {
+                self.actions.push(Action::OpenPluginFolder(open.clone()));
             }
             Ok(outcome)
         });
