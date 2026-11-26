@@ -3,7 +3,7 @@ type: Manual Page
 title: Plugin API reference
 description: Reference of the plugin API - mg, findings and their fixes (ctx.fix), exporters, importers, wizards and panels (their fields), ctx.selection, ctx.open and ctx.values, ctx.event (the events, a resource's own around a save, objects placed or pasted, resources made, and what a handler may edit), ctx.module, ctx.game, ctx.edit, ctx.hak, ctx.terrain, ctx.net and ctx.signin (the network and signing in), mg.json, logging, progress and UI (files and folders the user chooses), pictures, ctx.plugin, ctx.settings, Luau, limits and what the API doesn't have yet.
 tags: [manual, plugins, api]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:44:46Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T04:59:16Z }
 ---
 
 # Plugin API reference
@@ -625,7 +625,8 @@ that fit, as it does under the pointer. It needs a game installation.
 | --- | --- |
 | `ctx.terrain:tilesets()` | The tilesets the game offers (with the module's haks), as the Area Wizard lists them: a list of `{ resref = "ttr01", name = "Rural" }`. |
 | `ctx.terrain:new_area(spec)` | Makes an area as the Area Wizard does (its three files, and its place in the module's list). `spec` is `{ name = "…", tileset = "ttr01", width = 8, height = 8 }`, the sizes in tiles, 2 to 32. Returns the area's resref. |
-| `ctx.terrain:open(area)` | An area's terrain, by the area's resref, as an `area` (below). It fails for an area whose tiles are not all the tileset's. |
+| `ctx.terrain:open(area, options?)` | An area's terrain, by the area's resref, as an `area` (below). It fails for an area whose tiles are not all the tileset's. `options` is `{ seed = 42 }` (since API 0.10): the area's tiles and lights are chosen with random choices of its own, begun from that seed (a whole number), whatever else the job does. |
+| `ctx.terrain:seed(n)` | Begins the job's random choices again from `n`, a whole number (since API 0.10): the tiles and lights chosen from then on, in `new_area` and in every area opened without a seed of its own. |
 
 An `area`. Cells (tiles) and corners count from the area's south-west,
 from 0: cell (x, y) has the corners (x, y) to (x + 1, y + 1), so an area
@@ -652,7 +653,10 @@ from 0: cell (x, y) has the corners (x, y) to (x + 1, y + 1), so an area
 | `area:batch(f)` | Calls `f()` with the area's strokes held (since API 0.5): its tiles are read once, each stroke made on them as `f` goes (`corner` and `tile` read what they left; `ctx.module` reads the area as it was until `f` returns), and the tiles that changed go in when it returns, as one edit of its tile list. If `f` fails, none of them go in. A `set_tile` in it puts in the strokes before it first. Returns what `f` returns. |
 
 Tiles are chosen at random among those that fit, as in the area editor:
-two runs paint the same ground with different tiles. New tiles get
+two runs paint the same ground with different tiles. With a seed
+(`ctx.terrain:seed`, or `open`'s `seed`), the same calls made in the
+same order on the same tiles choose the same tiles and lights again, so
+an area can be made again exactly; without one, each run chooses anew. New tiles get
 lights from the area's lighting scheme, and bring and take the doors
 their tiles have.
 
@@ -842,6 +846,10 @@ the manifest declares, once the user allows them.
   they are stopped ([`ctx.event`](#ctxevent)).
 - Where a plugin is only checked (`mg plugin check`, `mg plugin pack`,
   an archive about to be installed), its code has 5 seconds to load.
+- A job's time is counted from when its code starts to load: what
+  Moonglow does before (reading the plugin, setting up where it runs)
+  is not the plugin's. A job stopped for its time says so, and an error
+  the code raised in time is reported as itself.
 - A job is stopped when the user cancels; no `pcall` catches that. A
   request under way is let go of then.
 - A job makes at most 200 requests (`ctx.net`, with what signing in

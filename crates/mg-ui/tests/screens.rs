@@ -344,6 +344,88 @@ fn script_wizard_pages() {
     }
 }
 
+/// The picture viewer's zoom (the owner's ruling of 2026-11-25): a
+/// 1024 by 512 picture of squares and a gradient open read-only, fitted
+/// (before: all it ever was), then zoomed in with the wheel about a point
+/// (its percent at the corner, the squares' edges sharp), then at actual
+/// pixels by a double click. Pictures in `target/item-l919-shots/`.
+#[test]
+#[ignore]
+fn picture_viewer_zoom() {
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/item-l919-shots");
+    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = mg_testkit::output_dir("screens-picture-zoom");
+    let user = scratch.join("user");
+    std::fs::create_dir_all(user.join("override")).unwrap();
+    let mut image = mg_image::Rgba::new(1024, 512);
+    for y in 0..512usize {
+        for x in 0..1024usize {
+            let square = ((x / 32) + (y / 32)) % 2 == 0;
+            let at = (y * 1024 + x) * 4;
+            let shade = if square { 255u32 } else { 90 };
+            image.data[at] = ((x as u32 / 4) * shade / 255) as u8;
+            image.data[at + 1] = ((y as u32 / 2) * shade / 255) as u8;
+            image.data[at + 2] = (200 * shade / 255) as u8;
+            image.data[at + 3] = 255;
+        }
+    }
+    std::fs::write(user.join("override/mg_l919.tga"), mg_image::write_tga(&image)).unwrap();
+    let key = ResKey::from_filename("mg_l919.tga").unwrap();
+    let mut app = Moonglow::new(
+        Some(GameInstall::new(&root, Some(user), "en")),
+        Box::new(NoDialogs::default()),
+    );
+    app.palette_dock = false;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        // (The sampler's own filtering: the tests' default does its own,
+        // smoothing a magnified picture whatever the texture asks.)
+        .with_render_options(egui_wgpu::RendererOptions {
+            predictable_texture_filtering: false,
+            ..egui_wgpu::RendererOptions::PREDICTABLE
+        })
+        .wgpu()
+        .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+    h.run_steps(3);
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(mg_ui::Tab::Resource(key)));
+    let started = std::time::Instant::now();
+    while mg_ui::viewers::picture_drawn(&h.ctx, key).is_none() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "never drawn");
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(&mut h);
+    let still = |h: &mut Harness<'_, Moonglow>| {
+        let mut last = None;
+        for _ in 0..200 {
+            h.run_steps(2);
+            let now = mg_ui::viewers::picture_drawn(&h.ctx, key);
+            if now == last {
+                return now.unwrap();
+            }
+            last = now;
+        }
+        panic!("never still");
+    };
+    let (rect, _) = still(&mut h);
+    shoot(&mut h, &dir, "viewer-fitted");
+    let at = egui::pos2(rect.min.x + rect.width() * 0.3, rect.min.y + rect.height() * 0.4);
+    h.hover_at(at);
+    h.run_steps(2);
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 40.0 * 9.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let (_, scale) = still(&mut h);
+    assert!(scale > 1.0);
+    shoot(&mut h, &dir, "viewer-zoomed");
+}
+
 /// Module Properties › Custom Content: the hak list, two rows chosen and
 /// some haks not found.
 #[test]
@@ -1733,6 +1815,12 @@ fn welcome_recent_modules() {
         modules.join("castle.mod"),
         dir.join("projects/castle-project"),
     ];
+    // (Times from now, so the picture reads the same on every run; the
+    // last has none, as a module from older settings.)
+    let now = mg_core::time::unix_now();
+    for (path, ago) in app.settings.recent.clone().iter().zip([300, 7300]) {
+        app.settings.recent_opened.insert(path.clone(), now - ago);
+    }
     let mut h = Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         .wgpu()
@@ -2030,7 +2118,14 @@ fn model_viewer() {
         .with_size(egui::vec2(1100.0, 760.0))
         .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(rs))
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
-    h.run();
+    // (Stepped until the window's work is done: the models' views play,
+    // repainting as long as they are open.)
+    h.run_steps(2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while h.state().under_way().is_some() {
+        assert!(std::time::Instant::now() < deadline, "{:?}", h.state().under_way());
+        h.run_steps(1);
+    }
     shoot(&mut h, &dir, "model-viewer");
 }
 
@@ -3053,6 +3148,50 @@ fn hover_list_row(
     h.run_steps(40);
 }
 
+/// A whole item's icons on its Appearance page, each in a cell of the
+/// largest one's size (the owner's ruling of 26 November): a medium
+/// miscellaneous item's 999, at the top and scrolled down.
+#[test]
+#[ignore]
+fn whole_item_icons() {
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::output_dir("screens");
+    let name = "nw_it_mring001";
+    let mut h = pictured_blueprint(
+        &root,
+        &dir,
+        (name, ResType::UTI),
+        "Appearance",
+        egui::vec2(1200.0, 800.0),
+    );
+    h.run_steps(6);
+    h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new(
+        "Base item",
+        vec![mg_edit::Edit::SetField {
+            key: ResKey::parse(name, ResType::UTI).unwrap(),
+            path: GffPath::root(),
+            label: "BaseItem".into(),
+            value: Some(mg_gff::Value::Int(29)),
+        }],
+    )));
+    h.run_steps(20);
+    shoot(&mut h, &dir, "icons-misc-medium-top");
+    let at = h.get_by_label("Appearance 1").rect().center();
+    for _ in 0..12 {
+        h.hover_at(at);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -29.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(3);
+    }
+    h.run_steps(20);
+    shoot(&mut h, &dir, "icons-misc-medium-scrolled");
+}
+
 /// The pictures beside the row the pointer rests on in a door's and an
 /// item's Appearance lists (GitHub issue 7): a generic door's and a
 /// tileset door's, a ring's model, a longsword's blade and an armor's
@@ -3526,6 +3665,117 @@ fn creature_inventory_options() {
     pick(&mut h, "Longsword", true);
     h.run_steps(2);
     shoot(&mut h, &dir, "creature-inventory-options-selected");
+}
+
+/// Several items carried at once: a creature's armor, sword and a potion
+/// of its backpack selected (Ctrl) and dragged, the count beside the
+/// pointer (`inventory-several-dragged.png`); a chest's rows selected
+/// two at a time (`inventory-several-chest.png`).
+#[test]
+#[ignore]
+fn inventory_several_carried() {
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::output_dir("screens");
+    let mut app =
+        Moonglow::new(Some(GameInstall::new(&root, None, "en")), Box::new(NoDialogs::default()));
+    app.settings.no_inventory_warning = true;
+    let game = app.game.as_deref().unwrap();
+    let entry = |id: u32, r: &str| {
+        let mut s = mg_gff::Struct::new(id);
+        s.set("InventoryRes", mg_gff::Value::resref(mg_core::ResRef::from_str(r).unwrap()));
+        s.set("Repos_PosX", mg_gff::Value::Word(id as u16));
+        s.set("Repos_Posy", mg_gff::Value::Word(0));
+        s
+    };
+    let read = |name: &str, t: ResType| {
+        mg_gff::Gff::read(&game.resman.get_named(name, t).unwrap()).unwrap()
+    };
+    let mut bandit = read("nw_bandit001", ResType::UTC);
+    let pack = vec![entry(0, "nw_it_mpotion001"), entry(1, "nw_it_torch001")];
+    bandit.root.set("ItemList", mg_gff::Value::List(pack));
+    let mut chest = read("plc_chest1", ResType::UTP);
+    let held = ["nw_wswls001", "nw_it_mpotion001", "nw_it_torch001", "nw_wswdg001"];
+    let held = held.iter().enumerate().map(|(i, r)| entry(i as u32, r)).collect();
+    chest.root.set("HasInventory", mg_gff::Value::Byte(1));
+    chest.root.set("ItemList", mg_gff::Value::List(held));
+    let mut m = mg_module::Module::new();
+    let (utc, utp) = (
+        ResKey::parse("nw_bandit001", ResType::UTC).unwrap(),
+        ResKey::parse("plc_chest1", ResType::UTP).unwrap(),
+    );
+    m.set_gff(utc, &bandit).unwrap();
+    m.set_gff(utp, &chest).unwrap();
+    let path = dir.join("inventory-several.mod");
+    m.save_as(&mg_module::ModuleLocation::Archive(path.clone())).unwrap();
+    app.open_module(&path);
+    for key in [utc, utp] {
+        app.blueprint_pages.insert((key, GffPath::root()), "Inventory");
+        app.actions.push(mg_ui::Action::OpenTab(mg_ui::Tab::Blueprint(key)));
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1500.0, 1300.0))
+        .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
+    settle(&mut h);
+    // (Each in a window of its own, side by side.)
+    let windows = [(utc, (10.0, 40.0), (900.0, 1240.0)), (utp, (920.0, 40.0), (570.0, 740.0))];
+    for (key, at, size) in windows {
+        let dock = &mut h.state_mut().dock;
+        let found = dock.find_tab(&mg_ui::Tab::Blueprint(key)).unwrap();
+        let tab = dock.remove_tab(found).unwrap();
+        let surface = dock.add_window(vec![tab]);
+        let w = dock.get_window_state_mut(surface).unwrap();
+        w.set_position(egui::pos2(at.0, at.1)).set_size(egui::vec2(size.0, size.1));
+    }
+    settle(&mut h);
+    for (key, at, size) in windows {
+        place(&mut h, &mg_ui::Tab::Blueprint(key), at, size);
+    }
+    settle(&mut h);
+    // A row's name (not its icon) in the window at the left or the right.
+    let row = |h: &Harness<'_, Moonglow>, label: &str, right: bool| -> egui::Pos2 {
+        h.query_all_by_label(label)
+            .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Button)
+            .map(|n| n.rect())
+            .filter(|r| (r.left() > 915.0) == right && r.width() > 80.0)
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .unwrap_or_else(|| panic!("no {label}"))
+            .center()
+    };
+    let click = |h: &mut Harness<'_, Moonglow>, at: egui::Pos2, modifiers: egui::Modifiers| {
+        h.hover_at(at);
+        for pressed in [true, false] {
+            let button = egui::PointerButton::Primary;
+            let e = egui::Event::PointerButton { pos: at, button, pressed, modifiers };
+            h.event_modifiers(e, modifiers);
+        }
+        h.run_steps(2);
+    };
+    let at = row(&h, "Padded Armor", false);
+    click(&mut h, at, egui::Modifiers::NONE);
+    let at = row(&h, "Longsword", false);
+    click(&mut h, at, egui::Modifiers::COMMAND);
+    let at = row(&h, "Potion of Cure Light Wounds", false);
+    click(&mut h, at, egui::Modifiers::COMMAND);
+    let at = row(&h, "Potion of Cure Light Wounds", true);
+    click(&mut h, at, egui::Modifiers::NONE);
+    let at = row(&h, "Torch", true);
+    click(&mut h, at, egui::Modifiers::COMMAND);
+    shoot(&mut h, &dir, "inventory-several-chest");
+    // The sword dragged towards the chest, held over its list.
+    let from = row(&h, "Longsword", false);
+    let to = row(&h, "Dagger", true) + egui::vec2(0.0, 60.0);
+    h.hover_at(from);
+    h.run_steps(1);
+    let button = egui::PointerButton::Primary;
+    let modifiers = egui::Modifiers::NONE;
+    h.event(egui::Event::PointerButton { pos: from, button, pressed: true, modifiers });
+    h.run_steps(1);
+    for k in 1..=6 {
+        h.hover_at(from + (to - from) * (k as f32 / 6.0));
+        h.run_steps(1);
+    }
+    shoot(&mut h, &dir, "inventory-several-dragged");
 }
 
 /// A creature's Inventory page with what the game takes off it marked: a
@@ -4236,8 +4486,8 @@ fn update_notice_and_options() {
     shoot(&mut h, &dir, "options-updates-flatpak");
 }
 
-/// Installing an update from the app: the notice with Install Now and
-/// Later, the window with the release's notes, a download under way, the
+/// Installing an update from the app: the window with the release's notes,
+/// opened by the check itself (a builder's ask), a download under way, the
 /// restart asked once it is installed, a refusal (another key signed it)
 /// and Options › Updates' switches. The release is served on 127.0.0.1 and
 /// the AppImage replaced is a scratch copy: no network, nothing of the
@@ -4287,8 +4537,6 @@ fn update_install() {
         let server = serve(&key);
         let mut h = app_for(&server, Some(key.public()));
         h.run();
-        shoot(&mut h, &dir, "update-notice-install");
-        h.get_by_label("What's New…").click();
         shoot(&mut h, &dir, "update-whats-new");
         // Half way (the server holds the rest back for a while).
         let stored = format!("/files/v3.3.0/{name}");
@@ -4321,8 +4569,6 @@ fn update_install() {
     let other = mg_testkit::signing::TestKey::new();
     let server = serve(&other);
     let mut h = app_for(&server, Some(key.public()));
-    h.run();
-    h.get_by_label("What's New…").click();
     h.run_steps(2);
     h.get_all_by_label("Install Now").last().unwrap().click();
     shoot(&mut h, &dir, "update-refused");
@@ -4396,8 +4642,8 @@ fn script_editor() {
 }
 
 /// The script's Reference and Help where no board draws them (M4's U12):
-/// As Tabs at 1280 (one tab bar of the two, Help in front after a name
-/// is chosen), at 2560 (the wide layout's two columns), and floating in a
+/// As Tabs at 1280 (Reference on the right, Help switched on below the
+/// text), at 2560 (the wide layout's two columns), and floating in a
 /// window 600 wide (the pane at half the window).
 #[test]
 #[ignore]
@@ -4438,7 +4684,7 @@ fn script_reference_layouts() {
         h.run_steps(5);
         if tabs {
             shoot(&mut h, &dir, "script-reference-1280");
-            h.get_by_label(mg_ui::RIGHT_DOCK).get_by_label("Help").click();
+            h.get_by_label("Status Bar").get_by_label("Help").click();
             h.run_steps(5);
             shoot(&mut h, &dir, "script-help-1280");
             h.set_size(egui::vec2(2560.0, 1000.0));
@@ -4915,9 +5161,7 @@ fn script_review_cases() {
     h.run();
     let open = |h: &mut Harness<'_, Moonglow>, n: &str| {
         h.state_mut().actions.push(mg_ui::Action::OpenTab(mg_ui::Tab::Script(nss(n))));
-        h.run_steps(10);
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        h.run_steps(10);
+        settle(h);
     };
     open(&mut h, "m1q3_formosa_9");
     h.state_mut().log.info("m1q3_formosa_9.nss: compiled");
@@ -8312,6 +8556,16 @@ fn nui_saved_module() -> (std::path::PathBuf, Vec<u8>, Vec<ResKey>) {
     (path, before, keys)
 }
 
+/// An environment variable the NUI preview tools need; without it they are
+/// skipped (a plain `--ignored` run of the suite), saying so.
+fn nui_var(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok();
+    if value.is_none() {
+        eprintln!("skipped: {name} is not set");
+    }
+    value
+}
+
 /// The application on the module at `path`, held in memory.
 fn nui_saved_app(root: &std::path::Path, path: &std::path::Path) -> Moonglow {
     let mut app =
@@ -8326,9 +8580,12 @@ fn nui_saved_app(root: &std::path::Path, path: &std::path::Path) -> Moonglow {
 #[test]
 #[ignore]
 fn nui_saved_window() {
+    let (Some(output), Some(_)) = (nui_var("NUI_PREVIEW_PNG"), nui_var("NUI_PREVIEW_MODULE"))
+    else {
+        return;
+    };
     mg_testkit::gpu::hold();
     let root = mg_testkit::corpus!();
-    let output = std::env::var("NUI_PREVIEW_PNG").expect("NUI_PREVIEW_PNG");
     let (path, before, keys) = nui_saved_module();
     let [key] = keys[..] else { panic!("NUI_PREVIEW_RESREF names one window of the module") };
     let mut h = nui_harness(nui_saved_app(&root, &path), key, (1600.0, 1040.0));
@@ -8346,9 +8603,12 @@ fn nui_saved_window() {
 #[test]
 #[ignore]
 fn nui_saved_windows() {
+    let (Some(dir), Some(_)) = (nui_var("NUI_PREVIEW_DIR"), nui_var("NUI_PREVIEW_MODULE")) else {
+        return;
+    };
     mg_testkit::gpu::hold();
     let root = mg_testkit::corpus!();
-    let dir = std::path::PathBuf::from(std::env::var("NUI_PREVIEW_DIR").expect("NUI_PREVIEW_DIR"));
+    let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (path, before, keys) = nui_saved_module();
     for key in keys {
@@ -8447,6 +8707,51 @@ fn advanced_search() {
     h.state_mut().advanced_search = d;
     settle(&mut h);
     shoot(&mut h, &dir, "advanced-search-or-not");
+    // Every fighter placed, and what opens together: one button for the
+    // fighters of every area; then the items with an enhancement bonus,
+    // those the placed objects hold apart from the blueprints.
+    let mut d = AdvancedSearch {
+        first: Condition { kind: Kind::Class, row: Some(4), ..Default::default() },
+        placed: Some(true),
+        ..Default::default()
+    };
+    h.state_mut().advanced_search(&mut d);
+    h.state_mut().advanced_search = d;
+    settle(&mut h);
+    h.query_by_label_contains("together").expect("Edit together").click();
+    h.run_steps(4);
+    shoot(&mut h, &dir, "advanced-search-together");
+    // Opened: one window for the fighters of every area.
+    if let Some(b) = h.query_by_label_contains("areas Together") {
+        b.click();
+        settle(&mut h);
+        shoot(&mut h, &dir, "advanced-search-together-window");
+        let tab = h
+            .state()
+            .dock
+            .iter_all_tabs()
+            .find_map(|(_, t)| matches!(t, mg_ui::Tab::Instances { .. }).then(|| t.clone()));
+        h.state_mut().actions.push(mg_ui::Action::CloseTab(tab.expect("the fighters' tab")));
+        settle(&mut h);
+    }
+    let mut d = AdvancedSearch {
+        first: Condition { kind: Kind::ItemProperty, row: Some(6), ..Default::default() },
+        ..Default::default()
+    };
+    h.state_mut().advanced_search(&mut d);
+    h.state_mut().advanced_search = d;
+    settle(&mut h);
+    shoot(&mut h, &dir, "advanced-search-together-items");
+    // Set a field on them, with Add where missing.
+    h.query_by_label_contains("together").expect("Edit together").click();
+    {
+        let a = &mut h.state_mut().advanced_search.act;
+        a.act = mg_ui::search::Act::SetField;
+        (a.name, a.value, a.add) = ("Stolen".into(), "1".into(), true);
+    }
+    // (The change's section open since the fighters' search.)
+    h.run_steps(4);
+    shoot(&mut h, &dir, "advanced-search-add-missing");
 }
 
 /// Edit › Find and Replace Text… over Chapter 1, the Bottom Dock's tab
@@ -12780,6 +13085,36 @@ fn shell_bottom_dock_narrow() {
     }
 }
 
+/// The Log with Compile All's line and its details under a fold, closed
+/// and open (`log_details_closed.png`, `log_details_open.png`).
+#[test]
+#[ignore]
+fn log_details_fold() {
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::output_dir("screens").join("shell");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = shell_with_area(&root, egui::vec2(1000.0, 760.0));
+    h.state_mut().settings.hide_log = false;
+    h.state_mut().log.info("Opened map_m1q1a, 192 objects");
+    h.state_mut().log.error("cg_bad.nss(1): UNDEFINED IDENTIFIER (Nope)");
+    h.state_mut().log.info_with(
+        "Compiled 4 scripts: 1 failed, 1 changed; 1823 as they were when last compiled, left alone",
+        [
+            "cg_cond: its compiled script wasn't Moonglow's (another tool made it); compiled again, the bytes differ",
+            "cg_bad: it or something it includes changed; failed: cg_bad.nss(1): UNDEFINED IDENTIFIER (Nope)",
+            "cg_new: it had no compiled script; compiled, a new compiled script",
+            "cg_same: Moonglow hadn't compiled it before; compiled again, the same bytes",
+        ]
+        .map(String::from)
+        .to_vec(),
+    );
+    h.state_mut().log.info("Saved the module");
+    shoot(&mut h, &dir, "log_details_closed");
+    h.query_all_by_label("Details").last().expect("Details").click();
+    shoot(&mut h, &dir, "log_details_open");
+}
+
 /// A new installation's first window (no settings file:
 /// `Settings::new_installation`): the Welcome page, the Bottom Dock
 /// closed and the log's last line beside the Log switch.
@@ -12828,7 +13163,8 @@ fn shell_welcome() {
 /// and with one the Welcome page is gone); the Area Wizard over the area
 /// with both docks open (`shell_area_wizard`); and the same in the least
 /// window, 420 points wide, where the editor area is narrower than the
-/// wizard (`shell_area_wizard_least`).
+/// wizard (`shell_area_wizard_least`); each also on its Size and Finish pages
+/// (`..._2`, `..._3`).
 #[test]
 #[ignore]
 fn shell_wizards() {
@@ -12857,6 +13193,14 @@ fn shell_wizards() {
         frames_until(&mut h, "the wizard", |h| h.query_by_label("Area Wizard").is_some());
         h.run_steps(3);
         shoot(&mut h, &dir, name);
+        // The wizard's other pages: Size, then Finish.
+        for page in [1, 2] {
+            if let Some(mg_ui::Wizard::NewArea(w)) = &mut h.state_mut().wizard {
+                w.page = page;
+            }
+            h.run_steps(3);
+            shoot(&mut h, &dir, &format!("{name}_{}", page + 1));
+        }
     }
 }
 
@@ -13089,7 +13433,9 @@ fn board_main_areas_together() {
 
 /// `board_main` with Custom Light open (M4's U29): the area view's menu's
 /// Add Light Here › Custom Light… on the ground at the view's center, the
-/// Right Dock's section beside it; the rest as the Main board.
+/// Right Dock's section beside it; the rest as the Main board. Then
+/// `board_main_custom_light_flicker`: its Flicker a torch's, the note that
+/// says it is placed dynamic under the settings.
 #[test]
 #[ignore]
 fn board_main_custom_light() {
@@ -13137,6 +13483,10 @@ fn board_main_custom_light() {
     assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::LightMaker));
     rest_pointer(&mut h);
     shoot(&mut h, &board_dir(), "board_main_custom_light");
+    h.state_mut().light_draft.as_mut().unwrap().spec.flicker = mg_module::lights::Flicker::Torch;
+    h.run_steps(5);
+    rest_pointer(&mut h);
+    shoot(&mut h, &board_dir(), "board_main_custom_light_flicker");
 }
 
 /// `board_main` with Problems open (M4's U28): Build Module's findings of

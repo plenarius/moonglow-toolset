@@ -3,7 +3,7 @@ type: Manual Page
 title: Areas
 description: Areas - the viewer's header and its popovers, minimaps and camera, selecting, arranging and placing objects, Setup Store, duplicate tags, claimed and protected areas, painting placeables, painting terrain, tiles, Area Properties, area sounds and making tilesets.
 tags: [manual, areas, terrain, tiles]
-generated: { by: claude-code/claude-sonnet-5-5, at: 2026-11-25T09:38:38Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T07:40:00Z }
 ---
 
 # Areas
@@ -133,8 +133,10 @@ then the shadows, the fog and how the scene is drawn.
   Properties, the tiles' main and source lights (Tile Properties), the
   light of each placeable whose appearance has one (placeables.2da's
   `LightColor`, unless its **Illuminated** is off) and the light nodes of
-  every object's models (a builder's lamps and braziers, a held torch),
-  as the game lights them: each with its color and reach, a light node's
+  every object's models (a builder's lamps and braziers), and a
+  creature's light from its items' Light property (a torch, which it
+  holds up, a cloak, a ring: the brightest, ahead of its head, as the
+  game puts it), as the game lights them: each with its color and reach, a light node's
   `multiplier` lengthening its reach, and each surface lit by the 32
   most important lights that reach it (by their priority, then their
   nearness), as the game's client is by default. Compared with Aurora an
@@ -154,7 +156,12 @@ then the shadows, the fog and how the scene is drawn.
     falling away from the sun (to the south-west, as the game's sun stands
     for every area), cast by the tiles and the **static** placeables (a
     model's meshes flagged `shadow`, including shadow-only meshes that
-    aren't drawn).
+    aren't drawn). They fall on the tiles and the static placeables, the
+    grass and their see-through leaves and road decals included, as in
+    the game. Water takes none of its own, as in the game, where a
+    shallow pool's floor shows them through the water, as it does in
+    Moonglow with the Shaders switch on (with it off, Moonglow's own
+    water hides its floor).
   - **Creature shadows**: creatures, dynamic placeables and doors cast the
     sun's and moon's shadows too, posed as they stand, as the game's
     Creature Shadow Detail at Best has them (its default; at Fast or Off,
@@ -680,8 +687,31 @@ light's **Color**, **Radius** (its light ends at twice it), a
 **Multiplier** that lengthens its reach (the game lengthens a model
 light's reach by it, not its brightness), its **Priority** (1 to 5:
 where more lights shine at one place than the game draws, those of
-priority 1 are kept), whether creatures' shadows are cast from it, and
-whether it lights creatures and placeables as well as the ground.
+priority 1 are kept), its **Flicker**, whether creatures' shadows are
+cast from it, and whether it lights creatures and placeables as well as
+the ground.
+
+**Flicker** is **None** (a steady light, as the game's own are) or one
+of four: **Candle** (slight and quick), **Torch** (deeper), **Fire**
+(deep and quick, as flames leap) and **Pulse** (a slow, even swelling
+and fading). A flickering light's model keys its light's color in its
+`default` animation, a short cycle the game plays over and over. The
+game plays a placeable's `default` only where the placeable is
+dynamic, and holds a static one's still, so a flickering light is
+placed as a dynamic placeable (its placed instance's **Static**
+unticked, and its placeables.2da row's `Static` 0), and the section
+says so under the settings. It is placed **Plot** too: a static
+placeable can't be destroyed, but a dynamic one can (a fireball takes
+placeables), and a light should not be. A dynamic placeable costs the game more
+than a static one (the game merges static ones into the area's tiles as
+it loads: [Static placeables, many at
+once](#static-placeables-many-at-once)), so keep flicker for the lights
+that need it. Ticking
+**Static** on a flickering light stops its flicker, in the area view
+as in the game; **Make Placeables Static** leaves flickering lights
+dynamic, and says so. A blueprint made of a flickering light's row
+must have **Static** unticked too. A steady light writes exactly what
+it wrote before lights could flicker.
 
 Two actions are at the top of the section: the main one and **Cancel**.
 The main one is **Write and Place**, or **Place** where a light of the
@@ -729,7 +759,10 @@ ring where its light ends when it is selected, and the view lit by it.
 Lights made so are listed on the palette's Lights, under the game's,
 and on Add Light Here. **Change Light…** on a selected one gives it
 other settings: another row (and model), written as Custom Light writes
-them; Undo gives it its row back (what was written stays in the hak).
+them, the light made dynamic where it now flickers and static again
+where it no longer does; Undo gives it its row back (what was written
+stays in the hak). The area view plays a dynamic light's flicker while
+**Animations** is on.
 
 **An encounter's spawn points**: each spawn point is drawn as a
 3D wireframe prism oriented the way what spawns there faces, with its
@@ -1160,6 +1193,9 @@ placeables around.
   around each other and at their heights above the ground.
 - **What one holds** shows while the pointer rests on it in the
   palette's Prefabs: how many objects of each kind, and their tags.
+- **By the keyboard:** after a click in the list (or F6), the list is
+  outlined and Up, Down, Page Up, Page Down, Home and End move a cursor
+  through the prefabs; Enter places the one it is at, as a click does.
 - **Renaming one:** right-click it there and choose **Rename…**.
 - **Deleting one:** right-click it and choose **Delete**. A prefab isn't
   the module's, so Edit › Undo doesn't bring it back: **Undo Delete**,
@@ -1477,6 +1513,16 @@ as Aurora's Terrain tab does:
   (tcn01)**); each folder (Features, Groups, Terrain) has its count at
   its row's end, and in the Gallery each terrain and crosser the count of
   its tiles; a tool with a key shows it after its name (**Eraser X**).
+- **By the keyboard** (click a row, Down from the search, or F6), the
+  list is outlined and has a cursor ringed on a row: Up and Down go
+  through the rows as they are drawn (the rows of a closed folder are
+  not among them), Page Up, Page Down, Home and End a list's height or
+  to its first and last row, Right opens a closed folder (or goes into
+  an open one), Left closes it (or goes out to the folder a row is in),
+  and Enter does what a click does: it chooses the brush, or opens or
+  closes the folder. In the Gallery the folders and each terrain's and
+  crosser's heading are the rows; its pictures keep the arrow keys of
+  their own while one has the focus.
 - In the **Gallery**, each terrain and crosser is a heading that opens and
   closes, with every tile it can make under it as pictures: each variant,
   and each transition to another terrain (none of a group's). A tile is
@@ -1688,11 +1734,14 @@ There is no OK or Cancel: what you change is written at once (below).
 window after its view) and gives its first control the keyboard; Tab
 goes on through its controls.
 
-With one tile chosen, Tile Properties shows the **variants**: every tile
-that fits there, as pictures, the one there now framed (not for a
-group's or a feature's tile, which changes only with its group, unless
-the option above is on). Click another and it is put there at once (one
-step to undo), the panel showing the new tile. Widen the Right Dock and
+Tile Properties shows the **variants**: every tile that fits the tile
+chosen, as pictures, the one there now framed (not for a group's or a
+feature's tile, which changes only with its group, unless the option
+above is on). Click another and it is put there at once (one step to
+undo), the panel showing the new tile. With several tiles chosen, it
+shows the tiles that fit every one of them ("Variant (48 fit every tile
+chosen)"), framing the one there only where all have it, turned alike;
+a click puts that tile in each, at each one's own height, in one step. Widen the Right Dock and
 the pictures fill it. The **Size** slider
 beside the variants makes the pictures larger, to tell tiles much alike
 apart (64 to 224 points, 84 at first); it is
@@ -2150,6 +2199,8 @@ it left, and why. Left dynamic are placeables that:
   can't be destroyed;
 - have saved shader parameters (Properties › Visuals), which a static
   placeable doesn't show;
+- are lights Custom Light made that flicker (its **Flicker**), which a
+  static placeable doesn't;
 - have local variables: scripts set and read them (a lore stone, a
   lamp, a workbench), and what they do to the placeable a static one
   doesn't show. The server keeps a static placeable as an object, found
@@ -2271,7 +2322,9 @@ The pages:
   in sight drawn), the bar over it holding **Find** (by model or terrain;
   Ctrl+F with the pointer over the page), **Duplicate Tile**, **Add Tile**
   and **Remove Last Tile** (the minus); a click chooses a tile and gives
-  the table the arrow keys (Up, Down, Page Up, Page Down, Home, End). The
+  the table the arrow keys (Up, Down, Page Up, Page Down, Home, End; Down
+  from **Find** chooses its first tile, and the table is outlined while it
+  has the keys; Enter does nothing more, as choosing a tile shows it). The
   chosen tile's form is at the table's right (under it in a narrow
   editor). Per tile: model, walkmesh, minimap picture, path node,
   orientation, corner terrains and heights, edge crossers, lights,
@@ -2283,7 +2336,12 @@ The pages:
   the tile's `Doors` count following (a count that is no count, as some
   custom tilesets have, becomes the doors there are). **Add Tile** and **Duplicate Tile** add at the end, and
   **Remove Last Tile** takes the last away: areas store tiles by number,
-  so tiles in the middle stay where they are. What is typed in a field is
+  so tiles in the middle stay where they are. The end is the file's last
+  `[TILEn]` section (holes among them counted), not its `Count=`: a count
+  that is no count (`Count=1869573190`), or short of the sections there
+  are, numbers nothing, and the new tile is written after the sections the
+  file has, with `Count=` set to match. Groups, terrains and crossers are
+  numbered the same way; a painting rule goes by its count. What is typed in a field is
   set on its own tile as you leave it, a button pressed included.
   A **hole** (a tile the file has no `[TILEn]` section for, or one
   without `Model=`, as an old tileset merged by hand may have) is
@@ -2359,7 +2417,10 @@ until which the header's Save writes nothing and asks again). A file
 half written, cut short or gone keeps what the editor has, and the log
 says so once. The areas and the Tiles palette draw a tileset from the
 game data, so one in the override, a development folder or a hak is
-redrawn when that is read again; a tileset kept inside the module is not.
+redrawn when that is read again; one kept inside the module is redrawn
+when its `.set` there changes: imported, changed on disk in a module
+folder or project, written by a plugin (once its command is done), or
+put back or again by Undo and Redo.
 
 To use the tileset, put the `.set`, palette, models, walkmeshes, textures
 and minimap pictures in a hak (Tools › Haks › Build Hak from Folder…).

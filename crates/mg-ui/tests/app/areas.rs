@@ -832,7 +832,7 @@ fn the_area_wizard_opens_at_the_top_of_its_tilesets() {
     h.run();
     let shown = |h: &Harness<'_, Moonglow>| {
         let top = h.get_by_label("Tileset").rect().bottom();
-        let bottom = h.get_by_label("Size").rect().top();
+        let bottom = h.get_by_label("Next >").rect().top();
         let r = h.get_by_label(&first).rect();
         r.top() >= top && r.bottom() <= bottom
     };
@@ -889,6 +889,96 @@ fn the_area_wizard_s_tileset_rows_fill_the_list() {
         assert!((row.left() - rows[0].left()).abs() < 0.5, "{name}: {row:?} beside the others");
         assert!((row.width() - rows[0].width()).abs() < 0.5, "{name}: {row:?} not as wide");
     }
+}
+
+/// The Area Wizard has three pages, as Aurora's: Name and Tileset, Size and
+/// Finish. Next is off on the first without a tileset (or a name), Back
+/// keeps what was entered, a double click on a tileset goes on, Finish is
+/// off before the last page, and Finish there makes the area.
+#[test]
+fn the_area_wizard_walks_its_three_pages() {
+    let Some(root) = mg_testkit::nwn_root() else {
+        eprintln!("skipped: no game install");
+        return;
+    };
+    let dir = mg_testkit::scratch_dir("ui-area-wizard-pages");
+    let path = sample_module(&dir);
+    let mut app = game_app(&root, None);
+    app.open_module(&path);
+    app.palette_dock = false;
+    let tilesets = mg_module::new::tilesets(app.game.as_deref().unwrap());
+    let (first, second) = (tilesets[0].name.clone(), tilesets[1].name.clone());
+    let areas = |h: &Harness<'_, Moonglow>| {
+        h.state().ws.as_ref().unwrap().module.keys_of(ResType::ARE).count()
+    };
+    let mut h = harness(app, 1200.0, 900.0);
+    let was = areas(&h);
+    // (The step list has a Finish too: the buttons by their role.)
+    let button = |h: &Harness<'_, Moonglow>, name: &str| {
+        h.get_by_role_and_label(egui::accesskit::Role::Button, name).accesskit_node().is_disabled()
+    };
+    let enabled = |h: &Harness<'_, Moonglow>, name: &str| !button(h, name);
+    let page = |h: &Harness<'_, Moonglow>| match &h.state().wizard {
+        Some(mg_ui::Wizard::NewArea(w)) => w.page,
+        _ => panic!("the Area Wizard is open"),
+    };
+    h.state_mut().actions.push(mg_ui::Action::AreaWizard);
+    settle(&mut h);
+    // Page 1: Name and Tileset, with the step list; Finish is not yet on.
+    assert_eq!(page(&h), 0);
+    h.get_by_label_contains("Step 1 of 3");
+    h.get_by_label(&first);
+    assert!(enabled(&h, "Next >") && !enabled(&h, "Finish") && !enabled(&h, "< Back"));
+    // No tileset chosen: Next is off.
+    if let Some(mg_ui::Wizard::NewArea(w)) = &mut h.state_mut().wizard {
+        w.selected = None;
+    }
+    settle(&mut h);
+    assert!(!enabled(&h, "Next >"), "no tileset: no Next");
+    // A double click on a tileset chooses it and goes on to Size.
+    let at = h.get_by_label(&second).rect().center();
+    double_click_now(&mut h, at);
+    settle(&mut h);
+    assert_eq!(page(&h), 1, "a double click goes to the next page");
+    h.get_by_label("Area size");
+    h.get_by_label("Large").click();
+    settle(&mut h);
+    // Back keeps the name and the tileset.
+    h.get_by_label("< Back").click();
+    settle(&mut h);
+    assert_eq!(page(&h), 0);
+    match &h.state().wizard {
+        Some(mg_ui::Wizard::NewArea(w)) => {
+            assert_eq!(w.tilesets[w.selected.unwrap()].name, second);
+            assert_eq!((w.width, w.height), (16, 16));
+        }
+        _ => panic!("the Area Wizard is open"),
+    }
+    // A name is wanted too.
+    if let Some(mg_ui::Wizard::NewArea(w)) = &mut h.state_mut().wizard {
+        w.name = "  ".into();
+    }
+    settle(&mut h);
+    assert!(!enabled(&h, "Next >"), "no name: no Next");
+    if let Some(mg_ui::Wizard::NewArea(w)) = &mut h.state_mut().wizard {
+        w.name = "Glade".into();
+    }
+    settle(&mut h);
+    area_wizard_next(&mut h, 2);
+    assert_eq!(page(&h), 2);
+    h.get_by_label_contains("Step 3 of 3");
+    h.get_by_label_contains("\"Glade\"");
+    h.get_by_label("Open Area Properties");
+    assert!(enabled(&h, "Finish") && !enabled(&h, "Next >"));
+    assert_eq!(areas(&h), was, "nothing made before Finish");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Finish").click();
+    settle(&mut h);
+    assert!(h.state().wizard.is_none(), "Finish closes the wizard");
+    assert_eq!(areas(&h), was + 1, "Finish made the area");
+    // Opened again, it starts on its first page.
+    h.state_mut().actions.push(mg_ui::Action::AreaWizard);
+    settle(&mut h);
+    assert_eq!(page(&h), 0);
 }
 
 #[test]
@@ -1395,4 +1485,39 @@ fn a_module_folder_saved_with_nothing_changed_is_as_it_was() {
         .filter(|name| before.get(*name) != after.get(*name))
         .collect();
     assert!(changed.is_empty(), "rewritten though nothing changed: {changed:?}");
+}
+
+/// Edit Areas Together lists the areas as the Module panel does, a space
+/// a name begins with kept, as Aurora sorts them (#54): " Zeta Keep"
+/// before "Apple Inn".
+#[test]
+fn areas_together_keeps_a_leading_space_in_its_order() {
+    let dir = mg_testkit::scratch_dir("ui-areas-leading-space");
+    let path = sample_module(&dir);
+    let mut m = mg_module::Module::open(&path).unwrap();
+    for (name, title) in [("keep", " Zeta Keep"), ("inn", "Apple Inn")] {
+        let mut are = Gff::new(*b"ARE ");
+        let title = LocString::from_text(Language::ENGLISH, Gender::Male, title);
+        are.root.set("Name", mg_gff::Value::LocString(title));
+        m.set(ResKey::parse(name, ResType::ARE).unwrap(), are.to_bytes().unwrap());
+    }
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.settings.area_names = true;
+    app.area_set_dir = Some(dir.join("area-sets"));
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get_by_label("Edit Areas Together…").click();
+    h.run();
+    at_rest(&mut h, "the Holding box", &|h| h.get_by_value("Anything").rect());
+    // (The section's rows: in the Right Dock, right of the module tree's.)
+    let row = |h: &Harness<'_, Moonglow>, name: &str| {
+        (h.get_all_by_label_contains(name).map(|n| n.rect()))
+            .max_by(|a, b| a.left().total_cmp(&b.left()))
+            .unwrap()
+    };
+    assert!(row(&h, "Zeta Keep").top() < row(&h, "Apple Inn").top(), "the leading space first");
 }

@@ -733,8 +733,8 @@ fn tile_properties_choose_a_variant_by_picture() {
     // them; another chosen is put there at once, the window staying.
     let props = h.state().tile_props.clone().expect("the window is open");
     assert_eq!(props.tiles, [5]);
-    let (cell, variants) = props.variants.clone().expect("one tile: its variants");
-    assert_eq!(cell, (1, 1));
+    let (cells, variants) = props.variants.clone().expect("one tile: its variants");
+    assert_eq!(cells, [(1, 1)]);
     let now = props.variant.unwrap();
     assert!(variants.len() > 1 && variants.iter().any(|(p, _)| *p == now), "{variants:?}");
     if let Some(dir) = shot_dir("ui-tile-variants") {
@@ -767,6 +767,71 @@ fn tile_properties_choose_a_variant_by_picture() {
     } else {
         panic!("no variant pictures");
     }
+}
+
+/// Tile Properties of several tiles shows the tiles that fit every one of
+/// them as pictures; a click puts that one in each, turned as it fits
+/// there, in one step.
+#[test]
+fn tile_properties_choose_a_variant_for_several_tiles() {
+    use glam::Vec3;
+    let Some((mut h, area)) = area_harness("tile-variants-many") else { return };
+    let id_of = |h: &mut Harness<'_, Moonglow>, (x, y): (u32, u32)| {
+        let ws = h.state_mut().ws.as_mut().unwrap();
+        let are = ws.doc(&ResKey::new(area, ResType::ARE)).unwrap();
+        let w = are.root.integer("Width").unwrap() as usize;
+        are.root.list("Tile_List").unwrap()[y as usize * w + x as usize].integer("Tile_ID").unwrap()
+    };
+    let (a, b) = ((1, 1), (2, 1));
+    area_click(&mut h, "Select Tiles");
+    h.run_steps(2);
+    let south = screen(&h, area, Vec3::new(15.0, 15.0, 0.0));
+    let north = screen(&h, area, Vec3::new(25.0, 15.0, 0.0));
+    click_pos(&h, south);
+    h.run_steps(2);
+    h.hover_at(north);
+    press(&h, north, true, egui::Modifiers::COMMAND);
+    press(&h, north, false, egui::Modifiers::COMMAND);
+    h.run_steps(2);
+    assert_eq!(h.state().area_views[&area].tile_selection, [a, b]);
+    tile_properties_at(&mut h, north);
+    let props = h.state().tile_props.clone().expect("the window is open");
+    let shots = shot_dir("ui-tile-variants-many");
+    if let Some(dir) = &shots {
+        h.render().unwrap().save(dir.join("a.png")).unwrap();
+    }
+    let (cells, variants) = props.variants.clone().expect("several tiles: their variants");
+    assert_eq!(cells, [a, b]);
+    assert!(variants.len() > 1, "{variants:?}");
+    h.get_by_label_contains(&format!("Variant ({} fit every tile chosen)", variants.len()));
+    let before_undo = h.state().ws.as_ref().unwrap().can_undo().map(str::to_string);
+    let (now_south, now_north) = (id_of(&mut h, a), id_of(&mut h, b));
+    let other = variants
+        .iter()
+        .find(|(p, _)| i64::from(p.tile) != now_south || i64::from(p.tile) != now_north)
+        .expect("a tile other than one there now");
+    let turn = ["", " ↺90°", " ↺180°", " ↺270°"][usize::from(other.0.orientation % 4)];
+    let at = h
+        .query_all_by_label(&format!("{}{turn}", other.1))
+        .next()
+        .map(|n| n.rect().center())
+        .expect("its picture");
+    h.hover_at(at);
+    press(&h, at, true, egui::Modifiers::NONE);
+    press(&h, at, false, egui::Modifiers::NONE);
+    h.run_steps(4);
+    // (Pictures of one model under two turns are not told apart here.)
+    let (south_id, north_id) = (id_of(&mut h, a), id_of(&mut h, b));
+    assert_eq!(south_id, north_id, "one tile put in each");
+    assert!(variants.iter().any(|(p, _)| i64::from(p.tile) == south_id), "tile {south_id}");
+    assert_eq!(h.state().ws.as_ref().unwrap().can_undo(), Some("Tile variant"));
+    if let Some(dir) = &shots {
+        h.render().unwrap().save(dir.join("b.png")).unwrap();
+    }
+    h.state_mut().ws.as_mut().unwrap().undo().unwrap();
+    h.run_steps(2);
+    assert_eq!((id_of(&mut h, a), id_of(&mut h, b)), (now_south, now_north), "one step");
+    assert_eq!(h.state().ws.as_ref().unwrap().can_undo().map(str::to_string), before_undo);
 }
 
 #[test]
@@ -3652,6 +3717,23 @@ fn the_tile_selection_s_outline_follows_a_cliff_tile() {
     assert_eq!(h.state().area_views[&area].outlines_laid(), laid, "not every frame");
     set_waypoint_tag(&mut h, area);
     assert!(h.state().area_views[&area].outlines_laid() > laid, "laid again for the area read");
+    // (Their lines on screen kept while the camera, the area and the tiles
+    // selected rest; made again when one changes.)
+    let made = |h: &Harness<'_, Moonglow>| h.state().area_views[&area].tile_lines_made.get();
+    h.run_steps(2);
+    let was = made(&h);
+    h.run_steps(6);
+    assert_eq!(made(&h), was, "kept at rest");
+    h.state_mut().area_views.get_mut(&area).unwrap().orbit.as_mut().unwrap().yaw += 0.1;
+    h.run_steps(2);
+    assert!(made(&h) > was, "made again for the camera turned");
+    let was = made(&h);
+    h.state_mut().area_views.get_mut(&area).unwrap().tile_selection.push((2, 1));
+    h.run_steps(2);
+    assert!(made(&h) > was, "made again for a tile more");
+    h.state_mut().area_views.get_mut(&area).unwrap().tile_selection.pop();
+    h.state_mut().area_views.get_mut(&area).unwrap().orbit.as_mut().unwrap().yaw -= 0.1;
+    h.run_steps(3);
     // Along the ground in half-metre steps, from the plateau down into the
     // corner and back; a flat tile, its four corners.
     let view = &h.state().area_views[&area];
@@ -5824,6 +5906,15 @@ fn other_brushes_on_an_object_today() {
             )
         };
         click_with(&mut h, on_chest, egui::Modifiers::NONE);
+        // (The Eraser on a tile with nothing to erase chooses its tile
+        // again among those that fit: about one click in 20 comes out as
+        // the tile there, changing nothing. Each click chooses afresh.)
+        for _ in 0..5 {
+            if mode != "Eraser" || !changed(&mut h).is_empty() {
+                break;
+            }
+            click_with(&mut h, on_chest, egui::Modifiers::NONE);
+        }
         let click = outcome(&mut h);
         while undo_label(&h).is_some_and(|l| l != "Setup") {
             h.state_mut().ws.as_mut().unwrap().undo().unwrap();
@@ -5831,8 +5922,36 @@ fn other_brushes_on_an_object_today() {
         }
         h.state_mut().area_views.get_mut(&area).unwrap().selection.clear();
         h.run_steps(2);
-        let to = screen(&h, area, Vec3::new(25.0, 25.0, 0.0));
-        press_drag(&mut h, on_chest, to, egui::Modifiers::NONE);
+        // (Where the chest and the drag's end are on the screen, taken
+        // again once the window's own work is done before each drag: the
+        // view's camera or the chest's place, settled late on a busy
+        // machine, would have every drag start beside the chest.)
+        let ends = |h: &mut Harness<'_, Moonglow>| {
+            settle(h);
+            let on = screen(h, area, chest_at(h, area, 0) + Vec3::Z * 0.3);
+            (on, screen(h, area, Vec3::new(25.0, 25.0, 0.0)))
+        };
+        let (on, to) = ends(&mut h);
+        press_drag(&mut h, on, to, egui::Modifiers::NONE);
+        // (So may the Eraser's drag choose the chest's tile as it was:
+        // undone and dragged again.)
+        let mut tries = vec![changed(&mut h)];
+        for _ in 0..5 {
+            if mode != "Eraser" || changed(&mut h).contains(&5) {
+                break;
+            }
+            while undo_label(&h).is_some_and(|l| l != "Setup") {
+                h.state_mut().ws.as_mut().unwrap().undo().unwrap();
+                h.run_steps(3);
+            }
+            let (on, to) = ends(&mut h);
+            press_drag(&mut h, on, to, egui::Modifiers::NONE);
+            tries.push(changed(&mut h));
+        }
+        if mode == "Eraser" && !changed(&mut h).contains(&5) {
+            // (Said when it fails: the tiles each drag changed.)
+            eprintln!("Eraser drags from the chest's tile 5, the tiles each changed: {tries:?}");
+        }
         let drag = outcome(&mut h);
         table.push(format!("{mode} | click: {click} | press-drag: {drag}"));
     }

@@ -65,12 +65,27 @@ runs as it is. A plugin that uses what is new says `api = "0.11"`.
 
 ## 0.10
 
-In Moonglow's Layonara build (the fork's `layonara` branch), not in
-upstream Moonglow. Only an addition: a plugin written for 0.9 or before
-runs as it is, and has nothing to change. A plugin that uses what is new
-says `api = "0.10"`, so that a Moonglow without it refuses it with the
-reason.
+In Moonglow's Layonara build (the fork's `layonara` branch). Upstream
+Moonglow 5.4.0 numbers its own addition 0.10 too, and has only that (the
+seeds, first below): the fork's 0.10 has both, so a plugin written for
+upstream's 0.10 runs here. Only an addition: a plugin written for 0.9 or
+before runs as it is, and has nothing to change. A plugin that uses what
+is new says `api = "0.10"`, so that a Moonglow without it refuses it
+with the reason.
 
+- **Seeds for `ctx.terrain`**, so that an area painted by a plugin can
+  be made again tile for tile. `ctx.terrain:seed(n)` begins the job's
+  random choices again from `n` (the tiles and lights chosen from then
+  on, `new_area`'s too); `ctx.terrain:open(area, { seed = n })` gives
+  that area random choices of its own, whatever else the job does. The
+  same calls in the same order on the same tiles choose the same tiles
+  again. Without a seed, each run chooses anew, as before.
+
+  ```lua
+  ctx.terrain:seed(1234)
+  local area = ctx.terrain:open("market", { seed = 7 })
+  area:paint(2, 3, "Grass")
+  ```
 - **The network.** A manifest may declare the hosts its plugin talks
   to, `[network] hosts = "api.example.org"` (exact names, no wildcards,
   IP addresses or ports). `ctx.net:request{ url, method, headers, body,

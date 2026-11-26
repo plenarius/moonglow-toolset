@@ -63,7 +63,7 @@ use mg_schema::{StructExt, ifo};
 use mg_testkit::{corpus, oracle_tool, scratch_dir};
 
 mod common;
-use common::{SETTINGS, compile, repo};
+use common::{SETTINGS, compile};
 
 /// Seconds a form plays.
 const PLAY: f64 = 9.0;
@@ -1492,8 +1492,7 @@ fn our_clients(dir: &Path) -> Vec<String> {
 
 /// Stops the client started (its sandbox, then any client of `dir` left).
 fn stop(child: &mut Child, dir: &Path) {
-    let _ = child.kill();
-    let _ = child.wait();
+    common::stop_client(child);
     for _ in 0..20 {
         let left = our_clients(dir);
         if left.is_empty() {
@@ -1756,7 +1755,7 @@ void main()
     let log = user.join("logs/nwclientLog1.txt");
     let _only = common::client_lock();
     let _ = std::fs::remove_file(&log);
-    let mut child = Command::new(repo().join("tools/nwclient/run-client.sh"))
+    let mut child = common::client_script()
         .arg(dir)
         .args(["+TestNewModule", "MgAudio"])
         .env("MG_CLIENT_AUDIO_OUT", &out)

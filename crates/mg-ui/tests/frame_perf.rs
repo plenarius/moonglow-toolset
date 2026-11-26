@@ -29,10 +29,14 @@
 //! the GPU holds after each view (and what of it), `FRAME_KEEP_TEXTURES=1`
 //! keeps the textures of what was shown before an area opens, and
 //! `FRAME_STALE_KEPT=<MiB>` keeps that much of those not drawn lately, and
-//! `FRAME_TEXTURE_LIMIT=<pixels>` is Options › Area › Largest textures.
-//! (With another program drawing, the game say,
+//! `FRAME_TEXTURE_LIMIT=<pixels>` is Options › Area › Largest textures,
+//! and `FRAME_UNCOMPRESSED=1` uploads TGAs as RGBA8, not compressed as
+//! they are read, and `FRAME_AREAS=<resref,…>` opens those areas instead
+//! of the campaign's middle and largest, and `FRAME_SAMPLES=1` (or `2`) is
+//! Options › Area › Anti-aliasing Off (or 2×). (With another program drawing, the game say,
 //! the GPU's times are as much that program's: close it for those.)
 
+mod render_views;
 #[allow(dead_code)]
 mod world;
 
@@ -137,7 +141,19 @@ const KNOWN_OVER: &[(&str, &str)] = &[
     ("549 objects) (Sound Ranges on), all selected, walkmesh (pointer)", LARGEST),
     ("549 objects) (Sound Ranges on), all selected, walkmesh (idle)", LARGEST),
     ("549 objects) (Sound Ranges on), all selected, walkmesh (wheel)", LARGEST),
+    // `area_editor_at_scale`, 2026-11-25 (load 9 to 12, other agents
+    // building): an area of 5,000 placeables, one dragged, 10.2 to 10.3 ms
+    // (its picture drawn again each frame: the largest areas' cost); all
+    // of them selected and dragged, 18.7 to 19.1 ms (their boxes made anew
+    // each frame, 3 ms, and the Properties panel of 5,000, 2.2 to 2.9).
+    // (At load 4 to 5, those at rest are under the budget, 6.3 to 7.0 ms;
+    // at load 12 to 16 they crossed its margin, 9.0 to 11.4.)
+    ("area of 5,000 placeables, one selected, dragged", LARGEST),
+    ("area of 5,000 placeables, all selected, dragged", TIMING),
 ];
+/// The entry of `docs/deferred.md` for the review's costs without a
+/// timing view, which holds what the area editor's views left.
+const TIMING: &str = "The review of November 2026's performance fixes without a timing view";
 /// The entry of `docs/deferred.md` for the largest areas' frames.
 const LARGEST: &str = "The largest areas in full view";
 
@@ -157,6 +173,9 @@ enum Pointer {
     Scrolls,
     /// Away from the window: nothing happens.
     Away,
+    /// Rests at the point, still (on a menu's row, say, which a pointer
+    /// moving across the view would close).
+    Rests(egui::Pos2),
     /// Pressed at the first point, moved to the second and let go at the
     /// last frame: a drag (of a selection, in an area's view).
     Drags(egui::Pos2, egui::Pos2),
@@ -166,6 +185,12 @@ enum Pointer {
     /// Rests at the point with the wheel turning down by so many points a
     /// frame (a form's pages on one scroll, top to bottom).
     Down(egui::Pos2, f32),
+    /// Pressed at the point in the first frame and let go in the second, then
+    /// resting there: a click (a button that opens a window).
+    Clicks(egui::Pos2),
+    /// The text typed in the first frame (into the field that has the
+    /// keys), the pointer away.
+    Types(&'static str),
 }
 
 struct Report {
@@ -315,6 +340,7 @@ fn frames(
                 });
             }
             Pointer::Away => {}
+            Pointer::Rests(at) => input.events.push(egui::Event::PointerMoved(at)),
             Pointer::Keys(at, key, every) => {
                 input.events.push(egui::Event::PointerMoved(at));
                 if n % every.max(1) == 0 {
@@ -335,6 +361,22 @@ fn frames(
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::NONE,
                 });
+            }
+            Pointer::Clicks(at) => {
+                input.events.push(egui::Event::PointerMoved(at));
+                if n < 2 {
+                    input.events.push(egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: n == 0,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            Pointer::Types(text) => {
+                if n == 0 {
+                    input.events.push(egui::Event::Text(text.into()));
+                }
             }
             Pointer::Drags(from, to) => {
                 let at = from.lerp(to, n as f32 / (count - 1).max(1) as f32);
@@ -452,8 +494,11 @@ fn said_memory(h: &App<'_>, what: &str) {
         );
     }
     if how == "labels" {
-        for (label, mib, n) in by.iter().take(14) {
-            println!("      {mib:8.1} MiB  {label} ({n})");
+        // (The 14 largest, and the stencil volumes' whatever their size.)
+        for (i, (label, mib, n)) in by.iter().enumerate() {
+            if i < 14 || label.starts_with("shadow volume") {
+                println!("      {mib:8.1} MiB  {label} ({n})");
+            }
         }
     }
 }
@@ -983,6 +1028,15 @@ fn areas(app: &mut Moonglow) -> Vec<(ResRef, i64)> {
         })
         .collect();
     sized.sort_by_key(|(r, n)| (*n, *r));
+    // (`FRAME_AREAS=zhentkeepwar,…`: those areas instead, by resref; the
+    // campaign's with the most creatures is zhentkeepwar, 67.)
+    if let Ok(named) = std::env::var("FRAME_AREAS") {
+        let named: Vec<&str> = named.split(',').map(str::trim).collect();
+        return sized
+            .into_iter()
+            .filter(|(r, _)| r.as_str().is_some_and(|s| named.contains(&s)))
+            .collect();
+    }
     let (largest, middle) = (*sized.last().unwrap(), sized[sized.len() / 2]);
     vec![middle, largest]
 }
@@ -997,6 +1051,8 @@ fn harness<'a>(mut app: Moonglow, rs: egui_wgpu::RenderState) -> App<'a> {
     }
     // (`FRAME_SHADOW_QUALITY=high`: the area views' shadows as stencil
     // volumes, Options › Area's High.)
+    // (`FRAME_SAMPLES=1` or `2`: Options › Area › Anti-aliasing.)
+    app.settings.anti_aliasing = std::env::var("FRAME_SAMPLES").ok().and_then(|n| n.parse().ok());
     if std::env::var("FRAME_SHADOW_QUALITY").is_ok_and(|q| q.eq_ignore_ascii_case("high")) {
         app.settings.shadow_quality = mg_ui::settings::ShadowQuality::High;
     }
@@ -1104,6 +1160,11 @@ fn area_views(h: &mut App<'_>, r: &mut Report, area: ResRef, tiles: i64, label: 
     // area a module opens itself was drawn as it opened. With
     // `FRAME_KEEP_TEXTURES`, those of what was shown before kept, as a
     // session keeps them.)
+    // (`FRAME_UNCOMPRESSED=1`: the TGAs and PLTs uploaded as RGBA8, as
+    // before 2026-11-25, not compressed as they are read.)
+    if let Some(vp) = h.state_mut().viewport.as_mut() {
+        vp.gpu.set_compress_read_textures(std::env::var_os("FRAME_UNCOMPRESSED").is_none());
+    }
     if let Some(vp) = h.state_mut().viewport.as_mut()
         && std::env::var_os("FRAME_KEEP_TEXTURES").is_none()
     {
@@ -1113,6 +1174,9 @@ fn area_views(h: &mut App<'_>, r: &mut Report, area: ResRef, tiles: i64, label: 
     let mut opening = Vec::new();
     let begun = Instant::now();
     let (mut shown, mut whole) = (None, None);
+    // (The frames drawn while casters waited for their stencil volumes,
+    // made apart with High: from the first such frame to the last.)
+    let (mut volumes_from, mut volumes_until, mut volume_frames) = (None, None, 0);
     while begun.elapsed() < Duration::from_secs(120) {
         let t = Instant::now();
         h.run_steps(1);
@@ -1123,7 +1187,29 @@ fn area_views(h: &mut App<'_>, r: &mut Report, area: ResRef, tiles: i64, label: 
         if shown.is_none() && view.is_some_and(|v| v.model.is_some()) {
             shown = Some(begun.elapsed());
         }
-        let pending = app.viewport.as_ref().map_or(0, |v| v.renderer.drawn.textures_pending);
+        let drawn = app.viewport.as_ref().map(|v| v.renderer.drawn).unwrap_or_default();
+        let pending = drawn.textures_pending + drawn.volumes_pending;
+        // (`FRAME_DETAIL`: each frame of the opening, what the view had and
+        // waited for by its end.)
+        if r.detail {
+            println!(
+                "      opening frame at {:.1} ms, {:.1} ms: shown {}, {} pictures, \
+                 {} textures waited for ({} read), {} volumes, {} programs",
+                ms(begun.elapsed()),
+                ms(took),
+                view.is_some_and(|v| v.model.is_some()),
+                view.map_or(0, |v| v.pictures),
+                drawn.textures_pending,
+                app.viewport.as_ref().map_or(0, |v| v.renderer.textures_read()),
+                drawn.volumes_pending,
+                drawn.game_pending,
+            );
+        }
+        if drawn.volumes_pending > 0 {
+            volumes_from.get_or_insert(begun.elapsed());
+            volumes_until = Some(begun.elapsed());
+            volume_frames += 1;
+        }
         if shown.is_some() && view.is_some_and(|v| v.pictures > 0) && pending == 0 {
             whole = Some(begun.elapsed());
             break;
@@ -1153,6 +1239,13 @@ fn area_views(h: &mut App<'_>, r: &mut Report, area: ResRef, tiles: i64, label: 
             shown.map_or(f64::NAN, ms),
             whole.map_or(f64::NAN, ms),
         );
+        if let (Some(from), Some(until)) = (volumes_from, volumes_until) {
+            println!(
+                "      casters waited for their stencil volumes in {volume_frames} frames, \
+                 {:.0} ms from the first to the last",
+                ms(until - from)
+            );
+        }
         if r.detail {
             let each: Vec<String> = opening.iter().map(|d| format!("{:.1}", ms(*d))).collect();
             println!("      frames: {}", each.join(" "));
@@ -3201,6 +3294,23 @@ fn sound_ranges_frames_at_144() {
         let label = if on { " (Sound Ranges on)" } else { " (Sound Ranges off)" };
         area_views(&mut h, &mut r, area, tiles, label);
     }
+    // What the GPU holds once the area is closed (`FRAME_MEMORY`): with
+    // `FRAME_SHADOW_QUALITY=high`, the stencil volumes' target and the
+    // meshes' volumes let go of (the review's R5), and the framebuffer's
+    // copies (R10).
+    if std::env::var_os("FRAME_MEMORY").is_some() {
+        let tab = Tab::Area(area);
+        said_memory(&h, &format!("area {area}, open"));
+        close(&mut h, &tab);
+        // (Past the time a view not drawn lets go of its targets, and a
+        // closed one of its scene: three seconds of the harness's clock.)
+        h.run_steps(3 * FPS as usize);
+        let held = h.state().area_views.get(&area).is_some_and(|v| v.holds_scene());
+        said_memory(&h, &format!("area {area}, closed{}", if held { "" } else { ", let go of" }));
+        if let Some(vp) = h.state().viewport.as_ref() {
+            println!("      shadow volumes kept: {}", vp.renderer.shadow_volumes_kept());
+        }
+    }
     r.end();
 }
 
@@ -3859,4 +3969,2519 @@ fn rows_rect(h: &App<'_>) -> Option<egui::Rect> {
     .map(|n| n.rect().intersect(screen))
     .filter(|r| r.is_positive())
     .reduce(|a, b| a.union(b))
+}
+
+/// The review of November 2026's area editor findings at the sizes they
+/// name (A16, A17, A18's Update Instances, A20, A21, A22, A24: the deferred
+/// list's "performance fixes without a timing view"), each against the
+/// same view at rest, timed just before it: a 32 by 32 area of the Rural
+/// tileset (ttr01) with 5,000 placeables, every one selected (the
+/// selection's overlays), dragged, with Adjust Location open (a value
+/// changed, so that the selection is posed anew each frame) and with the
+/// context menu open, and 2,000 of them with the Position menu open; an
+/// empty 32 by 32 area with Paint at radius 25 m and density 50 (the
+/// pointer still: the next dab's ghosts), a light being placed and the
+/// area's menu open (Add Light Here) with a placeables.2da of 30,000 more
+/// rows (copies of the game's rows that are not lights, in the scratch
+/// user folder's `override`); a 32 by 32 area of the Rural tileset's
+/// hills, every tile selected (Select Tiles), still and turning; Update
+/// Instances of the 30,000 placed in six areas; and the tileset editor's
+/// Tiles page of a 2,000-tile set (the Rural tileset's tiles copied),
+/// its first and its last tile chosen. Each line ends with the view's
+/// interface time against its resting one's: over by more than
+/// [`UI_LINE`] is a cost to find. `FRAME_VIEW=<part of a name>` picks them
+/// ("5,000 placeables", "empty area", "hills", "Update Instances",
+/// "2,000-tile").
+#[test]
+#[ignore]
+fn area_editor_at_scale() {
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("frame-perf-area-scale");
+    let user = dir.join("user");
+    std::fs::create_dir_all(user.join("override")).unwrap();
+    let (scale, light, set_path) = {
+        let game = mg_rules::GameData::open(&GameInstall::new(&root, None, "en")).unwrap();
+        let light = big_placeables(&game, &user);
+        (scale_module(&game, &dir), light, big_tileset(&game, &dir))
+    };
+    let mut r = Report::new();
+    let mut lines = Vec::new();
+    println!("the area editor at scale: frames at {:?}", screen_size());
+    let rs = render_state();
+    let mut app = Moonglow::new(
+        Some(GameInstall::new(&root, Some(user), "en")),
+        Box::new(NoDialogs::default()),
+    );
+    app.set_render_state(rs.clone());
+    app.settings.open_editors = mg_ui::OpenEditors::Tabs;
+    app.open_module(&scale.path);
+    let mut h = harness(app, rs);
+    h.run_steps(3);
+    let rows = h.state().game.as_deref().and_then(|g| g.table("placeables").ok()).map(|t| t.len());
+    println!("  (placeables.2da: {rows:?} rows; light row {light})");
+    close_areas(&mut h);
+    // (A part of a group's name, or a view's whole name, which begins with it.)
+    let wanted = |r: &Report, what: &str| {
+        r.only.as_ref().is_none_or(|o| what.contains(o.as_str()) || o.starts_with(what))
+    };
+
+    // A16 and A20: the area of 5,000 placeables.
+    let name = "area of 5,000 placeables";
+    if wanted(&r, name) {
+        let area = scale.placed;
+        let rect = open_area(&mut h, area);
+        let placeables: Vec<_> = h.state().area_views[&area]
+            .model
+            .as_ref()
+            .map(|m| m.objects.iter().map(|o| (o.kind, o.index)).collect())
+            .unwrap_or_default();
+        println!("  ({} objects in {name})", placeables.len());
+        let Some((one, grip)) = grip_near(&h, area, rect, |_| true) else {
+            panic!("{name}: no placeable to hold in sight")
+        };
+        let select = |h: &mut App<'_>, keys: &[(mg_area::ObjectKind, usize)]| {
+            h.state_mut().area_views.get_mut(&area).unwrap().selection = keys.to_vec();
+            h.hover_at(grip);
+            h.run_steps(3);
+        };
+        let one_key = placeables[one];
+        // The noise floor: the resting view twice.
+        select(&mut h, &[one_key]);
+        let rest = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, one selected"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        let again = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, one selected, again"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        against(&mut lines, &format!("{name}, one selected, timed again (the noise)"), rest, again);
+        select(&mut h, &placeables);
+        let all = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, all selected"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        against(&mut lines, &format!("{name}, all selected"), rest, all);
+        let moving = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, all selected"),
+            "pointer",
+            rect,
+            Pointer::Moves,
+        );
+        select(&mut h, &[one_key]);
+        let moving_one = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, one selected"),
+            "pointer",
+            rect,
+            Pointer::Moves,
+        );
+        against(
+            &mut lines,
+            &format!("{name}, all selected, the pointer moving"),
+            moving_one,
+            moving,
+        );
+        // Dragged: one, then all, 60 points east (the last frame lets go:
+        // the move's command made).
+        let undo =
+            |h: &App<'_>| h.state().ws.as_ref().and_then(|w| w.can_undo().map(str::to_owned));
+        let dragged = |h: &mut App<'_>, r: &mut Report, what: &str| {
+            if r.only.as_ref().is_some_and(|only| !what.contains(only.as_str())) || r.shots {
+                return None;
+            }
+            let grip = h.state().area_views[&area].move_grip(one).expect("a grip");
+            let to = grip + egui::vec2(60.0, 0.0);
+            let f = frames(h, rect, Pointer::Drags(grip, to), r.count, |_, _| {});
+            said(r, what, "drag", &f);
+            h.run_steps(2);
+            assert_eq!(undo(h).as_deref(), Some("Move"), "{what}: the drag moved them");
+            h.state_mut().actions.push(Action::Undo);
+            h.run_steps(3);
+            Some(pick(f.ui, 0.5))
+        };
+        let one_drag = dragged(&mut h, &mut r, &format!("{name}, one selected, dragged"));
+        select(&mut h, &placeables);
+        let all_drag = dragged(&mut h, &mut r, &format!("{name}, all selected, dragged"));
+        against(&mut lines, &format!("{name}, all selected, dragged"), one_drag, all_drag);
+        // At rest again after the drag and its undo: what the next two
+        // are set against (timed just before them, as the others are).
+        h.hover_at(grip);
+        h.run_steps(3);
+        let all_again = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, all selected, after the drag"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        // Adjust Location open on all of them, X changed (posed anew).
+        let adjust = mg_ui::area_tools::adjust(&h.state().area_views[&area]).map(|mut a| {
+            a.position.x += 3.0;
+            a.changed[0] = true;
+            a
+        });
+        assert!(adjust.is_some(), "{name}: no Adjust Location for the selection");
+        h.state_mut().adjust = adjust;
+        h.run_steps(3);
+        let adjusting = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, all selected, Adjust Location open"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        assert!(h.state().adjust.is_some(), "{name}: Adjust Location closed");
+        against(
+            &mut lines,
+            &format!("{name}, all selected, Adjust Location open"),
+            all_again,
+            adjusting,
+        );
+        h.state_mut().adjust = None;
+        h.run_steps(3);
+        // The context menu open on them, the pointer on its first row.
+        if let Some(at) = menu_on(&mut h, grip, "Adjust Location…") {
+            let menu = timed(
+                &mut h,
+                &mut r,
+                &format!("{name}, all selected, the context menu open"),
+                "still",
+                rect,
+                Pointer::Rests(at),
+            );
+            h.run_steps(1);
+            assert!(h.query_by_label("Adjust Location…").is_some(), "{name}: the menu closed");
+            against(
+                &mut lines,
+                &format!("{name}, all selected, the context menu open"),
+                all_again,
+                menu,
+            );
+            close_menu(&mut h);
+        }
+        // And once more, the menu closed (the noise of the two).
+        h.hover_at(grip);
+        h.run_steps(3);
+        let all_last = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, all selected, the menu closed"),
+            "still",
+            rect,
+            Pointer::Rests(grip),
+        );
+        against(
+            &mut lines,
+            &format!("{name}, all selected, timed again after the menu (the noise)"),
+            all_again,
+            all_last,
+        );
+        // A20: 2,000 of them, the Position menu open (the pointer on it).
+        let two: Vec<_> = placeables.iter().copied().take(2_000).collect();
+        let Some((_, grip2)) = grip_near(&h, area, rect, |i| i < 2_000) else {
+            panic!("{name}: none of the 2,000 in sight")
+        };
+        h.state_mut().area_views.get_mut(&area).unwrap().selection = two.clone();
+        h.hover_at(grip2);
+        h.run_steps(3);
+        let rest2 = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, 2,000 selected"),
+            "still",
+            rect,
+            Pointer::Rests(grip2),
+        );
+        if let Some(at) = menu_on(&mut h, grip2, "Position") {
+            h.hover_at(at);
+            h.run_steps(5);
+            assert!(
+                h.query_by_label_contains("Random Facing").is_some(),
+                "{name}: no Position menu"
+            );
+            let menu = timed(
+                &mut h,
+                &mut r,
+                &format!("{name}, 2,000 selected, the Position menu open"),
+                "still",
+                rect,
+                Pointer::Rests(at),
+            );
+            h.run_steps(1);
+            assert!(
+                h.query_by_label_contains("Random Facing").is_some(),
+                "{name}: Position closed"
+            );
+            against(
+                &mut lines,
+                &format!("{name}, 2,000 selected, the Position menu open"),
+                rest2,
+                menu,
+            );
+            close_menu(&mut h);
+        }
+        h.state_mut().area_views.get_mut(&area).unwrap().selection.clear();
+        close(&mut h, &Tab::Area(area));
+    }
+
+    // A17 and A21: the empty area.
+    let name = "empty area";
+    if wanted(&r, name) {
+        let area = scale.empty;
+        let rect = open_area(&mut h, area);
+        let at = rect.center();
+        h.hover_at(at);
+        h.run_steps(3);
+        let rest = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, the pointer still"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        // Paint: radius 25 m, density 50 a tile, one placeable chosen.
+        {
+            let app = h.state_mut();
+            app.palette.tiles = false;
+            app.palette.kind = BlueprintKind::Placeable;
+            app.palette.chosen = ResKey::parse("plc_tree", ResType::UTP).into_iter().collect();
+            let p = &mut app.settings.paint;
+            (p.row, p.fill, p.erase) = (false, false, false);
+            (p.radius_cm, p.density) = (2_500, 50);
+            app.paint = true;
+        }
+        h.run_steps(5);
+        let painting = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Paint at 25 m and 50 a tile, the pointer still"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        let paint = &h.state().area_views[&area].paint;
+        println!("  (Paint's next dab: {} ghosts shown, {} more)", paint.shown, paint.more);
+        assert!(paint.shown > 0, "{name}: Paint shows no next dab");
+        against(
+            &mut lines,
+            &format!("{name}, Paint at 25 m and 50 a tile, the pointer still"),
+            rest,
+            painting,
+        );
+        {
+            let app = h.state_mut();
+            app.paint = false;
+            app.palette.chosen.clear();
+        }
+        h.run_steps(3);
+        // A light being placed (its status line asks for the lights).
+        h.state_mut().palette.placing_light = Some(light);
+        h.run_steps(3);
+        let placing = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, a light being placed, placeables.2da +30,000"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        // (Still in hand, and the area's status line worked out: its
+        // hints name the light from the table of 46,500.)
+        assert_eq!(h.state().palette.placing_light, Some(light), "{name}: no light in hand");
+        assert!(h.query_by_label("32 by 32 tiles").is_some(), "{name}: no status line");
+        against(
+            &mut lines,
+            &format!("{name}, a light being placed, placeables.2da +30,000"),
+            rest,
+            placing,
+        );
+        h.state_mut().palette.placing_light = None;
+        h.run_steps(3);
+        // The area's menu (on the ground): Add Light Here.
+        if let Some(on) = menu_on(&mut h, at, "Add Light Here") {
+            let menu = timed(
+                &mut h,
+                &mut r,
+                &format!("{name}, its menu open, placeables.2da +30,000"),
+                "still",
+                rect,
+                Pointer::Rests(on),
+            );
+            against(
+                &mut lines,
+                &format!("{name}, its menu open, placeables.2da +30,000"),
+                rest,
+                menu,
+            );
+            close_menu(&mut h);
+        }
+        // The resting view once more, after the others (the noise).
+        h.hover_at(at);
+        h.run_steps(3);
+        let again = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, the pointer still, again"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        against(&mut lines, &format!("{name}, timed again (the noise)"), rest, again);
+        close(&mut h, &Tab::Area(area));
+    }
+
+    // A24: the hills, every tile selected.
+    let name = "hills";
+    if wanted(&r, name) {
+        let area = scale.hills;
+        println!("  ({} of the 1,024 tiles of the hills' area sloped)", scale.sloped);
+        let rect = open_area(&mut h, area);
+        let at = rect.center();
+        {
+            let v = h.state_mut().area_views.get_mut(&area).unwrap();
+            v.selection.clear();
+            v.tile_mode = true;
+            v.tile_selection.clear();
+        }
+        h.state_mut().palette.tiles = true;
+        h.hover_at(at);
+        h.run_steps(3);
+        let turn = |app: &mut Moonglow, _: usize| {
+            if let Some(o) = app.area_views.get_mut(&area).and_then(|v| v.orbit.as_mut()) {
+                o.yaw += 0.01;
+            }
+        };
+        let rest = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Select Tiles on, none selected"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        let rest_turning = timed_with(
+            &mut h,
+            &mut r,
+            &format!("{name}, Select Tiles on, none selected"),
+            "turning",
+            rect,
+            Pointer::Rests(at),
+            turn,
+        );
+        h.state_mut().area_views.get_mut(&area).unwrap().tile_selection =
+            (0..32).flat_map(|y| (0..32).map(move |x| (x, y))).collect();
+        h.run_steps(3);
+        let all = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Select Tiles on, all 1,024 selected"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        let all_turning = timed_with(
+            &mut h,
+            &mut r,
+            &format!("{name}, Select Tiles on, all 1,024 selected"),
+            "turning",
+            rect,
+            Pointer::Rests(at),
+            turn,
+        );
+        against(&mut lines, &format!("{name}, every tile selected"), rest, all);
+        against(
+            &mut lines,
+            &format!("{name}, every tile selected, turning"),
+            rest_turning,
+            all_turning,
+        );
+        {
+            let v = h.state_mut().area_views.get_mut(&area).unwrap();
+            v.tile_mode = false;
+            v.tile_selection.clear();
+        }
+        h.state_mut().palette.tiles = false;
+        close(&mut h, &Tab::Area(area));
+    }
+
+    // A18's rest: Update Instances of the 30,000, no area open.
+    let name = "Update Instances";
+    if wanted(&r, name) {
+        close_areas(&mut h);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+        let rest = timed(
+            &mut h,
+            &mut r,
+            "Update Instances' resting view (nothing open)",
+            "pointer",
+            screen,
+            Pointer::Moves,
+        );
+        let key = ResKey::parse("plc_armoire", ResType::UTP).unwrap();
+        h.state_mut().update_instances_of(vec![key]);
+        h.run_steps(5);
+        let listed = h.state().update_draft.as_ref().map_or(0, |d| d.objects.len());
+        assert_eq!(listed, 30_000, "{name}: not the 30,000 listed");
+        assert!(h.query_by_label("Update 30000").is_some(), "{name}: its foot not drawn");
+        let rows = h
+            .query_all_by(|n| n.label().is_some_and(|l| l.contains("(plc_armoire)")))
+            .map(|n| n.rect())
+            .reduce(|a, b| a.union(b))
+            .unwrap_or(screen);
+        let list = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, 30,000 listed"),
+            "pointer",
+            rows,
+            Pointer::Moves,
+        );
+        against(&mut lines, &format!("{name}, 30,000 listed"), rest, list);
+        let _ = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, 30,000 listed"),
+            "wheel",
+            rows,
+            Pointer::Scrolls,
+        );
+        h.state_mut().update_draft = None;
+        h.run_steps(3);
+    }
+
+    // A22: the 2,000-tile set's Tiles page.
+    let name = "2,000-tile set";
+    if wanted(&r, name) {
+        mg_ui::tileset_view::open_path(h.state_mut(), set_path);
+        h.run_steps(3);
+        let id = h.state().tilesets.last().expect("the tileset open").id;
+        let t = Tab::Tileset(id);
+        let tiles = h
+            .state()
+            .tilesets
+            .iter()
+            .find(|d| d.id == id)
+            .and_then(|d| d.tileset())
+            .map_or(0, |s| s.tiles.len());
+        assert_eq!(tiles, 2_000, "{name}: not 2,000 tiles");
+        let choose = |h: &mut App<'_>, tile: usize| {
+            let d = h.state_mut().tilesets.iter_mut().find(|d| d.id == id).unwrap();
+            d.page = mg_ui::tileset_view::Page::Tiles;
+            d.tile = Some(tile);
+            h.run_steps(5);
+        };
+        let rect = rect_of(h.state(), &t).expect("the tileset's tab");
+        choose(&mut h, 0);
+        let first = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Tiles page, its first tile chosen"),
+            "pointer",
+            rect,
+            Pointer::Moves,
+        );
+        choose(&mut h, 1_999);
+        assert!(
+            h.query_all_by_label_contains("tile 1999").next().is_some(),
+            "{name}: tile 1999 not shown"
+        );
+        let last = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Tiles page, its last tile chosen"),
+            "pointer",
+            rect,
+            Pointer::Moves,
+        );
+        against(&mut lines, &format!("{name}, Tiles page, its last tile chosen"), first, last);
+        let _ = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}, Tiles page, its last tile chosen"),
+            "idle",
+            rect,
+            Pointer::Away,
+        );
+        close(&mut h, &t);
+    }
+    println!(
+        "against their resting views (the line {} µs):\n  {}",
+        UI_LINE.as_micros(),
+        lines.join("\n  ")
+    );
+    r.end();
+}
+
+/// How much more of the interface's time a view may take than the same
+/// view at rest before its cost is one to find (a hundredth of the
+/// budget, the review's line).
+const UI_LINE: Duration = Duration::from_micros(70);
+
+/// A view's frames timed one way (`how`) after a few to settle in, the
+/// pointer doing `pointer` within `rect`: the median of the interface's
+/// pass. `None` where `FRAME_VIEW` leaves it out.
+fn timed(
+    h: &mut App<'_>,
+    r: &mut Report,
+    what: &str,
+    how: &str,
+    rect: egui::Rect,
+    pointer: Pointer,
+) -> Option<Duration> {
+    timed_with(h, r, what, how, rect, pointer, |_, _| {})
+}
+
+fn timed_with(
+    h: &mut App<'_>,
+    r: &mut Report,
+    what: &str,
+    how: &str,
+    rect: egui::Rect,
+    pointer: Pointer,
+    mut each: impl FnMut(&mut Moonglow, usize),
+) -> Option<Duration> {
+    if r.only.as_ref().is_some_and(|only| !what.contains(only.as_str())) || r.shots {
+        return None;
+    }
+    frames(h, rect, pointer, 4, &mut each);
+    let f = frames(h, rect, pointer, r.count, &mut each);
+    said(r, what, how, &f);
+    Some(pick(f.ui, 0.5))
+}
+
+/// A line for a view's interface time against its resting view's: over
+/// by more than [`UI_LINE`] is "find".
+fn against(lines: &mut Vec<String>, what: &str, rest: Option<Duration>, it: Option<Duration>) {
+    let (Some(rest), Some(it)) = (rest, it) else { return };
+    let micros = |d: Duration| d.as_secs_f64() * 1e6;
+    let by = micros(it) - micros(rest);
+    let verdict = if by > micros(UI_LINE) { "find" } else { "within" };
+    let line =
+        format!("{what}: ui {:.3} ms, at rest {:.3} ms: {by:+.0} µs, {verdict}", ms(it), ms(rest));
+    println!("  {line}");
+    lines.push(line);
+}
+
+/// Closes every area's tab.
+fn close_areas(h: &mut App<'_>) {
+    let shown: Vec<Tab> = (h.state().dock.iter_all_tabs())
+        .map(|(_, t)| t.clone())
+        .filter(|t| matches!(t, Tab::Area(_)))
+        .collect();
+    for t in &shown {
+        close(h, t);
+    }
+}
+
+/// Opens an area and waits until it is drawn whole, its camera over its
+/// middle from 120 m, looking down steeply: where its view is.
+fn open_area(h: &mut App<'_>, area: ResRef) -> egui::Rect {
+    open(h, Tab::Area(area));
+    let begun = Instant::now();
+    loop {
+        h.run_steps(1);
+        let app = h.state();
+        let view = app.area_views.get(&area);
+        let pending = app
+            .viewport
+            .as_ref()
+            .map_or(0, |v| v.renderer.drawn.textures_pending + v.renderer.drawn.game_pending);
+        if view.is_some_and(|v| v.model.is_some() && v.pictures > 0) && pending == 0 {
+            break;
+        }
+        assert!(begun.elapsed() < Duration::from_secs(120), "area {area} not drawn");
+    }
+    let middle = (h.state().area_views[&area].model.as_ref())
+        .map(|m| glam::Vec3::new(m.width as f32 * 5.0, m.height as f32 * 5.0, 0.0))
+        .unwrap_or_default();
+    if let Some(o) = h.state_mut().area_views.get_mut(&area).and_then(|v| v.orbit.as_mut()) {
+        (o.target, o.pitch, o.distance) = (middle, 0.9, 120.0);
+    }
+    h.run_steps(5);
+    rect_of(h.state(), &Tab::Area(area)).expect("the area's tab")
+}
+
+/// An object `keep` takes (by its place in the model) nearest the view's
+/// middle that a press there would move: its place and where to press.
+fn grip_near(
+    h: &App<'_>,
+    area: ResRef,
+    rect: egui::Rect,
+    keep: impl Fn(usize) -> bool,
+) -> Option<(usize, egui::Pos2)> {
+    let v = h.state().area_views.get(&area)?;
+    let m = v.model.as_ref()?;
+    let mut near: Vec<(f32, usize)> = (m.objects.iter().enumerate())
+        .filter(|(i, o)| keep(*i) && o.kind == mg_area::ObjectKind::Placeable)
+        .filter_map(|(i, o)| Some((v.screen_pos(o.position)?.distance(rect.center()), i)))
+        .collect();
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    near.iter().take(60).find_map(|&(_, i)| Some((i, v.move_grip(i)?)))
+}
+
+/// Opens the area's context menu with a right click at `at` and gives
+/// where its row `row` is (`None`, said, where it is not there).
+fn menu_on(h: &mut App<'_>, at: egui::Pos2, row: &str) -> Option<egui::Pos2> {
+    h.hover_at(at);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run_steps(3);
+    let on = h.query_all_by_label_contains(row).next().map(|n| n.rect().center());
+    if on.is_none() {
+        println!("  (no {row:?} in the area's menu)");
+    }
+    let on = on?;
+    h.hover_at(on);
+    h.run_steps(3);
+    Some(on)
+}
+
+fn close_menu(h: &mut App<'_>) {
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+}
+
+/// The areas [`area_editor_at_scale`] times, in a module of its own.
+struct Scale {
+    path: std::path::PathBuf,
+    /// 32 by 32, 5,000 placeables (`plc_armoire`).
+    placed: ResRef,
+    /// 32 by 32, nothing placed.
+    empty: ResRef,
+    /// 32 by 32 of the Rural tileset's hills.
+    hills: ResRef,
+    /// How many of the hills' tiles are sloped (their corners not all at
+    /// one height).
+    sloped: usize,
+}
+
+/// The module of [`Scale`]: its three areas and five more of 8 by 8 with
+/// 5,000 placeables each (30,000 placed from `plc_armoire` in all).
+fn scale_module(game: &mg_rules::GameData, dir: &std::path::Path) -> Scale {
+    use mg_gff::{Gff, Value};
+    use mg_module::ModuleLocation;
+    use mg_module::new::{AreaSpec, add_area, new_module};
+    let mut rng = fastrand::Rng::with_seed(16);
+    let mut m = new_module(game, "Area editor at scale", &mut rng).unwrap();
+    let ttr01 = ResRef::from_str("ttr01").unwrap();
+    let spec = |name: &str, side: u32| AreaSpec {
+        name: name.into(),
+        tileset: ttr01,
+        width: side,
+        height: side,
+    };
+    let bp = Gff::read(&game.resman.get_named("plc_armoire", ResType::UTP).unwrap()).unwrap();
+    let placed = add_area(&mut m, game, &spec("Placed", 32), &mut rng).unwrap();
+    place(&mut m, game, &bp.root, placed, 5_000, 320.0, &mut rng);
+    for n in 0..5 {
+        let more = add_area(&mut m, game, &spec(&format!("More {n}"), 8), &mut rng).unwrap();
+        place(&mut m, game, &bp.root, more, 5_000, 80.0, &mut rng);
+    }
+    let empty = add_area(&mut m, game, &spec("Empty", 32), &mut rng).unwrap();
+    // The hills: two by two corners raised a step in every four by four,
+    // over the tileset's default terrain.
+    let hills = add_area(&mut m, game, &spec("Hills", 32), &mut rng).unwrap();
+    let set = game.resman.get_named("ttr01", ResType::SET).unwrap();
+    let set = mg_set::Tileset::parse(&set, game.codepage()).unwrap();
+    let index = mg_tiles::TileIndex::new(&set);
+    let mut lattice = mg_tiles::new_area(&index, &set, 32, 32).unwrap();
+    let ground = index.terrain(&set.general.default).unwrap();
+    let up = |v: u32| v % 4 == 1 || v % 4 == 2;
+    for y in 1..32 {
+        for x in 1..32 {
+            let height = i32::from(up(x) && up(y));
+            lattice.set_corner(x, y, mg_tiles::Corner { terrain: ground, height });
+        }
+    }
+    let tiles = mg_tiles::fill(&index, &lattice, &mut rng).unwrap();
+    let mut sloped = 0;
+    for y in 0..32 {
+        for x in 0..32 {
+            let h = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .map(|(dx, dy)| lattice.corner(x + dx, y + dy).height);
+            sloped += usize::from(h.iter().any(|v| *v != h[0]));
+        }
+    }
+    let key = ResKey::new(hills, ResType::ARE);
+    let mut are = m.gff(&key).unwrap().unwrap();
+    for (t, p) in are.root.list_mut("Tile_List").unwrap().iter_mut().zip(&tiles) {
+        t.set("Tile_ID", Value::Int(p.tile as i32));
+        t.set("Tile_Orientation", Value::Int(i32::from(p.orientation)));
+        t.set("Tile_Height", Value::Int(p.height));
+    }
+    m.set_gff(key, &are).unwrap();
+    let path = dir.join("scale.mod");
+    m.save_as(&ModuleLocation::Archive(path.clone())).unwrap();
+    Scale { path, placed, empty, hills, sloped }
+}
+
+/// Places `count` of blueprint `bp` in `area` at random within `span`
+/// meters of its south-west corner.
+fn place(
+    m: &mut mg_module::Module,
+    game: &mg_rules::GameData,
+    bp: &mg_gff::Struct,
+    area: ResRef,
+    count: usize,
+    span: f32,
+    rng: &mut fastrand::Rng,
+) {
+    use mg_module::instances::{Placement, Placing, instance};
+    let none = |_: ResRef| None;
+    let placing = Placing { game, item: &none };
+    let placed: Vec<_> = (0..count)
+        .map(|_| {
+            let at = Placement {
+                position: [rng.f32() * span, rng.f32() * span, 0.0],
+                rotation: rng.f32() * 360.0,
+            };
+            instance(&placing, ResType::UTP, bp, at, &[]).unwrap()
+        })
+        .collect();
+    let key = ResKey::new(area, ResType::GIT);
+    let mut git = m.gff(&key).unwrap().unwrap();
+    git.root.set("Placeable List", mg_gff::Value::List(placed));
+    m.set_gff(key, &git).unwrap();
+}
+
+/// The game's placeables.2da with 30,000 more rows (its rows that are not
+/// lights, copied in turn), in the scratch user folder's `override`: the
+/// row of one of the game's lights ("Light, White" or the first).
+fn big_placeables(game: &mg_rules::GameData, user: &std::path::Path) -> usize {
+    let data = game.resman.get_named("placeables", ResType::TWODA).unwrap();
+    let mut t = mg_2da::TwoDa::parse(&data, game.codepage()).unwrap();
+    let is_light = |t: &mg_2da::TwoDa, row: usize| {
+        t.get(row, "ModelName").is_some_and(|m| m.eq_ignore_ascii_case("dag_invisible"))
+            && t.get_int(row, "LightColor").is_some_and(|c| c > 0)
+    };
+    let lights: Vec<usize> = (0..t.len()).filter(|&row| is_light(&t, row)).collect();
+    let others: Vec<usize> = (0..t.len())
+        .filter(|&row| !is_light(&t, row) && t.get(row, "ModelName").is_some())
+        .collect();
+    let columns = t.columns().len();
+    for k in 0..30_000 {
+        let from = others[k % others.len()];
+        let row = t.add_row();
+        for c in 0..columns {
+            let value = t.cell(from, c).map(str::to_string);
+            t.set(row, c, value).unwrap();
+        }
+    }
+    std::fs::write(user.join("override/placeables.2da"), t.to_bytes(game.codepage()).unwrap())
+        .unwrap();
+    let white = lights.iter().copied().find(|&row| t.get(row, "Label") == Some("Light, White"));
+    white.or(lights.first().copied()).expect("a light in placeables.2da")
+}
+
+/// The Rural tileset's `.set` with its tiles copied in turn to 2,000 (the
+/// copies' sections after its groups, where a scan from the first line
+/// goes farthest), in the scratch folder.
+fn big_tileset(game: &mg_rules::GameData, dir: &std::path::Path) -> std::path::PathBuf {
+    let data = game.resman.get_named("ttr01", ResType::SET).unwrap();
+    let mut f = mg_set::edit::SetFile::parse(&String::from_utf8_lossy(&data));
+    let n: usize = f
+        .entries("TILES")
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("Count"))
+        .and_then(|(_, v)| v.trim().parse().ok())
+        .expect("a tile count");
+    for j in n..2_000 {
+        let entries = f.entries(&format!("TILE{}", j % n));
+        f.add_section(&format!("TILE{j}"), &entries);
+    }
+    f.set("TILES", "Count", "2000");
+    let path = dir.join("set").join("ttr01.set");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, f.text()).unwrap();
+    path
+}
+
+/// The review of November 2026's blueprint editor findings at the sizes
+/// they name (B20, B21, B22's rest, B23 to B26, G4's half and the last
+/// pass's item 17: the deferred list's "performance fixes without a timing
+/// view"), each against the same view at a small size, timed just before
+/// it, in a scratch copy of the persistent world (`world/mod.rs`: 300
+/// areas, 8,000 custom items, the haks' 100,000 textures and 17,100-row
+/// appearance.2da) with 100 creatures of 20 items each placed in its first
+/// area: the Instances window of 2 and of 100 of them on their Inventory
+/// and Feats pages (B20); a door's Area Transition page and Setup Area
+/// Transition opened on it over the 300 areas, the click's frame and the
+/// areas' objects the workspace holds after (B21); the Custom palette of a
+/// kind with few blueprints and of the 8,000 items, List and Gallery,
+/// Recent and Favorites filled from the standard items, a search typed,
+/// and with the search an edit of an area made every frame (B23, B24); an
+/// item blueprint's Properties page with no search, a search that finds
+/// nothing (every choice tested) and one that finds some (G4); the Sound
+/// and the Placeable Wizard's category pages (item 17); Select Texture
+/// opened and searched (B26); a creature's Feats page, Select Portrait, an
+/// item's Appearance page of icons and the Creature Wizard's appearance
+/// page, with the install's tables and then, after Reload Resources, with
+/// feat.2da of 20,000 rows, portraits.2da of 32,000, appearance.2da of
+/// 30,000 and 999 icons of a simple item in the scratch user folder's
+/// `development` (B22's rest, B26; the window with nothing open, timed on
+/// both sides, tells a drift from a cost); and the Appearance Gallery of
+/// creatures scrolled to its end, a long way a frame as its scroll bar
+/// dragged, and the frames until the pictures in sight are made (B25).
+/// The frames a click, a key or an opening lands in are held to the
+/// budget. `FRAME_VIEW=<part of a name>` picks a group ("Instances",
+/// "Setup Area Transition", "custom palette", "Properties page",
+/// "Blueprint Wizard", "Select Texture", "tables", "Appearance Gallery").
+#[test]
+#[ignore]
+fn blueprint_editors_at_scale() {
+    use mg_edit::{Command, Edit, GffPath};
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let Some(w) = world::world(&root) else { return };
+    let dir = mg_testkit::scratch_dir("frame-perf-blueprints");
+    let user = dir.join("user");
+    let dev = user.join("development");
+    std::fs::create_dir_all(&dev).unwrap();
+    link_dir(&w.user.join("hak"), &user.join("hak"));
+    let made = {
+        let game = mg_rules::GameData::open(&GameInstall::new(&root, None, "en")).unwrap();
+        blueprints_module(&game, &w.module, &dir)
+    };
+    let mut r = Report::new();
+    let mut lines = Vec::new();
+    println!("the blueprint editors at scale: frames at {:?}", screen_size());
+    let rs = render_state();
+    let mut app = Moonglow::new(
+        Some(GameInstall::new(&root, Some(user), "en")),
+        Box::new(NoDialogs::default()),
+    );
+    app.set_render_state(rs.clone());
+    app.settings.open_editors = mg_ui::OpenEditors::Tabs;
+    app.open_module(&made.path);
+    let mut h = harness(app, rs);
+    h.run_steps(3);
+    // (Pictures read apart, as the desktop app reads them.)
+    h.state_mut().background_jobs = true;
+    fold_palette(&mut h);
+    close(&mut h, &Tab::ModuleProperties);
+    close_areas(&mut h);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+    let wanted = |r: &Report, what: &str| {
+        r.only.as_ref().is_none_or(|o| what.contains(o.as_str()) || o.starts_with(what))
+    };
+    // The worst of the frames a click, a key or an opening lands in, the
+    // pointer doing `pointer`: a line against the budget.
+    let landed = |h: &mut App<'_>, lines: &mut Vec<String>, what: &str, pointer: Pointer| {
+        let f = frames(h, screen, pointer, 4, |_, _| {});
+        let worst = f.ui.iter().zip(&f.tessellate).map(|(a, b)| *a + *b).max().unwrap();
+        let verdict = if worst > BUDGET { "over the budget" } else { "within the budget" };
+        let line = format!("{what}: its worst frame {:.2} ms, {verdict}", ms(worst));
+        println!("  {line}");
+        lines.push(line);
+        worst
+    };
+
+    // B20: the Instances window of 2 and of 100 creatures.
+    let name = "Instances of creatures";
+    if wanted(&r, name) {
+        let git = ResKey::new(made.area, ResType::GIT);
+        let first = made.creatures[0].clone();
+        for page in ["Inventory", "Feats"] {
+            let mut took = Vec::new();
+            // (The two timed again after the hundred: the noise of the run.)
+            for (i, n) in [2, 100, 2].into_iter().enumerate() {
+                let t = Tab::Instances {
+                    objects: made.creatures[..n].iter().map(|p| (made.area, p.clone())).collect(),
+                };
+                h.state_mut().blueprint_pages.insert((git, first.clone()), page);
+                open(&mut h, t.clone());
+                h.run_steps(5);
+                let rect = rect_of(h.state(), &t).expect("the Instances window");
+                let again = if i == 2 { ", again" } else { "" };
+                let what = format!("{name}, {n} on the {page} page{again}");
+                took.push(timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves));
+                assert!(h.state().dock.find_tab(&t).is_some(), "{what}: the window closed");
+                close(&mut h, &t);
+            }
+            against(&mut lines, &format!("{name}, 100 on the {page} page"), took[0], took[1]);
+            let noise = format!("{name}, 2 on the {page} page timed again (the noise)");
+            against(&mut lines, &noise, took[0], took[2]);
+        }
+    }
+
+    // B21: Setup Area Transition over the 300 areas.
+    let name = "Setup Area Transition";
+    if wanted(&r, name) {
+        let t = Tab::Blueprint(made.door);
+        h.state_mut().blueprint_pages.insert((made.door, GffPath::root()), "Area Transition");
+        open(&mut h, t.clone());
+        h.run_steps(5);
+        let held = |h: &App<'_>| {
+            let ws = h.state().ws.as_ref().unwrap();
+            ws.module.keys_of(ResType::GIT).filter(|k| ws.loaded(k).is_some()).count()
+        };
+        let areas = h.state().ws.as_ref().unwrap().module.keys_of(ResType::GIT).count();
+        let before = held(&h);
+        let rest = timed(
+            &mut h,
+            &mut r,
+            &format!("{name}'s door, its Area Transition page"),
+            "pointer",
+            screen,
+            Pointer::Moves,
+        );
+        let button = h.get_by_label("Setup Area Transition…").rect().center();
+        let mut clicks = Vec::new();
+        for n in 0..5 {
+            let what = format!("{name}, the click that opens it over {areas} areas ({})", n + 1);
+            clicks.push(landed(&mut h, &mut lines, &what, Pointer::Clicks(button)));
+            h.run_steps(3);
+            assert!(h.query_by_label("Target area").is_some(), "{name}: the window not open");
+            if n < 4 {
+                close_menu(&mut h);
+                assert!(h.query_by_label("Target area").is_none(), "{name}: the window not closed");
+            }
+        }
+        let after = held(&h);
+        let line = format!(
+            "{name}: the areas' objects held by the workspace: {before} before, {after} after \
+             five openings"
+        );
+        println!("  {line}");
+        lines.push(line);
+        let open_ = timed(
+            &mut h,
+            &mut r,
+            &format!("{name} open over {areas} areas"),
+            "pointer",
+            screen,
+            Pointer::Moves,
+        );
+        assert!(h.query_by_label("Target area").is_some(), "{name}: the window closed");
+        against(&mut lines, &format!("{name} open over {areas} areas"), rest, open_);
+        close_menu(&mut h);
+        close(&mut h, &t);
+    }
+
+    // B23 and B24: the Custom palette, few blueprints and 8,000.
+    let name = "custom palette";
+    if wanted(&r, name) {
+        let standard: Vec<String> = {
+            let game = h.state().game.as_deref().unwrap();
+            let mut items = game.resman.list(ResType::UTI);
+            items.sort();
+            items
+                .iter()
+                .filter(|r| r.to_string().starts_with("nw_"))
+                .take(20)
+                .map(|r| format!("uti:{r}"))
+                .collect()
+        };
+        assert_eq!(standard.len(), 20, "{name}: twenty standard items");
+        h.state_mut().settings.palette_recent = standard.clone();
+        h.state_mut().settings.palette_favorites = standard[..10].to_vec();
+        let count = |h: &App<'_>, kind: BlueprintKind| {
+            h.state().ws.as_ref().unwrap().module.keys_of(kind.restype()).count()
+        };
+        let few = [BlueprintKind::Waypoint, BlueprintKind::Sound, BlueprintKind::Trigger]
+            .into_iter()
+            .filter(|k| count(&h, *k) > 0)
+            .min_by_key(|k| count(&h, *k))
+            .expect("a kind with a few custom blueprints");
+        let kinds = [(few, count(&h, few)), (BlueprintKind::Item, count(&h, BlueprintKind::Item))];
+        let palcus = |h: &App<'_>, kind: BlueprintKind| {
+            let m = &h.state().ws.as_ref().unwrap().module;
+            m.contains(&kind.custom_key())
+        };
+        println!(
+            "  ({name}: {} {:?} blueprints, its palcus {}; {} items, theirs {})",
+            kinds[0].1,
+            few,
+            palcus(&h, few),
+            kinds[1].1,
+            palcus(&h, BlueprintKind::Item)
+        );
+        let area = ResKey::new(made.area, ResType::ARE);
+        let edit = |app: &mut Moonglow, n: usize| {
+            let edit = Edit::SetField {
+                key: area,
+                path: GffPath::root(),
+                label: "Comments".into(),
+                value: Some(mg_gff::Value::String(format!("frame {n}").into_bytes())),
+            };
+            app.actions.push(Action::Apply(Command::new("Edit the area's comment", vec![edit])));
+        };
+        // Unsearched, a kind of few blueprints against the 8,000 items;
+        // searched, the items with a search that finds 100 against one
+        // that finds them all (as many rows drawn).
+        let items = kinds[1];
+        for (gallery, searched) in [(false, false), (true, false), (false, true), (true, true)] {
+            h.state_mut().settings.palette_gallery = gallery;
+            h.state_mut().settings.gallery_tile = gallery.then_some(64);
+            let shown = if gallery { "Gallery" } else { "List" };
+            let pair = match searched {
+                false => [(kinds[0], ""), (items, "")],
+                true => [(items, "pw_i000"), (items, "pw")],
+            };
+            let mut took = Vec::new();
+            let mut edited = Vec::new();
+            let mut whats = Vec::new();
+            for ((kind, n), search) in pair {
+                palette(&mut h, kind, true, search);
+                show_palette(&mut h);
+                h.run_steps(if gallery { 300 } else { 5 });
+                let rect = palette_rect(&h).expect("the palette");
+                let what = match search {
+                    "" => format!("{name} of {n} {}, {shown}", kind.label().to_lowercase()),
+                    s => format!("{name} of {n} items, {shown}, \"{s}\" searched"),
+                };
+                took.push(timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves));
+                assert_eq!(h.state().palette.filter, search, "{what}: the search kept");
+                if search == "pw_i000" {
+                    assert!(h.query_by_label("100 items").is_some(), "{what}: not 100 found");
+                }
+                if searched {
+                    edited.push(timed_with(
+                        &mut h,
+                        &mut r,
+                        &format!("{what}, an edit each frame"),
+                        "pointer",
+                        rect,
+                        Pointer::Moves,
+                        edit,
+                    ));
+                }
+                fold_palette(&mut h);
+                whats.push(what);
+            }
+            against(&mut lines, &whats[1], took[0], took[1]);
+            if let [small, large] = edited[..] {
+                against(&mut lines, &format!("{}, an edit each frame", whats[1]), small, large);
+            }
+        }
+        h.state_mut().settings.palette_gallery = false;
+        h.state_mut().settings.gallery_tile = None;
+        h.state_mut().settings.palette_recent.clear();
+        h.state_mut().settings.palette_favorites.clear();
+        h.state_mut().palette.filter.clear();
+        // (The edits taken back.)
+        while h.state().ws.as_ref().and_then(|w| w.can_undo()) == Some("Edit the area's comment") {
+            h.state_mut().actions.push(Action::Undo);
+            h.run_steps(1);
+        }
+    }
+
+    // G4's half: an item's Properties page with a search.
+    let name = "item blueprint's Properties page";
+    if wanted(&r, name) {
+        let item = ResKey::parse("pw_i00001", ResType::UTI).unwrap();
+        let t = Tab::Blueprint(item);
+        h.state_mut().blueprint_pages.insert((item, GffPath::root()), "Properties");
+        open(&mut h, t.clone());
+        h.run_steps(5);
+        let rect = rect_of(h.state(), &t).expect("the item's tab");
+        let rest =
+            timed(&mut h, &mut r, &format!("{name}, no search"), "pointer", rect, Pointer::Moves);
+        let field = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+            n.role() == egui::accesskit::Role::TextInput
+                && (n.placeholder() == Some("Search properties")
+                    || n.value().as_deref() == Some("zzzz"))
+        };
+        for (text, what) in [("zzzz", "a search that finds nothing"), ("fire", "\"fire\" searched")]
+        {
+            h.get(egui_kittest::kittest::by().predicate(field)).click();
+            h.run_steps(2);
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.run_steps(1);
+            h.event(egui::Event::Text(text.into()));
+            h.run_steps(3);
+            let what = format!("{name}, {what}");
+            let it = timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves);
+            assert!(h.query_all_by_value(text).next().is_some(), "{what}: the search kept");
+            let none = h.query_by_label("No property has that.").is_some();
+            assert_eq!(none, text == "zzzz", "{what}: found what it should");
+            against(&mut lines, &what, rest, it);
+        }
+        close(&mut h, &t);
+    }
+
+    // The last pass's item 17: the Blueprint Wizard's category page.
+    let name = "Blueprint Wizard's category page";
+    if wanted(&r, name) {
+        let mut took = Vec::new();
+        for (kind, wizard) in
+            [(BlueprintKind::Sound, "Sound"), (BlueprintKind::Placeable, "Placeable")]
+        {
+            h.state_mut().blueprint_wizard =
+                Some(mg_ui::blueprint_wizard::BlueprintWizard::new(kind));
+            h.run_steps(5);
+            let what = format!("{name}, the {wizard} Wizard");
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+            assert!(
+                h.query_all_by_label_contains("Choose the palette category").next().is_some(),
+                "{what}: not its category page"
+            );
+        }
+        against(&mut lines, &format!("{name}, the Placeable Wizard"), took[0], took[1]);
+        h.state_mut().blueprint_wizard = None;
+        h.run_steps(3);
+    }
+
+    // B26: Select Texture over the haks' textures, opened and searched.
+    let name = "Select Texture";
+    if wanted(&r, name) {
+        let chest = view_game_blueprint(&mut h, "plc_chest1", ResType::UTP);
+        let textures = {
+            let game = h.state().game.as_deref().unwrap();
+            game.resman.list(ResType::TGA).len() + game.resman.list(ResType::DDS).len()
+        };
+        let t = Tab::Blueprint(chest);
+        h.state_mut().blueprint_pages.insert((chest, GffPath::root()), "Visuals");
+        open(&mut h, t.clone());
+        h.run_steps(10);
+        let button = h.get_all_by_label("Select Texture…").next().unwrap().rect().center();
+        landed(
+            &mut h,
+            &mut lines,
+            &format!("{name}, the click that opens it ({textures} textures)"),
+            Pointer::Clicks(button),
+        );
+        h.run_steps(300);
+        let find = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+            n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some("Find")
+        };
+        assert!(h.query_by_label("Select Texture").is_some(), "{name}: not open");
+        let open_ = timed(
+            &mut h,
+            &mut r,
+            &format!("{name} open ({textures} textures)"),
+            "pointer",
+            screen,
+            Pointer::Moves,
+        );
+        h.query_all(egui_kittest::kittest::by().predicate(find)).last().unwrap().click();
+        h.run_steps(2);
+        landed(&mut h, &mut lines, &format!("{name}, \"wood\" typed"), Pointer::Types("wood"));
+        h.run_steps(300);
+        let what = format!("{name}, \"wood\" searched ({textures} textures)");
+        let searched = timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves);
+        assert!(h.query_all_by_value("wood").next().is_some(), "{what}: the search kept");
+        against(&mut lines, &what, open_, searched);
+        h.get_all_by_label("Cancel").last().unwrap().click();
+        h.run_steps(3);
+        close(&mut h, &t);
+    }
+
+    // B22's rest and B26: the tables' views, with the install's tables
+    // and grown.
+    let name = "tables";
+    if wanted(&r, name) {
+        let small = tables_views(&mut h, &mut r, &mut lines, &made, "the install's tables");
+        let sizes = grow_tables(&h, &dev);
+        h.state_mut().actions.push(Action::ReloadResources);
+        let begun = Instant::now();
+        loop {
+            h.run_steps(1);
+            let game = h.state().game.as_deref().unwrap();
+            if game.table("feat").is_ok_and(|t| t.len() == sizes.feats) {
+                break;
+            }
+            assert!(begun.elapsed() < Duration::from_secs(60), "{name}: the reload not taken");
+        }
+        h.run_steps(5);
+        {
+            let game = h.state().game.as_deref().unwrap();
+            let len = |t: &str| game.table(t).map_or(0, |t| t.len());
+            assert_eq!(len("portraits"), sizes.portraits, "{name}: portraits.2da not grown");
+            assert_eq!(len("appearance"), sizes.appearance, "{name}: appearance.2da not grown");
+            assert_eq!(icons_of(game, &made.icon_prefix), 999, "{name}: not 999 icons");
+        }
+        let large = tables_views(&mut h, &mut r, &mut lines, &made, "grown tables");
+        for (what, a, b) in [
+            ("the window with nothing open (the control)", small.control, large.control),
+            ("a creature's Feats page", small.feats, large.feats),
+            ("Select Portrait", small.portrait, large.portrait),
+            ("an item's Appearance page of icons", small.icons, large.icons),
+            ("the Creature Wizard's appearance page", small.wizard, large.wizard),
+        ] {
+            against(&mut lines, &format!("{name}, {what}, grown"), a, b);
+        }
+        against(
+            &mut lines,
+            &format!("{name}, the control timed again (the noise)"),
+            large.control,
+            large.control_again,
+        );
+    }
+
+    // B25: the Appearance Gallery scrolled to its end.
+    let name = "Appearance Gallery";
+    if wanted(&r, name) {
+        let rows = h.state().game.as_deref().unwrap().table("appearance").map_or(0, |t| t.len());
+        let mut gallery = mg_ui::appearance_gallery::Gallery::default();
+        gallery.kind = mg_ui::appearance_gallery::Kind::Creature;
+        h.state_mut().placeable_gallery = Some(gallery);
+        let t = Tab::PlaceableGallery;
+        open(&mut h, t.clone());
+        let rect = rect_of(h.state(), &t).expect("the gallery's tab");
+        let at = rect.center();
+        h.hover_at(at);
+        let made_all = |h: &mut App<'_>| {
+            let (begun, mut frames_, mut ui, mut worst) =
+                (Instant::now(), 0, Duration::ZERO, Duration::ZERO);
+            loop {
+                let f = frames(h, rect, Pointer::Rests(at), 1, |_, _| {});
+                frames_ += 1;
+                ui += f.ui[0];
+                worst = worst.max(f.ui[0]);
+                let th = &h.state().thumbnails;
+                if th.waiting() == 0 && th.reading() == 0 && frames_ > 8 {
+                    break (frames_, begun.elapsed(), ui, worst);
+                }
+                assert!(begun.elapsed() < Duration::from_secs(300), "{name}: pictures not made");
+            }
+        };
+        made_all(&mut h);
+        let what = format!("{name} of creatures ({rows} rows)");
+        let rest = timed(
+            &mut h,
+            &mut r,
+            &format!("{what}, at its top"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        // (Down a long way a frame, as the scroll bar dragged to the end:
+        // farther in all than the rows reach, at 150 points a row of
+        // pictures, so the last frames rest at the end.)
+        let across = (rect.width() / 150.0).floor().max(1.0);
+        let by = 6_000.0;
+        let count = ((rows as f32 / across * 150.0 / by).ceil() as usize + 20).min(2_000);
+        let f = frames(&mut h, rect, Pointer::Down(at, by), count, |_, _| {});
+        said(&mut r, &format!("{what}, scrolled to its end"), "wheel", &f);
+        let worst = f.ui.iter().max().copied().unwrap_or_default();
+        let (waiting, reading) = (h.state().thumbnails.waiting(), h.state().thumbnails.reading());
+        let (frames_, took, ui, slowest) = made_all(&mut h);
+        let line = format!(
+            "{what}: scrolled to its end in {count} frames (their worst {:.2} ms), then {waiting} \
+             pictures waiting and {reading} being read; the pictures in sight made in {frames_} \
+             frames, {:.0} ms ({:.2} ms of the interface's, the slowest frame {:.2} ms)",
+            ms(worst),
+            ms(took),
+            ms(ui),
+            ms(slowest),
+        );
+        println!("  {line}");
+        lines.push(line);
+        let end = timed(
+            &mut h,
+            &mut r,
+            &format!("{what}, at its end"),
+            "still",
+            rect,
+            Pointer::Rests(at),
+        );
+        against(&mut lines, &format!("{what}, at its end"), rest, end);
+        close(&mut h, &t);
+        h.state_mut().placeable_gallery = None;
+    }
+    println!(
+        "against their resting views (the line {} µs):\n  {}",
+        UI_LINE.as_micros(),
+        lines.join("\n  ")
+    );
+    r.end();
+}
+
+/// What [`tables_views`] timed.
+#[derive(Default)]
+struct TablesTimed {
+    control: Option<Duration>,
+    control_again: Option<Duration>,
+    feats: Option<Duration>,
+    portrait: Option<Duration>,
+    icons: Option<Duration>,
+    wizard: Option<Duration>,
+}
+
+/// The views whose cost grew with a table, timed with the tables `when`
+/// says: a creature's Feats page, Select Portrait (and the click's frame),
+/// an item's Appearance page of icons (and its opening's frames), the
+/// Creature Wizard's appearance page; and the window with nothing open
+/// before and after them (the control).
+fn tables_views(
+    h: &mut App<'_>,
+    r: &mut Report,
+    lines: &mut Vec<String>,
+    made: &Blueprints,
+    when: &str,
+) -> TablesTimed {
+    use mg_edit::GffPath;
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+    let mut out = TablesTimed::default();
+    let lens = {
+        let game = h.state().game.as_deref().unwrap();
+        let len = |t: &str| game.table(t).map_or(0, |t| t.len());
+        format!(
+            "feat.2da {}, portraits.2da {}, appearance.2da {}, {} icons",
+            len("feat"),
+            len("portraits"),
+            len("appearance"),
+            icons_of(game, &made.icon_prefix)
+        )
+    };
+    println!("  ({when}: {lens})");
+    let what = |view: &str| format!("tables, {view}, {when}");
+    out.control = timed(h, r, &what("nothing open"), "pointer", screen, Pointer::Moves);
+    // A creature's Feats page.
+    let creature = ResKey::parse("pw_c00001", ResType::UTC).unwrap();
+    let t = Tab::Blueprint(creature);
+    h.state_mut().blueprint_pages.insert((creature, GffPath::root()), "Feats");
+    open(h, t.clone());
+    h.run_steps(5);
+    let rect = rect_of(h.state(), &t).expect("the creature's tab");
+    out.feats = timed(h, r, &what("a creature's Feats page"), "pointer", rect, Pointer::Moves);
+    close(h, &t);
+    // Select Portrait, from a placeable's Advanced page.
+    let chest = view_game_blueprint(h, "plc_chest1", ResType::UTP);
+    let t = Tab::Blueprint(chest);
+    h.state_mut().blueprint_pages.insert((chest, GffPath::root()), "Advanced");
+    open(h, t.clone());
+    h.run_steps(5);
+    h.get_by_label("Portraits…").scroll_to_me();
+    h.run_steps(2);
+    let button = h.get_by_label("Portraits…").rect().center();
+    let f = frames(h, screen, Pointer::Clicks(button), 4, |_, _| {});
+    let worst = f.ui.iter().zip(&f.tessellate).map(|(a, b)| *a + *b).max().unwrap();
+    let verdict = if worst > BUDGET { "over the budget" } else { "within the budget" };
+    let line = format!(
+        "{}: its worst frame {:.2} ms, {verdict}",
+        what("the click that opens Select Portrait"),
+        ms(worst)
+    );
+    println!("  {line}");
+    lines.push(line);
+    h.run_steps(300);
+    assert!(h.query_by_label("Plot Characters").is_some(), "Select Portrait not open ({when})");
+    out.portrait = timed(h, r, &what("Select Portrait"), "pointer", screen, Pointer::Moves);
+    close_menu(h);
+    close(h, &t);
+    // An item's Appearance page of icons, opened.
+    let t = Tab::Blueprint(made.icons);
+    h.state_mut().blueprint_pages.insert((made.icons, GffPath::root()), "Appearance");
+    h.state_mut().actions.push(Action::OpenTab(t.clone()));
+    let f = frames(h, screen, Pointer::Away, 4, |_, _| {});
+    let worst = f.ui.iter().zip(&f.tessellate).map(|(a, b)| *a + *b).max().unwrap();
+    let verdict = if worst > BUDGET { "over the budget" } else { "within the budget" };
+    let line = format!(
+        "{}: its worst frame {:.2} ms, {verdict}",
+        what("an item's Appearance page of icons, opened"),
+        ms(worst)
+    );
+    println!("  {line}");
+    lines.push(line);
+    h.run_steps(300);
+    let rect = rect_of(h.state(), &t).expect("the item's tab");
+    out.icons =
+        timed(h, r, &what("an item's Appearance page of icons"), "pointer", rect, Pointer::Moves);
+    assert!(h.query_all_by_label_contains("Appearance 1").next().is_some(), "no icons ({when})");
+    close(h, &t);
+    // The Creature Wizard's appearance page.
+    h.state_mut().creature_wizard = Some(mg_ui::creature_wizard::CreatureWizard {
+        page: 3,
+        race: Some(6),
+        classes: vec![(4, 4)],
+        chosen_class: Some(4),
+        portrait: Some(1),
+        first_name: "Perf".into(),
+        category: Some(0),
+        ..Default::default()
+    });
+    h.run_steps(300);
+    out.wizard = timed(
+        h,
+        r,
+        &what("the Creature Wizard's appearance page"),
+        "pointer",
+        screen,
+        Pointer::Moves,
+    );
+    h.state_mut().creature_wizard = None;
+    h.run_steps(3);
+    out.control_again =
+        timed(h, r, &what("nothing open, again"), "pointer", screen, Pointer::Moves);
+    out
+}
+
+/// What [`blueprints_module`] made.
+struct Blueprints {
+    path: std::path::PathBuf,
+    /// The area of the 100 creatures.
+    area: ResRef,
+    /// Where they are in its GIT.
+    creatures: Vec<mg_edit::GffPath>,
+    /// A door blueprint (its Area Transition page).
+    door: ResKey,
+    /// A simple item of the base item [`Blueprints::icon_prefix`] names.
+    icons: ResKey,
+    /// Its icons' names before their number (`iit_midmisc_`).
+    icon_prefix: String,
+}
+
+/// A copy of the persistent world's module with 100 creatures (the game's
+/// `nw_bandit001`, each holding 20 of the game's items) placed in its first
+/// area, a door blueprint and a simple item of the misc medium base item
+/// (`mg_door`, `mg_icons`), in `dir`.
+fn blueprints_module(
+    game: &mg_rules::GameData,
+    world: &std::path::Path,
+    dir: &std::path::Path,
+) -> Blueprints {
+    use mg_gff::{Gff, Struct, Value};
+    use mg_module::instances::{Placement, Placing, instance};
+    use mg_module::{Module, ModuleLocation};
+    let mut m = Module::open(world).unwrap();
+    let area = m.areas().unwrap()[0];
+    let read =
+        |name: &str, t: ResType| Gff::read(&game.resman.get_named(name, t).unwrap()).unwrap();
+    // The creatures, each with 20 kinds of item.
+    let mut items = game.resman.list(ResType::UTI);
+    items.sort();
+    let items: Vec<ResRef> =
+        items.into_iter().filter(|r| r.to_string().starts_with("nw_")).take(20).collect();
+    let mut bandit = read("nw_bandit001", ResType::UTC).root;
+    let held: Vec<Struct> = items
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut e = Struct::new(i as u32);
+            e.set("InventoryRes", Value::resref(*r));
+            e.set("Repos_PosX", Value::Word((i % 10) as u16));
+            e.set("Repos_Posy", Value::Word((i / 10) as u16));
+            e
+        })
+        .collect();
+    bandit.set("ItemList", Value::List(held));
+    let item = |r: ResRef| {
+        game.resman
+            .get(&ResKey::new(r, ResType::UTI))
+            .ok()
+            .and_then(|d| Gff::read(&d).ok())
+            .map(|g| g.root)
+    };
+    let placing = Placing { game, item: &item };
+    let mut rng = fastrand::Rng::with_seed(20);
+    let key = ResKey::new(area, ResType::GIT);
+    let mut git = m.gff(&key).unwrap().unwrap();
+    let mut list = git.root.list("Creature List").unwrap_or(&[]).to_vec();
+    let from = list.len();
+    for _ in 0..100 {
+        let at = Placement { position: [rng.f32() * 20.0, rng.f32() * 20.0, 0.0], rotation: 0.0 };
+        list.push(instance(&placing, ResType::UTC, &bandit, at, &[]).unwrap());
+    }
+    assert!(list[from].list("ItemList").is_some_and(|l| l.len() == 20), "the creatures' items");
+    git.root.set("Creature List", Value::List(list));
+    m.set_gff(key, &git).unwrap();
+    let creatures =
+        (from..from + 100).map(|i| mg_edit::GffPath::root().item("Creature List", i)).collect();
+    // A door blueprint.
+    let door_src = game.resman.list(ResType::UTD)[0];
+    let door = ResKey::parse("mg_door", ResType::UTD).unwrap();
+    let mut d = Gff::read(&game.resman.get(&ResKey::new(door_src, ResType::UTD)).unwrap()).unwrap();
+    d.root.set("TemplateResRef", Value::resref(door.resref));
+    m.set_gff(door, &d).unwrap();
+    // A simple misc medium item.
+    let base = game.table("baseitems").unwrap();
+    let row = (0..base.len())
+        .find(|&r| {
+            base.get(r, "ItemClass").is_some_and(|c| c.eq_ignore_ascii_case("it_midmisc"))
+                && base.get_int(r, "ModelType") == Some(0)
+        })
+        .expect("a misc medium base item");
+    let icons = ResKey::parse("mg_icons", ResType::UTI).unwrap();
+    let mut i = read(&items[0].to_string(), ResType::UTI);
+    i.root.set("TemplateResRef", Value::resref(icons.resref));
+    i.root.set("BaseItem", Value::Int(row as i32));
+    i.root.set("ModelPart1", Value::Byte(1));
+    m.set_gff(icons, &i).unwrap();
+    let path = dir.join("blueprints.mod");
+    m.save_as(&ModuleLocation::Archive(path.clone())).unwrap();
+    Blueprints { path, area, creatures, door, icons, icon_prefix: "iit_midmisc_".into() }
+}
+
+/// The sizes [`grow_tables`] grew the tables to.
+struct Grown {
+    feats: usize,
+    portraits: usize,
+    appearance: usize,
+}
+
+/// feat.2da of 20,000 rows, portraits.2da of 32,000 and appearance.2da of
+/// 30,000 (the game data's as the window has them, their rows copied in
+/// turn), and an icon for every number to 999 of the simple item's, in the
+/// scratch user folder's `development` (`dev`), over the haks.
+fn grow_tables(h: &App<'_>, dev: &std::path::Path) -> Grown {
+    let game = h.state().game.as_deref().unwrap();
+    let grown = Grown { feats: 20_000, portraits: 32_000, appearance: 30_000 };
+    for (name, rows) in
+        [("feat", grown.feats), ("portraits", grown.portraits), ("appearance", grown.appearance)]
+    {
+        let mut t = (*game.table(name).unwrap()).clone();
+        let (had, columns) = (t.len(), t.columns().len());
+        for k in had..rows {
+            let from = k % had;
+            let row = t.add_row();
+            for c in 0..columns {
+                let value = t.cell(from, c).map(str::to_string);
+                t.set(row, c, value).unwrap();
+            }
+        }
+        std::fs::write(dev.join(format!("{name}.2da")), t.to_bytes(game.codepage()).unwrap())
+            .unwrap();
+    }
+    // (A 32 by 32 picture, its color from the number.)
+    for n in 1..=999u32 {
+        let name = format!("iit_midmisc_{n:03}");
+        if game.resman.get_named(&name, ResType::TGA).is_ok()
+            || game.resman.get_named(&name, ResType::DDS).is_ok()
+        {
+            continue;
+        }
+        let mut v = vec![0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 32, 0, 32, 8];
+        for _ in 0..32 * 32 {
+            v.extend_from_slice(&[(n % 251) as u8, (n / 251 * 60) as u8, 128, 255]);
+        }
+        std::fs::write(dev.join(format!("{name}.tga")), v).unwrap();
+    }
+    grown
+}
+
+/// How many icons the game data has of `prefix` (TGA, DDS or PLT), each
+/// number once.
+fn icons_of(game: &mg_rules::GameData, prefix: &str) -> usize {
+    let mut n: Vec<String> = [ResType::TGA, ResType::DDS, ResType::PLT]
+        .iter()
+        .flat_map(|t| game.resman.list(*t))
+        .map(|r| r.to_string())
+        .filter(|r| {
+            r.strip_prefix(prefix)
+                .is_some_and(|d| d.len() == 3 && d.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect();
+    n.sort();
+    n.dedup();
+    n.len()
+}
+
+/// A blueprint of the game's given to the window to look at (never the
+/// module's: `Workspace::view`): its key.
+fn view_game_blueprint(h: &mut App<'_>, name: &str, t: ResType) -> ResKey {
+    let key = ResKey::parse(name, t).unwrap();
+    let gff = {
+        let game = h.state().game.as_deref().expect("the game's data");
+        mg_gff::Gff::read(&game.resman.get(&key).expect("the game's blueprint")).unwrap()
+    };
+    h.state_mut().ws.as_mut().expect("the module").view(key, gff);
+    key
+}
+
+/// `to` made to show `from` (a link where the system has them, else a
+/// copy), read-only use: the world's haks in a scratch user folder.
+fn link_dir(from: &std::path::Path, to: &std::path::Path) {
+    let _ = std::fs::remove_file(to);
+    let _ = std::fs::remove_dir_all(to);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(from, to).unwrap();
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// The worst of the first `count` frames a click, a key or an opening
+/// lands in, the pointer doing `pointer`: a line against the budget.
+fn landed(
+    h: &mut App<'_>,
+    lines: &mut Vec<String>,
+    what: &str,
+    pointer: Pointer,
+    count: usize,
+) -> Duration {
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+    let f = frames(h, screen, pointer, count, |_, _| {});
+    let worst = f.ui.iter().zip(&f.tessellate).map(|(a, b)| *a + *b).max().unwrap();
+    let verdict = if worst > BUDGET { "over the budget" } else { "within the budget" };
+    let line = format!("{what}: its worst frame {:.2} ms, {verdict}", ms(worst));
+    println!("  {line}");
+    lines.push(line);
+    worst
+}
+
+/// [`against`] for a view whose rest is in another window (a module of
+/// another size open): each taken over its own window's control (the
+/// window with nothing open), so that what the two modules cost apart
+/// from the view is left out. `rest` and `it` are (the view, the control).
+fn against_controlled(
+    lines: &mut Vec<String>,
+    what: &str,
+    rest: (Option<Duration>, Option<Duration>),
+    it: (Option<Duration>, Option<Duration>),
+) {
+    let (Some(rest), Some(rest_control), Some(it), Some(it_control)) = (rest.0, rest.1, it.0, it.1)
+    else {
+        return;
+    };
+    let micros = |d: Duration| d.as_secs_f64() * 1e6;
+    let by = (micros(it) - micros(it_control)) - (micros(rest) - micros(rest_control));
+    let verdict = if by > micros(UI_LINE) { "find" } else { "within" };
+    let line = format!(
+        "{what}: ui {:.3} ms over its control {:.3}, the small module's {:.3} over {:.3}: \
+         {by:+.0} µs, {verdict}",
+        ms(it),
+        ms(it_control),
+        ms(rest),
+        ms(rest_control)
+    );
+    println!("  {line}");
+    lines.push(line);
+}
+
+/// What [`editors_project`] made: a module folder with its project's
+/// files (a claims table of its areas, a talk map, described variables)
+/// and its own custom talk table in the scratch user folder.
+struct EditorsProject {
+    path: std::path::PathBuf,
+    /// Its areas.
+    areas: usize,
+    /// An area of many placeables (3,000 of `plc_armoire`; 20 in the small
+    /// project), and one of 20.
+    placed: ResRef,
+    few: ResRef,
+    placed_count: usize,
+    /// A conversation of lines "The road, line 00000." at its root.
+    talk: ResKey,
+    talk_lines: usize,
+    /// A creature blueprint (the game's `nw_bandit001`): its Basic page.
+    creature: ResKey,
+    /// The lines of its custom talk table and of its talk map.
+    tlk_lines: usize,
+    map_lines: usize,
+    /// The talk map's file.
+    map: std::path::PathBuf,
+}
+
+/// The project [`editors_at_scale`] times in: `large`, a copy of the
+/// persistent world's module (`world/mod.rs`) grown to 1,400 areas, with
+/// an area of 3,000 placeables, a conversation of 20,000 lines, a custom
+/// talk table of 50,000 lines and a talk map of 20,000; else a new module
+/// of four areas, 20 placeables, 20 lines, a table of 100 and a map of
+/// 20, the world's haks named by both (the same game data). Each has a
+/// claims table of every area (every other claimed by `cd`; the builder is
+/// `ab`) and two variables described as rows of `racialtypes.2da` and two
+/// of `placeables.2da`.
+fn editors_project(
+    game: &mg_rules::GameData,
+    world: &std::path::Path,
+    dir: &std::path::Path,
+    user: &std::path::Path,
+    large: bool,
+) -> EditorsProject {
+    use mg_gff::{Gff, Value};
+    use mg_module::ModuleLocation;
+    use mg_module::dialog::{Parent, add_node, new_dialog};
+    use mg_module::new::{AreaSpec, add_area_of, new_module};
+    let mut rng = fastrand::Rng::with_seed(24);
+    let w = mg_module::Module::open(world).unwrap();
+    let mut m = match large {
+        true => w,
+        false => {
+            let mut m = new_module(game, "Editors, small", &mut rng).unwrap();
+            let haks = w.info().unwrap().root.list("Mod_HakList").unwrap_or(&[]).to_vec();
+            let mut info = m.info().unwrap();
+            info.root.set("Mod_HakList", Value::List(haks));
+            m.set_info(&info).unwrap();
+            m
+        }
+    };
+    let (total, placed_count, talk_lines, tlk_lines, map_lines) = match large {
+        true => (1_400, 3_000, 20_000, 50_000, 20_000),
+        false => (4, 20, 20, 100, 20),
+    };
+    let ttr01 = ResRef::from_str("ttr01").unwrap();
+    let set = game.resman.get_named("ttr01", ResType::SET).unwrap();
+    let set = mg_set::Tileset::parse(&set, game.codepage()).unwrap();
+    let spec = |name: &str, side: u32| AreaSpec {
+        name: name.into(),
+        tileset: ttr01,
+        width: side,
+        height: side,
+    };
+    let bp = Gff::read(&game.resman.get_named("plc_armoire", ResType::UTP).unwrap()).unwrap();
+    let placed = add_area_of(&mut m, game, &spec("A Placed Many", 8), &set, &mut rng).unwrap();
+    place(&mut m, game, &bp.root, placed, placed_count, 80.0, &mut rng);
+    let few = add_area_of(&mut m, game, &spec("A Placed Few", 8), &set, &mut rng).unwrap();
+    place(&mut m, game, &bp.root, few, 20, 80.0, &mut rng);
+    let had = m.areas().unwrap().len();
+    for n in had..total {
+        add_area_of(&mut m, game, &spec(&format!("Filler {n:04}"), 2), &set, &mut rng).unwrap();
+    }
+    // The conversation.
+    let talk = ResKey::parse("mg_talk", ResType::DLG).unwrap();
+    let mut g = new_dialog();
+    for i in 0..talk_lines {
+        add_node(&mut g, Parent::Root, &format!("The road, line {i:05}."));
+    }
+    m.set_gff(talk, &g).unwrap();
+    // The creature.
+    let creature = ResKey::parse("mg_crea", ResType::UTC).unwrap();
+    let mut c = Gff::read(&game.resman.get_named("nw_bandit001", ResType::UTC).unwrap()).unwrap();
+    c.root.set("TemplateResRef", Value::resref(creature.resref));
+    m.set_gff(creature, &c).unwrap();
+    // The custom talk table, in the user folder's `tlk`.
+    let tlk = if large { "mg_big" } else { "mg_small" };
+    let mut info = m.info().unwrap();
+    info.root.set("Mod_CustomTlk", Value::String(tlk.as_bytes().to_vec()));
+    m.set_info(&info).unwrap();
+    let mut t = mg_tlk::Tlk::new(mg_core::Language::ENGLISH);
+    t.entries = (0..tlk_lines)
+        .map(|i| mg_tlk::TlkEntry {
+            flags: mg_tlk::FLAG_TEXT,
+            text: format!("Line {i} of the custom table").into_bytes(),
+            ..Default::default()
+        })
+        .collect();
+    std::fs::write(user.join("tlk").join(format!("{tlk}.tlk")), t.to_bytes().unwrap()).unwrap();
+    let path = dir.join(if large { "large" } else { "small" });
+    m.save_as(&ModuleLocation::Folder(path.clone())).unwrap();
+    let areas = m.areas().unwrap();
+    // The project's files.
+    let mut claims =
+        String::from("2DA V2.0\n\n    Area             Builder  Status   Date        Tag\n");
+    for (i, a) in areas.iter().enumerate() {
+        let (who, status) = if i % 2 == 0 { ("cd", "claimed") } else { ("****", "****") };
+        claims += &format!("{i}   {a:<16} {who:<8} {status:<8} 2026-10-20  ****\n");
+    }
+    std::fs::write(path.join("claims.2da"), claims).unwrap();
+    std::fs::write(
+        path.join("moonglow.toml"),
+        "[claims]\nfile = \"claims.2da\"\n\n[talk]\nlines = \"0-99999\"\nmap = \"tlk-map.json\"\n",
+    )
+    .unwrap();
+    let map = path.join("tlk-map.json");
+    write_map(&map, map_lines);
+    let mut variables = String::new();
+    for (name, table) in [("mg_race", "racialtypes"), ("mg_look", "placeables")] {
+        for name in [name.to_string(), format!("{name}_too")] {
+            variables += &format!(
+                "[{name}]\ntype = \"int\"\non = [\"placeable\"]\ntable = \"{table}\"\n\
+                 help = \"A row of {table}.2da\"\n\n"
+            );
+        }
+    }
+    std::fs::write(path.join("variables.toml"), variables).unwrap();
+    mg_module::project_file::ProjectFile::set_builder_code(&path, Some("ab")).unwrap();
+    EditorsProject {
+        path,
+        areas: areas.len(),
+        placed,
+        few,
+        placed_count,
+        talk,
+        talk_lines,
+        creature,
+        tlk_lines,
+        map_lines,
+        map,
+    }
+}
+
+/// A talk map (`mg tlk-alloc`'s) of `lines` keys, a line each from 0.
+fn write_map(path: &std::path::Path, lines: usize) {
+    let map = mg_module::tlk_alloc::Map {
+        lines: (0..lines).map(|i| (format!("mg.line.{i:05}"), i as u32)).collect(),
+        retired: Default::default(),
+    };
+    std::fs::write(path, map.to_json()).unwrap();
+}
+
+/// What [`module_views`] timed.
+#[derive(Default)]
+struct ModuleTimed {
+    control: Option<Duration>,
+    claims: Option<Duration>,
+    save: Option<Duration>,
+    typed: Option<Duration>,
+}
+
+/// The views timed in both projects of [`editors_at_scale`], the small and
+/// the large: the window with nothing open (the control), the Claims Table
+/// of every area, the frames a hak's save lands in (a copy of the game's
+/// `id_resources.hak`, a file added), and those a name typed into the talk
+/// table lands in (a creature blueprint's First Name, on its Basic page).
+fn module_views(
+    h: &mut App<'_>,
+    r: &mut Report,
+    lines: &mut Vec<String>,
+    p: &EditorsProject,
+    when: &str,
+    hak: &std::path::Path,
+) -> ModuleTimed {
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+    let control =
+        timed(h, r, &format!("editors, nothing open, {when}"), "pointer", screen, Pointer::Moves);
+    let mut out = ModuleTimed { control, ..Default::default() };
+    // D24: the Claims Table.
+    let name = "Claims Table";
+    if editors_wanted(r, name) {
+        menu(h, "Edit", "Claims Table…");
+        h.run_steps(5);
+        assert_eq!(
+            h.state().bottom_dock_shows(),
+            Some(mg_ui::Panel::ClaimsTable),
+            "{name} not shown ({when})"
+        );
+        assert!(
+            h.query_by_label_contains("claims.2da: whose each area is").is_some(),
+            "{name}: not its table ({when})"
+        );
+        let what = format!("{name} of {} areas, {when}", p.areas);
+        out.claims = timed(h, r, &what, "pointer", screen, Pointer::Moves);
+        click(h, "Close Report");
+        h.run_steps(3);
+    }
+    // The last pass's item 17: a hak saved with the module open.
+    let name = "hak saved";
+    if editors_wanted(r, name) {
+        let id = mg_ui::hak_view::open_at(h.state_mut(), hak).expect("the hak");
+        let t = Tab::Hak(id);
+        let extra = hak.with_file_name("mg_extra.mdl");
+        std::fs::write(&extra, b"extra").unwrap();
+        h.state_mut().haks.iter_mut().find(|d| d.id == id).unwrap().hak.add_files(&[extra]);
+        h.run_steps(5);
+        let rect = rect_of(h.state(), &t).expect("the hak's tab");
+        let button = h
+            .query_all_by_label("Save")
+            .map(|n| n.rect())
+            .find(|b| rect.contains(b.center()))
+            .expect("the hak editor's Save")
+            .center();
+        let resources = h.state().ws.as_ref().map_or(0, |ws| ws.module.len());
+        let what = format!("{name}, the click, {when} ({resources} resources)");
+        let click = landed(h, lines, &what, Pointer::Clicks(button), 4);
+        // (Then the frames until it is written and taken as saved, and a
+        // few after.)
+        let (begun, mut worst, mut count, mut after) = (Instant::now(), Duration::ZERO, 0, 0);
+        while after < 4 {
+            let f = frames(h, screen, Pointer::Away, 1, |_, _| {});
+            worst = worst.max(f.ui[0] + f.tessellate[0]);
+            count += 1;
+            after += usize::from(!h.state().busy());
+            assert!(begun.elapsed() < Duration::from_secs(120), "{name}: not saved ({when})");
+        }
+        let verdict = if worst > BUDGET { "over the budget" } else { "within the budget" };
+        let line = format!(
+            "{name}, the frames until it is saved, {when}: {count}, the worst {:.2} ms, {verdict}",
+            ms(worst)
+        );
+        println!("  {line}");
+        lines.push(line);
+        out.save = Some(click.max(worst));
+        h.run_steps(3);
+        let failed = h.state().log.entries.iter().any(|(_, m)| m.contains("Could not save"));
+        assert!(!failed, "{name}: {:?}", h.state().log.entries);
+        close(h, &t);
+    }
+    // D27: a name typed into the talk table.
+    let name = "typed line";
+    if editors_wanted(r, name) {
+        out.typed =
+            Some(typed_commit(h, lines, p, &format!("{name}, {when}"), ("Bandit", "Typed In")));
+    }
+    out
+}
+
+/// `FRAME_VIEW`'s pick, for [`editors_at_scale`]'s groups.
+fn editors_wanted(r: &Report, what: &str) -> bool {
+    r.only.as_ref().is_none_or(|o| what.contains(o.as_str()) || o.starts_with(what))
+}
+
+/// The creature blueprint's First Name (`from`) typed anew (`text`) and let go
+/// (Enter), on its Basic page: the worst of the frames that lands in. The
+/// window's Options › Language says whether the text goes into the talk
+/// table.
+fn typed_commit(
+    h: &mut App<'_>,
+    lines: &mut Vec<String>,
+    p: &EditorsProject,
+    what: &str,
+    (from, text): (&str, &'static str),
+) -> Duration {
+    use mg_edit::GffPath;
+    let t = Tab::Blueprint(p.creature);
+    h.state_mut().blueprint_pages.insert((p.creature, GffPath::root()), "Basic");
+    open(h, t.clone());
+    h.run_steps(5);
+    let first = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+        n.role() == egui::accesskit::Role::TextInput && n.value().as_deref() == Some(from)
+    };
+    h.query(egui_kittest::kittest::by().predicate(first))
+        .unwrap_or_else(|| panic!("{what}: no field of {from:?}"))
+        .click();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.event(egui::Event::Text(text.into()));
+    h.run_steps(2);
+    let away = egui::pos2(screen_size().x - 20.0, screen_size().y - 20.0);
+    let worst = landed(h, lines, what, Pointer::Keys(away, egui::Key::Enter, 1_000), 8);
+    h.run_steps(5);
+    assert!(h.query_all_by_value(text).next().is_some(), "{what}: the name not set");
+    close(h, &t);
+    worst
+}
+
+/// The review of November 2026's editor findings at the sizes they name
+/// (the deferred list's "performance fixes without a timing view": D20's,
+/// D21, D23's rest, D24, D25, D27, D29, S20 and the last pass's item 17),
+/// each against the same view at a small size, timed just before it, in a
+/// project made from the persistent world's module (`editors_project`:
+/// 1,400 areas, the world's haks): `spells.2da` in the 2DA editor at the
+/// window's full width, its copy under another name (no description) at
+/// full width against the copy cut to the columns in sight (D20);
+/// `placeables.2da`'s ModelName chosen with Choose Model open against
+/// closed, over the haks' models, and a described table of 20,000 rows
+/// whose `PREREQFEAT1` names a row of itself, a cell of it chosen against
+/// one of its Label (D21); Advanced Search with every one of the world's
+/// variables ticked, with a plugin whose command is for them against
+/// without (D23); a conversation's Search finding 20,000 lines against 10
+/// (and the click of Find), Build Module's 20,000 results in Problems
+/// against 20, an area's Placeable List of 3,000 opened in the raw fields
+/// view against 20 (D24); Module Properties › Custom Content with a talk
+/// map of 20,000 lines against 20 (D25); the read-only viewer on
+/// `nwscript.nss` against a short script (D29); the Variables window with
+/// a variable of `placeables.2da`'s rows against one of `racialtypes.2da`,
+/// its list closed and open (S20, item 17); the module tree with the area
+/// of 3,000 opened out against the area of 20 (item 17). In both
+/// projects, the large and a small one (`module_views`): the Claims Table
+/// (1,400 areas against 4, each over its window's control), the click
+/// that saves a hak (item 17) and a name typed into the custom talk table
+/// (50,000 lines against 100; in the large also with the text kept in the
+/// field, D27), the frames they land in held to the budget.
+/// `FRAME_VIEW=<part of a name>` picks a group ("2DA editor", "Advanced
+/// Search", "Claims Table", "conversation's Search", "Build Module", "raw
+/// fields", "Custom Content", "read-only viewer", "Variables window",
+/// "module tree", "hak saved", "typed line").
+#[test]
+#[ignore]
+fn editors_at_scale() {
+    use mg_edit::GffPath;
+    mg_testkit::gpu::hold();
+    let root = mg_testkit::corpus!();
+    let Some(w) = world::world(&root) else { return };
+    let dir = mg_testkit::scratch_dir("frame-perf-editors");
+    let user = dir.join("user");
+    std::fs::create_dir_all(user.join("tlk")).unwrap();
+    link_dir(&w.user.join("hak"), &user.join("hak"));
+    let begun = Instant::now();
+    let (small, large) = {
+        let game = mg_rules::GameData::open(&GameInstall::new(&root, None, "en")).unwrap();
+        (
+            editors_project(&game, &w.module, &dir, &user, false),
+            editors_project(&game, &w.module, &dir, &user, true),
+        )
+    };
+    println!("the editors at scale: the projects made in {:.1?}", begun.elapsed());
+    let haks = dir.join("haks");
+    std::fs::create_dir_all(&haks).unwrap();
+    let hak = haks.join("mg_save.hak");
+    std::fs::copy(root.join("data/hk/id_resources.hak"), &hak).unwrap();
+    let mut r = Report::new();
+    let mut lines = Vec::new();
+    println!("the editors at scale: frames at {:?}", screen_size());
+    let rs = render_state();
+    let mut app = Moonglow::new(
+        Some(GameInstall::new(&root, Some(user.clone()), "en")),
+        Box::new(NoDialogs::default()),
+    );
+    app.set_render_state(rs.clone());
+    app.settings.open_editors = mg_ui::OpenEditors::Tabs;
+    app.settings.no_last_area = true;
+    app.settings.talk_typed = true;
+    app.open_module(&small.path);
+    let mut h = harness(app, rs);
+    h.run_steps(3);
+    // (Pictures read apart, as the desktop app reads them.)
+    h.state_mut().background_jobs = true;
+    fold_palette(&mut h);
+    close(&mut h, &Tab::ModuleProperties);
+    close_areas(&mut h);
+    h.run_steps(5);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size());
+    let corner = egui::pos2(screen.right() - 20.0, screen.bottom() - 20.0);
+
+    // The small project's views, then the large's.
+    let few = module_views(&mut h, &mut r, &mut lines, &small, "the small module", &hak);
+    h.state_mut().open_module(&large.path);
+    h.run_steps(5);
+    close(&mut h, &Tab::ModuleProperties);
+    close_areas(&mut h);
+    h.run_steps(5);
+    let areas = h.state().ws.as_ref().unwrap().module.areas().unwrap().len();
+    assert_eq!(areas, large.areas, "the large module's areas");
+    let control = timed(
+        &mut h,
+        &mut r,
+        "editors, nothing open, the large module",
+        "pointer",
+        screen,
+        Pointer::Moves,
+    );
+
+    // D20's rest: spells.2da at the window's width.
+    let name = "2DA editor";
+    if editors_wanted(&r, name) {
+        let tables = dir.join("tables");
+        std::fs::create_dir_all(&tables).unwrap();
+        let game = h.state().game.clone().unwrap();
+        let cp = game.codepage();
+        let spells = game.table("spells").unwrap();
+        let open_table = |h: &mut App<'_>, path: &std::path::Path| -> (u32, Tab) {
+            let id = mg_ui::table_view::open_path(h.state_mut(), path).expect("the table");
+            h.run_steps(5);
+            (id, Tab::Table(id))
+        };
+        std::fs::write(tables.join("spells.2da"), spells.to_bytes(cp).unwrap()).unwrap();
+        let (_, t) = open_table(&mut h, &tables.join("spells.2da"));
+        let rect = rect_of(h.state(), &t).expect("the table's tab");
+        let columns = spells.columns().to_vec();
+        let what = format!("{name}, spells.2da ({} columns, {} rows)", columns.len(), spells.len());
+        timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves);
+        // The columns in sight: their heads in the tab, beside the first's.
+        let head = h
+            .query_all_by_label(&columns[0])
+            .map(|n| n.rect())
+            .find(|b| rect.contains(b.center()))
+            .expect("the first column's head");
+        let in_sight = columns
+            .iter()
+            .take_while(|c| {
+                h.query_all_by_label(c).any(|n| {
+                    let b = n.rect();
+                    (b.center().y - head.center().y).abs() < 3.0 && b.left() < rect.right()
+                })
+            })
+            .count();
+        println!("  ({name}: {in_sight} of spells.2da's {} columns in sight)", columns.len());
+        assert!(in_sight > 3 && in_sight < columns.len(), "{name}: {in_sight} columns in sight");
+        close(&mut h, &t);
+        // The same under another name (no description, no game copy):
+        // cut to the columns in sight, then whole.
+        let mut cut = (*spells).clone();
+        while cut.columns().len() > in_sight {
+            cut.remove_column(cut.columns().len() - 1);
+        }
+        std::fs::write(tables.join("mg_cut.2da"), cut.to_bytes(cp).unwrap()).unwrap();
+        std::fs::write(tables.join("mg_wide.2da"), spells.to_bytes(cp).unwrap()).unwrap();
+        let mut took = Vec::new();
+        for (file, what) in [
+            ("mg_cut.2da", format!("its {in_sight} columns in sight")),
+            ("mg_wide.2da", format!("all {} columns", columns.len())),
+        ] {
+            let (_, t) = open_table(&mut h, &tables.join(file));
+            let rect = rect_of(h.state(), &t).expect("the table's tab");
+            let what = format!("{name}, spells.2da's rows as {file}, {what}");
+            took.push(timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves));
+            close(&mut h, &t);
+        }
+        against(&mut lines, &format!("{name}, spells.2da at the full width"), took[0], took[1]);
+
+        // D21: Choose Model open over the haks' models.
+        let placeables = game.table("placeables").unwrap();
+        std::fs::write(tables.join("placeables.2da"), placeables.to_bytes(cp).unwrap()).unwrap();
+        let (id, t) = open_table(&mut h, &tables.join("placeables.2da"));
+        let model = placeables.column("ModelName").expect("ModelName");
+        h.state_mut().tables.iter_mut().find(|d| d.id == id).unwrap().go_to(0, model);
+        // (The Cell panel shown, loudly: the Right Dock may be folded.)
+        h.state_mut().actions.push(Action::ShowPanel(mg_ui::Panel::Cell));
+        h.run_steps(5);
+        assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::Cell), "{name}: no Cell panel");
+        assert!(h.query_by_label("Choose Model…").is_some(), "{name}: no Choose Model…");
+        let what = format!("{name}, placeables.2da's ModelName chosen ({} rows)", placeables.len());
+        let rest = timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves);
+        click(&mut h, "Choose Model…");
+        h.run_steps(5);
+        // (Its list: the first of the models by name, in the Right Dock,
+        // those in sight laid out.)
+        let dock = h.state().right_dock_rect().expect("the Right Dock");
+        let listed = h
+            .query_all_by(|n| n.label().is_some())
+            .filter(|n| dock.contains(n.rect().center()))
+            .skip_while(|n| n.accesskit_node().label().as_deref() != Some("Choose Model…"))
+            .count();
+        assert!(listed > 8, "{name}: Choose Model's list not shown ({listed})");
+        let models = game.resman.list(ResType::MDL).len();
+        let of = format!("{models} models");
+        let what = format!("{name}, Choose Model open ({of})");
+        let it = timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves);
+        against(&mut lines, &what, rest, it);
+        click(&mut h, "Choose Model…");
+        close(&mut h, &t);
+
+        // D21: a described table whose Row column names its own rows.
+        let own = dir.join("described");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("nasher.cfg"), "").unwrap();
+        let mut text = String::from("2DA V2.0\n\n  Label PREREQFEAT1 Other\n");
+        let rows = 20_000;
+        for i in 0..rows {
+            text += &format!("{i} Feat_{i} {} {i}\n", (i * 7) % rows);
+        }
+        std::fs::write(own.join("myfeat.2da"), text).unwrap();
+        std::fs::write(
+            own.join("myfeat.2da.toml"),
+            "[columns.PREREQFEAT1]\nkind = \"row\"\ntable = \"myfeat\"\n",
+        )
+        .unwrap();
+        let (id, t) = open_table(&mut h, &own.join("myfeat.2da"));
+        let begun = Instant::now();
+        let described = |h: &App<'_>| {
+            let doc = h.state().tables.iter().find(|d| d.id == id).unwrap();
+            doc.description().is_some_and(|d| d.column("PREREQFEAT1").is_some())
+        };
+        while !described(&h) {
+            h.run_steps(1);
+            assert!(begun.elapsed() < Duration::from_secs(60), "{name}: myfeat.2da not described");
+        }
+        let mut took = Vec::new();
+        for (column, what) in [(0, "its Label"), (1, "its PREREQFEAT1, a row of itself")] {
+            h.state_mut().tables.iter_mut().find(|d| d.id == id).unwrap().go_to(5, column);
+            h.state_mut().actions.push(Action::ShowPanel(mg_ui::Panel::Cell));
+            h.run_steps(5);
+            assert_eq!(h.state().right_dock_shows(), Some(mg_ui::Panel::Cell), "{name}: no Cell");
+            let what = format!("{name}, a described table of {rows} rows, a cell of {what}");
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+        }
+        let what = format!("{name}, a described table of {rows} rows, a cell naming its own row");
+        against(&mut lines, &what, took[0], took[1]);
+        close(&mut h, &t);
+    }
+
+    // D23's rest: Advanced Search with a plugin's command for the hits.
+    let name = "Advanced Search";
+    if editors_wanted(&r, name) {
+        use mg_ui::search::{AdvancedSearch, Condition, Kind};
+        let mut d = AdvancedSearch {
+            first: Condition { kind: Kind::Variable, name: "*".into(), ..Default::default() },
+            // (Placed objects' alone: a plugin's command is offered for the
+            // ticked hits only where each is something a command takes,
+            // which the module's and the areas' own variables are not.)
+            placed: Some(true),
+            ..Default::default()
+        };
+        h.state_mut().advanced_search(&mut d);
+        let found = d.hits.len();
+        assert!(found > 1_000, "{name}: {found} hits");
+        d.ticked = vec![true; found];
+        h.state_mut().advanced_search = d;
+        open(&mut h, Tab::AdvancedSearch);
+        h.run_steps(5);
+        let rect = rect_of(h.state(), &Tab::AdvancedSearch).expect("Advanced Search's tab");
+        let what = format!("{name}, {found} placed objects' variables ticked");
+        let rest = timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves);
+        let plugins = dir.join("plugins");
+        let plugin = plugins.join("each");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("plugin.cfg"),
+            "[plugin]\nid = \"test.each\"\nname = \"Each\"\nversion = \"1\"\napi = \"0.5\"\n\
+             license = \"MIT\"\n\n[command]\nid = \"each\"\ntitle = \"Each Kind\"\nfor = \"area, \
+             dlg, nss, jui, jrl, fac, creature, door, encounter, item, placeable, sound, store, \
+             trigger, waypoint\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("main.luau"),
+            "local mg = require(\"@moonglow\")\nmg.command(\"each\", function(ctx) end)\n",
+        )
+        .unwrap();
+        h.state_mut().plugin_dir = Some(plugins);
+        h.state_mut().load_plugins();
+        h.state_mut().enable_plugin("test.each", true);
+        h.run_steps(5);
+        let what = format!(
+            "{name}, {found} placed objects' variables ticked, a plugin's command for them"
+        );
+        let it = timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves);
+        against(&mut lines, &what, rest, it);
+        // (The command offered on a ticked hit: its menu.)
+        let hit = h
+            .query_all_by_label_contains(" › ")
+            .map(|n| n.rect())
+            .find(|b| rect.contains(b.center()))
+            .expect("a hit's row");
+        h.hover_at(hit.center());
+        h.run_steps(1);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: hit.center(),
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.run_steps(3);
+        assert!(
+            h.query_by_label("Each Kind").is_some(),
+            "{name}: the plugin's command not offered"
+        );
+        close_menu(&mut h);
+        h.state_mut().enable_plugin("test.each", false);
+        close(&mut h, &Tab::AdvancedSearch);
+    }
+
+    // D24: a conversation's Search.
+    let name = "conversation's Search";
+    if editors_wanted(&r, name) {
+        let t = Tab::Dialog(large.talk);
+        open(&mut h, t.clone());
+        h.run_steps(5);
+        h.state_mut().show_conversation_search(large.talk);
+        h.run_steps(3);
+        let mut took = Vec::new();
+        for (find, n) in [("line 0001", 10), ("road", large.talk_lines)] {
+            {
+                let view = h.state_mut().dialog_views.get_mut(&large.talk).unwrap();
+                view.search.find = find.into();
+                view.search.all_files = false;
+            }
+            h.run_steps(2);
+            let button = h.query_all_by_label("Find").last().expect("Find").rect().center();
+            let what = format!("{name}, the click of Find ({n} found)");
+            landed(&mut h, &mut lines, &what, Pointer::Clicks(button), 4);
+            h.run_steps(3);
+            let results = h.state().dialog_views[&large.talk].search.results.len();
+            assert_eq!(results, n, "{name}: found for {find:?}");
+            let what = format!("{name}, {n} found");
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+        }
+        against(&mut lines, &format!("{name}, {} found", large.talk_lines), took[0], took[1]);
+        close(&mut h, &t);
+    }
+
+    // D24: Build Module's results, in Problems.
+    let name = "Build Module";
+    if editors_wanted(&r, name) {
+        use mg_ui::problems::{Go, Problem, Source};
+        let made = |n: usize| -> Vec<Problem> {
+            (0..n)
+                .map(|i| {
+                    let key = ResKey::parse(&format!("mg_unused{i:05}"), ResType::NSS).unwrap();
+                    let mut p = Problem::new(
+                        mg_module::doctor::Severity::Warning,
+                        format!("mg_unused{i:05}.nss"),
+                        "Unused: nothing in the module runs this script".into(),
+                        Some(Go::Resource(key)),
+                    );
+                    p.unused = Some(mg_module::verify::Unused { key, script: None });
+                    p
+                })
+                .collect()
+        };
+        let mut took = Vec::new();
+        for n in [20, 20_000] {
+            h.state_mut().problems.replace(Source::Build, made(n), None);
+            h.state_mut().problems.select(Some((Source::Build, 0)));
+            h.state_mut().actions.push(Action::ShowPanel(mg_ui::Panel::Problems));
+            h.run_steps(5);
+            assert_eq!(h.state().bottom_dock_shows(), Some(mg_ui::Panel::Problems));
+            let what = format!("{name}'s {n} results in Problems, one chosen");
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+        }
+        against(&mut lines, &format!("{name}'s 20000 results in Problems"), took[0], took[1]);
+        h.state_mut().problems.remove(&Source::Build);
+        h.run_steps(3);
+    }
+
+    // D24: an area's Placeable List in the raw fields view.
+    let name = "raw fields";
+    if editors_wanted(&r, name) {
+        let mut took = Vec::new();
+        for (area, n) in [(large.few, 20), (large.placed, large.placed_count)] {
+            let t = Tab::Gff(ResKey::new(area, ResType::GIT));
+            open(&mut h, t.clone());
+            h.run_steps(5);
+            click(&mut h, &format!("{n} items"));
+            h.run_steps(3);
+            assert!(h.query_by_label_contains("[0] struct").is_some(), "{name}: the list not open");
+            let rect = rect_of(h.state(), &t).expect("the fields' tab");
+            let what = format!("{name} view, an area's Placeable List of {n} opened");
+            took.push(timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves));
+            close(&mut h, &t);
+        }
+        let what =
+            format!("{name} view, an area's Placeable List of {} opened", large.placed_count);
+        against(&mut lines, &what, took[0], took[1]);
+    }
+
+    // D25: Module Properties › Custom Content with a talk map.
+    let name = "Custom Content";
+    if editors_wanted(&r, name) {
+        open(&mut h, Tab::ModuleProperties);
+        h.run_steps(3);
+        click(&mut h, "Custom Content");
+        h.run_steps(5);
+        let mut took = Vec::new();
+        for n in [20, large.map_lines] {
+            write_map(&large.map, n);
+            h.run_steps(5);
+            assert!(h.query_by_label_contains("Next: line").is_some(), "{name}: no room said");
+            let what = format!(
+                "Module Properties › {name}, a talk map of {n} lines ({} in the table)",
+                large.tlk_lines
+            );
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+        }
+        let what = format!("Module Properties › {name}, a talk map of {} lines", large.map_lines);
+        against(&mut lines, &what, took[0], took[1]);
+        close(&mut h, &Tab::ModuleProperties);
+    }
+
+    // D29: the read-only viewer on nwscript.nss.
+    let name = "read-only viewer";
+    if editors_wanted(&r, name) {
+        let mut took = Vec::new();
+        let mut whats = Vec::new();
+        for script in ["nw_c2_default1", "nwscript"] {
+            let key = ResKey::parse(script, ResType::NSS).unwrap();
+            let lines_of = {
+                let game = h.state().game.as_deref().unwrap();
+                let data = game.resman.get(&key).expect("the game's script");
+                data.iter().filter(|b| **b == b'\n').count()
+            };
+            let t = Tab::Resource(key);
+            open(&mut h, t.clone());
+            h.run_steps(10);
+            let rect = rect_of(h.state(), &t).expect("the viewer's tab");
+            let what = format!("{name}, {script}.nss ({lines_of} lines)");
+            took.push(timed(&mut h, &mut r, &what, "pointer", rect, Pointer::Moves));
+            whats.push(what);
+            close(&mut h, &t);
+        }
+        against(&mut lines, &whats[1], took[0], took[1]);
+    }
+
+    // S20 and item 17: the Variables window on a variable of a table's rows.
+    let name = "Variables window";
+    if editors_wanted(&r, name) {
+        use mg_ui::widgets::{FieldTarget, VarRow, VarTableEdit};
+        let git = ResKey::new(large.placed, ResType::GIT);
+        let path = GffPath::root().item("Placeable List", 0);
+        let (mut closed, mut opened, mut whats) = (Vec::new(), Vec::new(), Vec::new());
+        for (var, table) in [("mg_race", "racialtypes"), ("mg_look", "placeables")] {
+            let rows = h.state().game.as_deref().unwrap().table(table).map_or(0, |t| t.len());
+            let mut edit = VarTableEdit::new(FieldTarget::new(git, path.clone(), "VarTable"), &[]);
+            edit.rows = vec![VarRow::new(var, 1, "5"), VarRow::new(&format!("{var}_too"), 1, "")];
+            h.state_mut().var_edit = Some(edit);
+            h.run_steps(5);
+            let what = format!("{name}, a variable of {table}.2da's {rows} rows");
+            closed.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+            let choose = h.query_all_by_value("(choose)").next().expect("the second row's values");
+            choose.click();
+            h.run_steps(3);
+            let filter = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+                n.role() == egui::accesskit::Role::TextInput && n.placeholder() == Some("Filter")
+            };
+            let shown = h.query_all(egui_kittest::kittest::by().predicate(filter)).next().is_some();
+            assert!(shown, "{name}: the values' list not open ({table})");
+            let what = format!("{what}, its list open");
+            opened.push(timed(&mut h, &mut r, &what, "still", screen, Pointer::Rests(corner)));
+            whats.push(what);
+            h.key_press(egui::Key::Escape);
+            h.run_steps(3);
+            h.state_mut().var_edit = None;
+            h.run_steps(3);
+        }
+        let what = format!("{name}, a variable of placeables.2da's rows");
+        against(&mut lines, &what, closed[0], closed[1]);
+        against(&mut lines, &whats[1], opened[0], opened[1]);
+    }
+
+    // Item 17: the module tree with an area opened out.
+    let name = "module tree";
+    if editors_wanted(&r, name) {
+        let mut took = Vec::new();
+        for (area, n) in [(large.few, 20), (large.placed, large.placed_count)] {
+            let arrow = format!("Placed Objects in {area}");
+            click(&mut h, &arrow);
+            h.run_steps(5);
+            let kind = format!("Placeables ({n})");
+            click(&mut h, &kind);
+            h.run_steps(5);
+            // (Its placeables in sight in the tree, under the area's row:
+            // a row out of sight costs nothing.)
+            let tree = h.get_by_label("Module Tree Rows").rect();
+            let rows = h
+                .query_all_by_label("Armoire")
+                .filter(|n| tree.contains(n.rect().center()))
+                .count();
+            assert!(rows >= 20, "{name}: {rows} of the area's placeables in sight");
+            let what =
+                format!("{name}, an area of {n} placeables opened out ({rows} rows in sight)");
+            took.push(timed(&mut h, &mut r, &what, "pointer", screen, Pointer::Moves));
+            // (Closed again: the next area's rows where these were.)
+            click(&mut h, &arrow);
+            h.run_steps(5);
+        }
+        let what = format!("{name}, an area of {} placeables opened out", large.placed_count);
+        against(&mut lines, &what, took[0], took[1]);
+    }
+
+    let many = module_views(&mut h, &mut r, &mut lines, &large, "the large module", &hak);
+    // D27: the same name typed with the text kept in the field (Options ›
+    // Language's switch off), against into the table.
+    let name = "typed line";
+    if editors_wanted(&r, name) {
+        h.state_mut().settings.talk_typed = false;
+        let what = format!("{name}, the large module, the text kept in the field");
+        typed_commit(&mut h, &mut lines, &large, &what, ("Typed In", "Typed Kept"));
+        h.state_mut().settings.talk_typed = true;
+    }
+    against_controlled(
+        &mut lines,
+        &format!("Claims Table of {} areas", large.areas),
+        (few.claims, few.control),
+        (many.claims, many.control),
+    );
+    let _ = control;
+    println!(
+        "against their resting views (the line {} µs):\n  {}",
+        UI_LINE.as_micros(),
+        lines.join("\n  ")
+    );
+    r.end();
 }

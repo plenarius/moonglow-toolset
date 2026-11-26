@@ -1009,6 +1009,70 @@ fn the_rows_words_are_made_for_the_rows_in_sight() {
     assert!(again > 0 && again < 300, "{again} rows' words made again of 3,000");
 }
 
+/// A group of thousands: the rows out of sight above and below the view
+/// passed over in one space each (`tree_rows`: looked at one by one, a
+/// world's 8,000 items' rows took 0.6 ms a frame), those in sight laid
+/// out as before. Paged through by the keys, the cursor's row is drawn,
+/// the rows drawn follow one another a row apart, and they fill the view
+/// down to its foot.
+#[test]
+fn a_group_of_thousands_draws_the_rows_in_sight_as_one_by_one() {
+    let dir = mg_testkit::scratch_dir("ui-tree-thousands-in-sight");
+    let path = sample_module(&dir);
+    let mut m = mg_module::Module::open(&path).unwrap();
+    let blank = Gff::new(*b"UTC ").to_bytes().unwrap();
+    for i in 0..3000 {
+        m.set(ResKey::parse(&format!("crowd{i:04}"), ResType::UTC).unwrap(), blank.clone());
+    }
+    m.save().unwrap();
+    let mut app = app_with(Vec::new());
+    app.settings.no_last_area = true;
+    app.settings.no_smooth_scrolling = true;
+    app.open_module(&path);
+    let mut h = harness(app, 1200.0, 800.0);
+    unfold_left_dock(&mut h);
+    settle(&mut h);
+    h.get_by_label_contains("Creatures (").click();
+    settle(&mut h);
+    tree_row(&h, "crowd0000.utc").click();
+    settle(&mut h);
+    let dock = h.state().left_dock_rect().expect("the Left Dock");
+    for page in 0..12 {
+        h.key_press(egui::Key::PageDown);
+        settle(&mut h);
+        let Some(mg_ui::TreeAt::Resource(k)) = h.state().tree_cursor else {
+            panic!("the cursor on a row ({page})")
+        };
+        let rows: Vec<(usize, f32)> = (painted_colored(&h, dock).into_iter())
+            .filter_map(|(text, _, rect)| {
+                Some((text.strip_prefix("crowd")?.parse().ok()?, rect.top()))
+            })
+            .collect();
+        let at: usize = k.resref.to_string().strip_prefix("crowd").unwrap().parse().unwrap();
+        assert!(rows.iter().any(|(i, _)| *i == at), "page {page}: crowd{at:04} not drawn");
+        assert!(
+            rows.windows(2).all(|w| w[1].0 == w[0].0 + 1),
+            "page {page}: rows one after another: {rows:?}"
+        );
+        let step = rows[1].1 - rows[0].1;
+        assert!(
+            rows.windows(2).all(|w| (w[1].1 - w[0].1 - step).abs() < 0.5),
+            "page {page}: a row apart: {rows:?}"
+        );
+        let last = rows.last().unwrap().1;
+        assert!(last + 2.0 * step > dock.bottom(), "page {page}: down to the foot: {last}");
+    }
+    // At the tree's end, the group's last rows drawn one after another
+    // down to its last, a row apart: the space above them is theirs.
+    h.key_press(egui::Key::End);
+    settle(&mut h);
+    let rows: Vec<(usize, f32)> = (painted_colored(&h, dock).into_iter())
+        .filter_map(|(text, _, rect)| Some((text.strip_prefix("crowd")?.parse().ok()?, rect.top())))
+        .collect();
+    assert_eq!(rows.last().map(|r| r.0), Some(2999), "the last row at the end: {rows:?}");
+    assert!(rows.windows(2).all(|w| w[1].0 == w[0].0 + 1), "one after another: {rows:?}");
+}
+
 /// Tags beside names (M5's W1, the owner's ruling 8: dimmed): a
 /// blueprint's tag dimmed after its words, not in them, which the Filter
 /// finds still and its accessible name and tip say; its row cut to the
@@ -3226,4 +3290,40 @@ fn a_triple_click_on_an_object_s_row_opens_its_properties() {
     assert!(focused(&h, 1), "the Outliner's triple click went to waypoint 1");
     assert!(h.state().dock.find_tab(&window(1)).is_some(), "and opened its Properties");
     assert!(h.state().is_props_popped_out(area), "the docked pane closed");
+}
+
+/// Areas by name keep a space their name begins with, as Aurora sorts
+/// them: a builder's " Tavern" is listed before "Bandit Camp", whatever
+/// its ResRef (#54).
+#[test]
+fn an_area_named_with_a_leading_space_is_listed_first() {
+    let dir = mg_testkit::scratch_dir("ui-tree-leading-space");
+    let mut m = Module::new();
+    let mut info = Gff::new(*b"IFO ");
+    info.root.write(&ifo::MOD_TAG, ExoString::from("SORT"));
+    let areas = [("zz_tavern", " Tavern"), ("aa_bandits", "Bandit Camp"), ("mm_docks", "Docks")];
+    for (resref, name) in areas {
+        let mut a = ifo::MOD_AREA_LIST.new_item();
+        a.write(&ifo::mod_area_list::AREA_NAME, ResRef::from_str(resref).unwrap());
+        info.root.items_mut(&ifo::MOD_AREA_LIST).push(a);
+        let mut are = Gff::new(*b"ARE ");
+        let text = LocString::from_text(Language::ENGLISH, Gender::Male, name);
+        are.root.set("Name", mg_gff::Value::LocString(text));
+        m.set(ResKey::parse(resref, ResType::ARE).unwrap(), are.to_bytes().unwrap());
+    }
+    m.set_info(&info).unwrap();
+    let path = dir.join("sort.mod");
+    m.save_as(&ModuleLocation::Archive(path.clone())).unwrap();
+    let mut app = app_with(Vec::new());
+    app.settings.no_last_area = true;
+    app.settings.area_names = true;
+    app.open_module(&path);
+    let mut h = window_harness(app);
+    // (The builder unfolds the Left Dock, folded at this width: M3 T14.)
+    unfold_left_dock(&mut h);
+    settle(&mut h);
+    let rows = h.get_by_label("Module Tree Rows");
+    let y = |name: &str| rows.get_all_by_label_contains(name).next().unwrap().rect().top();
+    assert!(y("Tavern") < y("Bandit Camp"), "the leading space sorts first");
+    assert!(y("Bandit Camp") < y("Docks"), "the rest by name, not by ResRef");
 }

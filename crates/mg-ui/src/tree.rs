@@ -2268,9 +2268,11 @@ fn tree_rows(app: &mut Moonglow, ui: &mut Ui, filter: &Needle, fold: Option<bool
                 }
             }
             if by_name && named {
-                // (By the name drawn: tags and extensions leave the order.)
+                // (By the name drawn: tags and extensions leave the order.
+                // A space it begins with is kept, as Aurora sorts: builders
+                // put one there to have an area listed first, #54.)
                 let shown = |k: &ResKey| match read.get(k) {
-                    Some((Some(n), _)) => n.trim().to_string(),
+                    Some((Some(n), _)) => n.trim_end().to_string(),
                     _ => k.resref.to_string(),
                 };
                 keys.sort_by_cached_key(|k| (mg_core::text::sort_key(&shown(k)), *k));
@@ -2412,7 +2414,33 @@ fn tree_rows(app: &mut Moonglow, ui: &mut Ui, filter: &Needle, fold: Option<bool
               // (The Areas group's rows scroll by themselves.)
               let well = types == &[ResType::ARE];
               in_well(ui, well, (view, others, !filter.is_empty(), areas_height), |ui| {
-                for &k in keys {
+                // (A group with nothing to bring into view, an area's or
+                // the keys': the rows above the view passed over in one
+                // space, and those below it once the rows reach its foot.
+                // Looked at one by one, a world's 8,000 items' rows out of
+                // sight took 0.6 ms a frame while their group was open.)
+                let height = ui.spacing().interact_size.y;
+                let gap = ui.spacing().item_spacing.y;
+                let step = height + gap;
+                let ours = |k: &ResKey| types.contains(&k.restype);
+                let skips = !well
+                    && !app.tree_reveal.is_some_and(|(k, _)| ours(&k))
+                    && !(cursor_moved
+                        && matches!(cursor, Some(TreeAt::Resource(k)) if ours(&k)));
+                let clip = ui.clip_rect();
+                let mut from = 0;
+                if skips {
+                    let above = ((clip.top() - height - ui.cursor().top()) / step).floor();
+                    from = (above.max(0.0) as usize).min(keys.len());
+                    if from > 0 {
+                        ui.allocate_space(egui::vec2(1.0, from as f32 * step - gap));
+                    }
+                }
+                for (i, &k) in keys.iter().enumerate().skip(from) {
+                    if skips && ui.cursor().top() > clip.bottom() {
+                        ui.allocate_space(egui::vec2(1.0, (keys.len() - i) as f32 * step - gap));
+                        break;
+                    }
                     // Blueprints drag into an area, as from the palette.
                     let blueprint = mg_area::ObjectKind::from_restype(k.restype).is_some();
                     let sense = if blueprint {
@@ -3326,7 +3354,8 @@ pub(crate) fn act_on_object(
         }
         Asked::Properties if targets.len() > 1 => {
             let paths = targets.iter().copied().map(path).collect();
-            crate::properties_panel::pop_out(app, Tab::Instances { area, paths });
+            let paths: Vec<_> = paths;
+            crate::properties_panel::pop_out(app, Tab::instances(area, paths));
         }
         Asked::Properties => {
             let path = path((kind, index));
@@ -3453,10 +3482,7 @@ pub(crate) fn act_on_object(
                     app.tree_cursor = Some(TreeAt::Kind(a, k));
                 }
             }
-            crate::tabs::close_tabs(&mut app.dock, |t| {
-                !matches!(t, Tab::Instance { area: a, .. } | Tab::Instances { area: a, .. }
-                    if *a == area)
-            });
+            crate::tabs::close_tabs(&mut app.dock, |t| !t.edits_in(area));
             if !edits.is_empty() {
                 app.actions.push(Action::Apply(mg_edit::Command::new("Delete", edits)));
             }

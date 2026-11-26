@@ -64,6 +64,12 @@ mod batch5;
 mod batch6;
 #[path = "client_render/batch7.rs"]
 mod batch7;
+#[path = "client_render/batch8d.rs"]
+mod batch8d;
+#[path = "client_render/chrome_reflection.rs"]
+mod chrome_reflection;
+#[path = "client_render/copies.rs"]
+mod copies;
 #[path = "client_render/custom_body.rs"]
 mod custom_body;
 #[path = "client_render/ee_visuals.rs"]
@@ -92,6 +98,8 @@ mod programs;
 mod readings;
 #[path = "client_render/shadows.rs"]
 mod shadows;
+#[path = "client_render/soft.rs"]
+mod soft;
 #[path = "client_render/soft_particles.rs"]
 mod soft_particles;
 #[path = "client_render/transition_outlines.rs"]
@@ -556,7 +564,7 @@ fn fit_camera(r: &mut Renderer, gpu: &Gpu, game: &GameData, scene: &Scene, clien
 fn reference_scenes_match_the_client() {
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -1190,7 +1198,7 @@ fn fog_uniforms_match_the_client() {
 fn grass_and_sky_look() {
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -1252,7 +1260,7 @@ fn grass_and_sky_look() {
 fn sky_under_the_game_s_farthest_camera_look() {
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -1448,7 +1456,7 @@ fn grass_override(
 fn grass_overrides_look() {
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -1889,7 +1897,7 @@ fn particles_look() {
     m.set(ResKey::parse("mg_enter", ResType::NCS).unwrap(), ncs);
     m.save_as(&ModuleLocation::Archive(user.join("modules/MgScene.mod"))).unwrap();
     if std::env::var_os("MG_PREDICT").is_some() {
-        mg_testkit::gpu::hold();
+        crate::common::gpu_after_display();
         let gpu = Gpu::headless().unwrap();
         let (_, are) = build_module(&game, &dir, light);
         let (scene, _) = moonglow_scene(&gpu, &game, &are, light);
@@ -1939,7 +1947,7 @@ fn placeables_look() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2053,7 +2061,7 @@ fn visual_transforms_look() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2159,7 +2167,7 @@ fn items_look() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2237,7 +2245,7 @@ fn creatures_look() {
     use mg_rules::items::{ArmorChannel, set_armor_part_color};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2547,7 +2555,7 @@ fn cutouts_look() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2759,6 +2767,14 @@ fn tdod_fountain(name: &str, overrides: &[(&str, Vec<u8>)]) -> Option<TdodFounta
     std::fs::create_dir_all(dir.join("user/hak")).unwrap();
     std::fs::create_dir_all(dir.join("user/override")).unwrap();
     std::fs::write(dir.join("user/settings.tml"), SETTINGS).unwrap();
+    // (`MG_FOUNTAIN_OVERRIDE=<folder>`: its files in the `override` for
+    // the client and Moonglow alike, a patched `fswater.shd` painting what
+    // it computes; the client's picture kept under the folder's name.)
+    if let Some(extra) = std::env::var_os("MG_FOUNTAIN_OVERRIDE") {
+        for e in std::fs::read_dir(extra).expect("the override folder").flatten() {
+            std::fs::copy(e.path(), dir.join("user/override").join(e.file_name())).unwrap();
+        }
+    }
     // (Highest priority first, as the module lists them.)
     let names = ["tdod_shaders", "tdod_p_tap", "tdod_top"];
     for name in names {
@@ -2817,21 +2833,40 @@ fn tdod_fountain(name: &str, overrides: &[(&str, Vec<u8>)]) -> Option<TdodFounta
 /// client over the fountain's pixels (where Moonglow's drawing with it
 /// differs from one without it) and over the floor regions: the mean
 /// difference per channel. Pictures in `target/test-output/client_tdod_shaders/`.
+/// `MG_FOUNTAIN_OVERRIDE=<folder>` puts its files in the `override` of
+/// both (a patched `fswater.shd` painting what it computes; the pictures in
+/// `client_tdod_shaders_<folder>/`, the client's kept as
+/// `tdod_fountain_<folder>.png`), and `MG_FOUNTAIN_HIDE=<texture>,...`
+/// leaves the meshes of those textures out of Moonglow's pictures.
+///
+/// Read (2026-11-26) with a painting `fswater`: the client's basin water
+/// reads the texture's alpha at its smallest level as 0.73 and the basin's
+/// floor 0.2 to 0.5 m under it, its copy holding the floor and the
+/// column's foot. Moonglow's read alpha 1 (the rippling procedure's gray,
+/// fixed) and, its copy made before the fountain's body (a standard DXT5,
+/// see-through to both), the room's floor 0.9 m down (fixed: the copy is
+/// made after the see-through meshes' solid parts).
 #[test]
 #[ignore]
 fn tdod_custom_shaders_look() {
+    // (With `MG_FOUNTAIN_OVERRIDE`, the scratch folder and the client's
+    // kept picture are named by the override's folder.)
+    let patch = std::env::var_os("MG_FOUNTAIN_OVERRIDE")
+        .map(|d| format!("_{}", Path::new(&d).file_name().unwrap_or_default().to_string_lossy()));
+    let patch = patch.unwrap_or_default();
     let Some(TdodFountain { dir, game, are, git, empty }) =
-        tdod_fountain("client_tdod_shaders", &[])
+        tdod_fountain(&format!("client_tdod_shaders{patch}"), &[])
     else {
         return;
     };
-    let client = client_capture(&dir, "MgScene", "tdod_fountain");
+    let kept = format!("tdod_fountain{patch}");
+    let client = client_capture(&dir, "MgScene", &kept);
     if let Some(c) = &client {
         save_png(c, &dir.join("client.png"));
     }
 
     let tileset = mg_area::tileset(&game, ResRef::from_str("tic01").unwrap()).ok();
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -2843,7 +2878,25 @@ fn tdod_custom_shaders_look() {
         let model = mg_area::AreaModel::read(&game, &are.root, &git.root, tileset.as_ref());
         let area_scene = mg_area::AreaScene::new(&gpu, &game, &model);
         let view = mg_area::View { fog, time: 4.0, ..mg_area::View::of(&model) };
-        let scene = area_scene.scene(&model, &view);
+        let mut scene = area_scene.scene(&model, &view);
+        // (`MG_FOUNTAIN_HIDE=<texture>,...`: meshes of those textures left
+        // out of Moonglow's pictures, to see what lies under them.)
+        if let Ok(hide) = std::env::var("MG_FOUNTAIN_HIDE") {
+            let hide: Vec<&str> = hide.split(',').collect();
+            for inst in &mut scene.instances {
+                let mut state = inst
+                    .state
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| mg_render::scene::MeshState::new(&inst.model));
+                for (m, o) in inst.model.meshes.iter().zip(&mut state.meshes) {
+                    if m.material.texture.as_deref().is_some_and(|t| hide.contains(&t)) {
+                        o.hidden = true;
+                    }
+                }
+                inst.state = Some(std::sync::Arc::new(state));
+            }
+        }
         let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 4);
         r.game_shaders = on;
         r.game_water = water;
@@ -3004,7 +3057,7 @@ fn tdod_custom_shaders_look() {
 fn area_lighting_look() {
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -3309,7 +3362,7 @@ fn model_light_uniforms() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;
@@ -3506,7 +3559,7 @@ fn area_env_map_look() {
     use mg_module::instances::{Placement, Placing, instance};
     let root = corpus!();
     let _ = oracle_tool!("nwn_script_comp");
-    mg_testkit::gpu::hold();
+    crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
         eprintln!("skipped: no GPU");
         return;

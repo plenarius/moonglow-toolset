@@ -3,7 +3,7 @@ type: Finding
 title: Findings
 description: What Moonglow's authors learned about NWN:EE that is undocumented or documented wrongly - item costs, creatures, areas and tiles, talk tables and 2DAs, haks, GFF fields, what Aurora writes - each saying how it was checked, where Moonglow implements it and what nwn.wiki says.
 tags: [findings, engine, aurora, gff, 2da, nwn-wiki]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-20T23:46:40Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T12:35:56Z }
 sources:
   - id: engine
     resource: The game itself (NWN:EE 89.8193.37) - a private nwserver, and the game client read back by screenshot; tests engine_* and client_* in crates/mg-corpus-tests/tests
@@ -1113,6 +1113,74 @@ squares twice as big, as fast.
   whether a scaled object scales the models a chunk emitter throws.
 - **Wiki:** missing.
 
+### A torch-bearer's raised arm, and an item's light on its wearer
+
+A creature holding a torch (base item 15) in its left hand plays
+`torchl` over whatever it plays: the overlay of `a_ba_non_combat`, which
+keys only the left arm (`lshould_g`, `lbicep_g`, `lforearm_g`,
+`lforearm`, `lhand_g`, `lhand` and a shoulder pad's bone), raises the
+arm and holds the torch up. It plays over the base's animation, not at
+rest, and over the bones of animated parts (a robe's, a cloak's). No
+other base item has an overlay (the wiki's Item page names only the
+torch's).
+
+An item's Light property lights its wearer, not its own model. Property
+44's `CostValue` (iprp_lightcost: 1 dim 5 m to 4 bright 20 m) and
+`Param1Value` (iprp_color: 0 blue, 1 yellow, 2 purple, 3 red, 4 green,
+5 orange, 6 white) pick a fixed `visualeffects.2da` row: 153, 157, 161,
+165, 177, 169 or 173 by the color, plus the brightness less 1 (the
+`VFX_DUR_LIGHT_*` rows; green is 177, which `nwscript.nss` calls grey).
+That row's `ProgFX_Duration` names a `progfx.2da` row of type 4:
+`Param1` the animation (`Yello_20m`), `Param3` the shadows,
+`Param7` the model, `fx_light_clr`, whose `AuroraLight01` is read at
+the animation's end (the bright yellow: color 1.75, 1.5, 1, radius 13.3).
+
+The light is the creature's effect, the same for a torch, a cloak, a
+ring and `EffectVisualEffect(160)` on the creature: it stands at the
+creature model's `headconjure` node plus (0, 0.75, 0.6) in the model's
+frame (0.75 m ahead, 0.6 m up), turns with the creature, and follows
+the model (a human, a badger, an ogre). `appearance.2da`'s `HEIGHT`,
+`PERSPACE` and `CREPERSPACE` change nothing. Of two items' lights the
+brightest is taken.
+
+Light added to the floor (linear red, client / Moonglow) by the torch
+of a commoner facing south, boxes along his east-west row (m from him)
+and his north-south line:
+
+| −7 | −5.5 | −4.5 | −3.5 | −2.5 | −1.5 | +1 | +2 | +3 | +4 | +5 | +6 | +8 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.071 / 0.073 | 0.127 / 0.131 | 0.197 / 0.201 | 0.320 / 0.323 | 0.524 / 0.522 | 0.806 / 0.794 | 0.952 / 0.924 | 0.655 / 0.649 | 0.407 / 0.411 | 0.249 / 0.254 | 0.158 / 0.161 | 0.103 / 0.107 | 0.050 / 0.052 |
+
+North 2 and 4 m: 0.481 / 0.500, 0.191 / 0.195; south 2, 4, 6, 8 m:
+0.887 / 0.872, 0.344 / 0.345, 0.134 / 0.137, 0.062 / 0.064. Green over
+red 0.71 on both sides. The root mean square of the log ratio is 0.024
+(the torch turned east 0.024, the cloak 0.022, the ring 0.022, the
+ogre's torch 0.018, a dim green torch 0.027, green over red about 4.5
+on both). Before, Moonglow drew no light; a light at the hand, tried
+first, gave about 0.65 of the client's far off.
+
+- **Checked:** `part_emitters_torch_light` (`client_render/part_emitters.rs`,
+  2026-11-25, EE 89.8193.37): fifteen runs, each beside Moonglow's view
+  of the same scene (`light_<run>_moonglow_on.png`); the arm in
+  `part_emitters_look`'s group h.
+- **Moonglow:** `mg_preview::creature` (`Preview::overlay` for the
+  torch, `Preview::effect_lights` from `item_light` over
+  `DressedLook::brightest_light`, the undrawn slots' lights in
+  `DressedLook::light`), drawn by `mg_preview::compose::Composed` for
+  the area view, the previews and the gallery (`anim::pose_layers_scaled`,
+  `anim::pose_worn_layers`). Tests: `a_torch_in_the_left_hand_raises_the_arm`,
+  `an_item_s_light_is_its_color_s_and_brightness_s_effect`,
+  `a_creature_s_light_is_its_brightest_item_s`,
+  `a_torch_bearer_raises_his_arm_and_lights_around_him`,
+  `the_game_s_torch_raises_the_arm_and_lights` (the install's torch).
+- **Not read:** which of two equally bright lights is taken; the light
+  of an item lying on the ground or of an item's own preview; colors
+  other than yellow and green (they go by the tables); a light on a
+  model without `headconjure` (Moonglow puts it at the origin plus the
+  offset).
+- **Wiki:** the Item page names the torch's overlay; the light's place
+  is missing.
+
 ### A chunk emitter's models are drawn at their own size
 
 A chunk emitter (`chunkName`) throws its models at their own size,
@@ -1371,6 +1439,83 @@ is `default` too, the area's, not `chrome1`.
   (`PLACEABLE_DEFAULT_ENV_MAP`, `Part::env_map_default`); a texture's
   and a creature's `default` in `crates/mg-render/src/renderer.rs`
   (`Instance::env_map_default`).
+- **Wiki:** missing.
+
+### The eighth client batch's smaller readings
+
+- **An item that names no model stops the area from loading.** A
+  creature holding one (an empty `ItemClass` and `DefaultModel`, a
+  class of no model, or a part number past the class's models) leaves
+  the client on the loading screen: its log says "CreateItem: Model …
+  nor the default model could be loaded", then "Message type mismatch".
+  Moonglow draws the creature without the item. Verify warns of it
+  (`item-model`, `mg_rules::appearance::item_without_model`).
+- **A two-digit phenotype's part** (phenotype 15, `pmh15`) takes its
+  textures as a phenotype 0 part does: its own PLT on every mesh, else
+  phenotype 0's by the fallback, else what its mesh names.
+- **Two static placeables of one texture** keep each model's
+  `NO_DISCARD` and opacity: the client's buckets do not reach across
+  models.
+- **A particle's size** is right: beside a card of its width at the
+  same depth it is as wide in both (1.00); the fitted camera of
+  `surfaces_in_the_client` draws the whole picture 3 to 5 percent
+  smaller.
+- **The sandboxed client's CD key copy goes with its run:** a joined DM
+  run with `MG_CLIENT_CDKEY` set joined its server (the character
+  list), and no `cdkey.ini` was left in its scratch folder afterwards
+  (`joined_dm_creator_palette`, 2026-11-25).
+- **Checked:** `batch8d.rs` in `client_render` (2026-11-25).
+- **Wiki:** missing (the item without a model).
+
+### A texture replacement's new name: its material, or the old texture kept
+
+`ReplaceObjectTexture` (and the `TextureReplace` field it saves) draws
+the new name through its material: an MTR of the name with a
+`texture0` is drawn with that texture over a TGA or PLT of the name.
+Where the new name has nothing to draw (an MTR with no `texture0`, even
+beside a TGA of the name, or no resource at all) the client keeps the
+old texture. A body part's own name, put on the part's meshes that name
+another texture, is drawn the other way: without its material, its PLT
+(`part_textures_look`, row J). Creatures and placeables are alike.
+
+- **Checked:** `part_textures_renamed_look` (2026-11-25; six chests
+  and six placeable boxes renamed by the script call, beside Moonglow's
+  field), and `part_textures_look`'s row J again (group `GHIJKL`).
+- **Moonglow:** `crates/mg-preview/src/lib.rs` (`replaced`,
+  `Lookup::renames_to_a_picture`); a part's own name marked
+  `mg_image::plt::plain_name` in `creature.rs` (`every_mesh_in`), which
+  the renderer's `image_of` draws without its MTR.
+- **Wiki:** missing.
+
+### A creature's worn and held items reflect the area's map
+
+A helmet, a shield and a weapon a creature wears or holds reflect the
+area's environment map (its tileset's `EnvMap`, `tic01__ref01` in
+`tic01`), as the creature does, not `chrome1`. A mesh whose texture is
+nowhere, drawn as a white texture of alpha 0, reflects wholly, so the map
+shows over all of it: a helmet's tops were gray in the client and bluish
+in Moonglow until its map was the area's. A placeable's `chrome1` is the
+placeable's alone. And on a placeable whose `Reflection` is `default`, a
+texture's TXI `envmaptexture` naming a map is not taken: the client
+keeps `chrome1` (the TXI's gradient did not show), where Moonglow
+reflected the named one. A held item's top still differs in brightness
+either way, from 30 below the client's to 46 above it (a shield's top:
+95 82 73 in the client, 142 125 112 in Moonglow). The pictures put this
+down to the pose, not the shading: each man holds his box at another
+angle in the client, at his own phase of the idle animation, so the tops
+face other parts of the map. The sides match to a level or two, and the
+Shaders switch changes nothing.
+
+- **Checked:** `chrome1_helmet_reflection_look` (2026-11-25; a worn
+  `helm_241` box, a held shield and a held long sword, with
+  `MG_CHROME_HELD`; the variants `chrome1` and `ref01-gradient`, a
+  gradient over `tic01__ref01.tga`, which shows on the client's items
+  and, since the fix, on Moonglow's), and `chrome1_reflection_look`
+  (boxes over placeables 428 and 447, and a TXI naming a gradient).
+- **Moonglow:** `crates/mg-preview/src/creature.rs` and `item.rs`
+  (a worn or held part's `env_map` is `default`); the TXI case in
+  `crates/mg-render/src/renderer.rs`
+  (`a_texture_s_default_map_is_the_area_s_unless_the_object_names_one`).
 - **Wiki:** missing.
 
 ### The game's shaders and Moonglow's own in stock interiors
@@ -1692,6 +1837,24 @@ placeable's emitters run (a brazier's fire and smoke, either way).
 - **Moonglow:** `crates/mg-area/src/scene.rs` (`object_time`).
 - **Wiki:** missing.
 
+### A Custom Light's flicker plays on a dynamic placeable
+
+The generated model of a Custom Light with a Torch flicker (a light node
+whose `colorkey` is keyed in `default`, compiled to binary by
+`mg_module::lights`; red 255 0 0, radius 4) flickers in the client placed
+dynamic and stays steady placed static. Eight pictures 0.5 to 0.7 s apart,
+the floor's red under each light (0 to 255): static 43.26, 43.22, 43.26,
+43.23, 43.25, 43.24, 43.30, 43.25 (spread 0.08); dynamic 39.71, 35.38,
+39.70, 36.13, 38.10, 37.52, 42.90, 38.20 (spread 7.52, 83% to 99% of the
+static one's against the key table's 70% to 100%). Green and blue do not
+move.
+
+- **Checked:** game client, `batch4.rs`'s `reading_custom_light_flicker`
+  (2026-11-25, 89.8193.37).
+- **Moonglow:** `crates/mg-module/src/lights.rs` (`Flicker`,
+  `flicker_animation`); the area view plays it as it plays any `default`.
+- **Wiki:** missing.
+
 ### A helmet without its model, and bare skin over nothing
 
 A helmet whose `helm_NNN` model isn't there is drawn as its base item's
@@ -1830,7 +1993,19 @@ the hak's TGA of it isn't there.
   procedure whose picture is a DDS (compressed) is drawn flat gray
   (`renderer.rs`'s `procedure_picture`, its gray fitted so that the
   reading's cards draw 86 and 96 of 255 where the client's are 83 and
-  92).
+  92). Shiny water (`bumpmaptexture shinywater` in the TXI) keeps its
+  picture since 2026-11-26: the client draws The Domains of Dread's
+  fountain and ttr01's pools with their DDS whole, where the gray had
+  smoothed the basin's floor out of the water and made its clarity
+  (the smallest mip's alpha, which `fswater` reads) opaque, so a
+  shallow pool hid its shadowed floor (`client_render.rs`'s
+  `tdod_custom_shaders_look` with `MG_FOUNTAIN_OVERRIDE`, `shadows.rs`
+  with `MG_SEE_THROUGH_OVERRIDE`: the client's water painted by
+  patched `fswater` programs). That is the game's `fswater`'s picture
+  (the Shaders switch on): Moonglow's own water, which draws the water
+  opaque and sees no floor under it, keeps the gray (`TextureEntry`'s
+  `lost`; test `moonglow_s_own_water_draws_a_lost_ripple_in_its_gray`),
+  its pictures the same as before pixel for pixel.
 - **Wiki:** missing.
 
 ### A DXT1's one-bit texels are opaque black
@@ -2077,6 +2252,86 @@ and a placeable's shadow at a cliff's top reaches the ground below it.
   read).
 - **Wiki:** "Model Shadows" says the volumes come of a mesh's faces;
   not that a face casts from its front only.
+
+### Grass and a tile's see-through meshes take the shadows
+
+The client darkens grass and the see-through meshes of tiles by the
+sun's shadows as it darkens the ground: their solid texels and their
+soft, blended ones alike. Under a white wall's shadow on ttr01, at
+Shadow Opacity 100 and the reference camera, a field of grass darkens
+by 0.42 where the bare floor does by 0.45; a road decal (transparency
+hint 1, most of its texels soft) by 0.39, as its ground by 0.39; a
+tree's alpha-blended crown by 0.07 where its ground does by 0.16 (the
+crown higher up the screen, where the plane fades). The grass also
+covers a creature's feet in the client's pictures. Water takes none of its own: deep water darkens by
+0.002 where its ground does by 0.37; a shallow pool darkens by 0.26,
+its shadowed floor seen through it. How much of a see-through texture
+is soft decides how much must be: ttr01's grass texture has 3% of its
+texels solid (alpha 0.95 and over) and 10% soft (0.2 to 0.95), its
+road 69% and 16%, its splotch 3% and 33%, its tree leaves 39% and 2%.
+
+- **Checked:** game client, `client_render/shadows.rs`'s
+  `shadows_look` (`MG_SHADOW_GRASS=1`) and `shadows_on_see_through`
+  (ttr01's `ttr01_h01_01` beside a deep pool, a shallow one with
+  `MG_SEE_THROUGH_WATER=53`, and a tall wall shading the tree with
+  `MG_SEE_THROUGH_WALLS=11,31.5`), 2026-11-25.
+- **Moonglow:** since 2026-11-25 (`crates/mg-render/src/renderer.rs`,
+  `shadow.rs`; `mg_shader::Program::darken_by_mask`): the solid part of
+  grass and of a receiver's see-through mesh is drawn before the
+  shadows are laid, and the soft part after them, multiplied by a mask
+  the darkening writes beside the picture ([the research
+  note](research/notes_shaders.md) §G.2). Beside the client's: grass
+  0.40 (0.34 to 0.36 before), the road 0.42 as its ground 0.42 (0.01
+  before), the crown 0.07 as the client's (0.01 before), the road under
+  the tall wall 0.45 as its ground (0.00 before); Fast and High, either
+  Shaders switch. Water as the client's, the shallow pool darkening by
+  0.264 with the Shaders switch on since 2026-11-26 (0.002 before, its
+  floor hidden by the rippling procedure's gray: [A DDS with a
+  rippling procedure loses its picture](#a-dds-with-a-rippling-procedure-loses-its-picture));
+  Moonglow's own water, with it off, hides its floor as before. Test
+  `grass_and_see_through_receivers_are_darkened_in_the_shadow`.
+- **Wiki:** "Model Shadows" says what casts; not what receives.
+
+### What the framebuffer's copies hold
+
+The client copies its picture and depth for the programs that read
+them (`texFBColor`, `texFBDepth`) once a frame, after the see-through
+meshes (alpha-blended cards, `transparencyhint 1`, a DXT5 with no
+`alphamean`) and before shiny water and `sample_framebuffer` meshes:
+the water shows those cards behind it, in color and in depth (a card
+standing in a pool shortens the depth the water reads to it). A soft
+see-through mesh (a DXT5 of alpha 0.5 texels with `transparencyhint
+1`) standing in front of a pool hides the water behind it: the client
+draws no water there, as though the mesh wrote its depth. (A 32-bit
+TGA of alpha 0.5 texels on a placeable's mesh, with or without the
+hint, is drawn opaque.) Which
+copy a mesh reads depends on how it is drawn, not on its program:
+
+- shiny water and a material's `sample_framebuffer` mesh read this
+  frame's copy;
+- a solid or `transparency 1` mesh whose program reads `texFBColor`
+  reads the frame before's finished picture, its additive meshes in it
+  (a card painting half its copy over red grows redder frame by frame
+  and shows the green of an additive card drawn after it);
+- particles read a depth copy without the water.
+
+- **Checked:** game client, `client_render/copies.rs`'s
+  `reading_copy_order` (`MG_COPY_ORDER=color`, `depth`, `particles`,
+  `front`), 2026-11-26.
+- **Moonglow:** shiny water and `sample_framebuffer` meshes read a
+  copy holding the see-through meshes' solid parts since 2026-11-26
+  (`renderer.rs`: their draws sort after them, and the copy is made at
+  the first of them; test
+  `the_water_s_copy_holds_the_see_through_meshes_behind_it`); particles
+  as the client. A see-through mesh's soft part is drawn after the
+  water, without writing depth: not in the copy, and laid over water
+  behind it, where the client draws no water (`MG_COPY_ORDER=front`;
+  [deferred list](deferred.md), "A see-through mesh's soft part and
+  shiny water"). A solid or `transparency 1` mesh reading the copy gets
+  this frame's copy, not the frame before's: no program the game or
+  The Domains of Dread draws reads it so ([deferred list](deferred.md),
+  Settled).
+- **Wiki:** missing.
 
 ### When the client shows an area transition
 
@@ -3282,6 +3537,34 @@ at `ffffffff`.
 
 - **Checked:** against the compiler's output, `script_frontend.rs`,
   `script_analysis.rs`.
+- **Wiki:** missing.
+
+### Aurora's Build compiles as the built-in compiler, but for an include's `main`
+
+Aurora 8193.37-17's Build Module (Compile › Scripts) makes the bytes of
+Moonglow's built-in compiler (neverwinter.nim 0972fc1f) for 992 compiled
+scripts of the base game's (every fourth source, a third of them with
+LF line ends), for constant expressions, unary minus, strings, floats,
+`?:`, shifts, switch, structs, vectors and loops, and for a script both
+in the module and in a hak: the module's copy, for both (the game puts
+a hak above the module). A script's line ends change no compiled byte,
+and Aurora saves the sources as they were. One way of writing differs:
+a script that includes a file with a `void main()` of its own. Aurora
+takes the include's `main` as the entry point, so an `int
+StartingConditional()` script compiles to the include's `main` alone,
+as does a script that is only the `#include`; the built-in compiler
+(since d20453e3, 2026-08) takes the script's own and passes the other
+over as an include. In the game Aurora's condition runs the include's
+`main` and fails, always: a script that returns nothing is a failed
+condition. Moonglow compiles the batch on one compiler a thread: the
+order of a batch changes no byte. By the owner's ruling (2026-11-26)
+Moonglow keeps the script's own entry point and warns of each script
+whose include's entry point Aurora compiles in its place.
+
+- **Checked:** `aurora_scripts` (captures `script-compile-scale/`, made
+  by `tools/aurora/capture_compile_scale.py` and
+  `tools/aurora/build_in_aurora.sh`), `engine_include_entry`.
+- **Moonglow:** `crates/mg-script/nwscript/` (README), `crates/mg-module/src/build.rs`.
 - **Wiki:** missing.
 
 ### Binary models from the game's own compiler

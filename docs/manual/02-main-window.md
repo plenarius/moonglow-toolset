@@ -3,7 +3,7 @@ type: Manual Page
 title: The main window
 description: The main window - the Top Bar, the menus, Quick Open (go to a resource or a command by its name; the Command Palette is Quick Open among the commands), keyboard shortcuts, the three docks (what they hold, folding, the Right Dock's sections, the Properties panel and its states, tool sections) and how they yield in narrow and wide windows, the module tree (names, ResRefs, tags and file extensions), the Outliner (an area's placed objects by kind, with the show or hide eyes), tabs, editor groups, floating windows, dialogs, Escape, undo and redo, the palette and the galleries, the resource browser, the model viewer, the Bottom Dock (Problems, Search Results, the report tabs, the log), the Status Bar (switches, hints, counts and the running job), updates (the check and installing an update from the app), and screen readers and desktop agents.
 tags: [manual, window, shortcuts]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:44:44Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T13:05:50Z }
 ---
 
 # The main window
@@ -204,7 +204,7 @@ keys below; the menus show the current keys.
 | Ctrl+\ | Split Editor: the tab in front to another editor group (a new one at the right where there is one group) |
 | Ctrl+Shift+T | Reopen the tab closed last |
 | Ctrl+Shift+M | Maximize the window of the tab in front, or put it back |
-| F6, Shift+F6 | The arrow keys to the next pane, left to right and then down (the Left Dock's panel shown, the Outliner under it while an area, a conversation, a 2DA, a NUI window, a tileset or the Faction Editor is in front (a conversation's bookmarks, a table's columns, a NUI window's tree, a tileset's parts, the factions; with no module open, a table's columns are the Left Dock's Outliner alone), a floating conversation's, table's or NUI window's window's Outliner at its left, the middle, the Right Dock's panel in front where the dock is drawn (and an open tool section's, each its own stop; and Properties or Tile Properties under it: Properties' page shown on its rail, and Tile Properties' first control, take the keyboard; a table's Cell its Value field and References its button; a talk table's String its Text; a NUI window's Components its Find a control field); a NUI window's Checks, in the Bottom Dock, its first row's control; Problems its first finding's place; a tileset's Textures its first Copy), a floating editor's window's right pane, the log), or the one before: to what the pane has (in the Left Dock the module tree's rows or the resource browser's list, at the row they were at, else the first; in the middle what its tab in front has: a talk table's lines, a 2DA's cells, a tileset's tile table, at its first cell if none is selected, else an area's view; a palette at its first row; the Preview's model, which Left and Right then turn about and Up and Down over or under it, as a drag does). In the log (also after a click in it) they scroll it: Up and Down a line, Page Up and Page Down a page, Home and End to its start and end; Escape hands them back. The pointer coming into an area's view, or moving or pressing in it, gives them back to the view (one resting there does not) |
+| F6, Shift+F6 | The arrow keys to the next pane, left to right and then down (the Left Dock's panel shown, the Outliner under it while an area, a conversation, a 2DA, a NUI window, a tileset or the Faction Editor is in front (a conversation's bookmarks, a table's columns, a NUI window's tree, a tileset's parts, the factions; with no module open, a table's columns are the Left Dock's Outliner alone), a floating conversation's, table's or NUI window's window's Outliner at its left, the middle, the Right Dock's panel in front where the dock is drawn (and an open tool section's, each its own stop; and Properties or Tile Properties under it: Properties' page shown on its rail, and Tile Properties' first control, take the keyboard; a table's Cell its Value field and References its button; a talk table's String its Text; a NUI window's Components its Find a control field); a NUI window's Checks, in the Bottom Dock, its first row's control; Problems its first finding's place; a tileset's Textures its first Copy), a floating editor's window's right pane, the log), or the one before: to what the pane has (in the Left Dock the module tree's rows or the resource browser's list, at the row they were at, else the first; in the middle what its tab in front has: a talk table's lines, a 2DA's cells, a tileset's tile table, at its first cell if none is selected, else an area's view; a palette at its first row (the tileset palette's rows and the Prefabs list too, outlined while they have the keys); the Preview's model, which Left and Right then turn about and Up and Down over or under it, as a drag does). In the log (also after a click in it) they scroll it: Up and Down a line, Page Up and Page Down a page, Home and End to its start and end; Escape hands them back. The pointer coming into an area's view, or moving or pressing in it, gives them back to the view (one resting there does not) |
 | Ctrl+Alt+1, Ctrl+Alt+2, Ctrl+Alt+3 | Show or fold away the Left Dock (on whichever panel it shows, Module or Resources; with no module open too, where it shows Resources), the Right Dock (the palettes and the Preview), the log |
 | Ctrl+Alt+0 | Hide all three, or show them all |
 | Ctrl+Plus (or Ctrl+=), Ctrl+Minus, Ctrl+0 | Zoom In, Zoom Out, Reset Zoom: the whole interface a size larger, a size smaller, or back to 100% (View › Interface Size) |
@@ -535,7 +535,8 @@ Options › General › List areas and blueprints by name**, areas and
 blueprints are listed by their names instead (in the names' order,
 case and accents aside, so `Árboles` stands beside `arboles`, as
 polytonic Greek's `Ἀθῆναι` beside `Αθηναι` and Russian's `ёлка` beside
-`елка`; one without a name keeps its ResRef), areas' tabs are titled by name, the
+`елка`; a space a name begins with is kept, as in Aurora, so a name
+written with one is listed first; one without a name keeps its ResRef), areas' tabs are titled by name, the
 filter finds either, and the pointer resting on a
 row shows its name, its file's name with its extension, and its tag
 where tags are shown.
@@ -753,7 +754,11 @@ Properties). Ctrl+F (**Find**, under Script Editor in **Options › Keyboard**) 
 Filter; there, Escape clears what is typed, and Escape again goes back
 into the rows, where they were; Down goes to the first row the Filter
 finds (the palette's search has the same keys, and Down goes to its
-first row). In the rows, Escape hands the keys back. The row the keys are at is marked, and brought into view.
+first row; so have the hak editor's, the tileset editor's and the
+tiles palette's **Find**, where Down chooses the first row of the table
+or goes to the list's first row, and the Appearance Gallery's, whose Down
+goes to its first picture; the Prefabs list has no search, and its keys
+come with a click or F6). In the rows, Escape hands the keys back. The row the keys are at is marked, and brought into view.
 
 ## The Outliner
 
@@ -1323,9 +1328,19 @@ GFF of fifty thousand fields scrolls as one of fifty.
 
 A picture (a TGA, a DDS, or a PLT in each layer's first color) and a
 sound (a WAV or a BMU) are shown with the hak editor's Preview's viewers:
-the picture fitted to the tab, never enlarged, its size under it ("512
-by 512 pixels"; while a large one is read, "Reading the picture…", the
-window going on meanwhile), and the sound with **Play** and **Stop**, its
+the picture fitted to the tab at first, never enlarged, its size under it
+("512 by 512 pixels"; while a large one is read, "Reading the picture…",
+the window going on meanwhile). The wheel over a picture zooms it about
+the pointer (the pixel under the pointer stays under it), from its fit up
+to 16 times its size, with its pixels kept sharp above actual size, and
+its percent at the corner while it is zoomed; dragging pans a picture
+larger than the tab (it can't be dragged out of it); a double click goes
+from the fit to actual pixels, centered on the point clicked (a small
+picture, already shown at actual size, to four times), and from any zoom
+back to the fit; and with the pointer over it, **+** and **-** zoom and
+**0** fits it again. A picture shown while the room is resized stays
+fitted. The hak editor's Preview zooms its picture the same way. The
+sound with **Play** and **Stop**, its
 size, and a WAVE under `.bmu` marked as one the game does not play. One
 sound plays at a time: another Play anywhere takes over, and the sound
 stops when its tab is closed or put behind another. A model opened
@@ -1580,7 +1595,10 @@ right of its tab bar, **Copy Log** (or View › Copy Log) puts the whole
 log on the clipboard and **Save Log** (View › Save Log…) writes it into
 a text file, each line with its time; **Clear Log** (View › Clear Log)
 empties it: a second Verify's report isn't then mistaken for the
-first's. Where the Bottom Dock is narrow, the three buttons give way
+first's. A line that has more to say (Compile All Scripts') has a
+**Details** button beside it, which opens the lines under it and closes
+them again; Copy Log and Save Log have them whether open or not, indented
+under their line. Where the Bottom Dock is narrow, the three buttons give way
 from the end (Clear Log first): they are in the View menu too. The **Log** switch at the left of the Status
 Bar (or View › Log, Ctrl+Alt+3) opens and closes it; drag its top edge
 to make it higher or lower, down to a line. A new installation of
