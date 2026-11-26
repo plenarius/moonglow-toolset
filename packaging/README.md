@@ -45,6 +45,7 @@ which sets it as it starts (`mg_core::release`). A release:
 | `windows/` | The Inno Setup script, `build-installer.ps1`, `sign.ps1` (Authenticode signing; `build-installer.ps1 -Sign`, the release workflow on tags), and `dxc.ps1` with `dxc/` (the pinned DirectX Shader Compiler: [DXC](#dxc-direct3d-12s-shader-compiler)). The executable's icon and version information come from `apps/moonglow/build.rs`. |
 | `macos/` | `Info.plist` and `build-app.sh`. |
 | `sign-release.sh` | Signs a release's packages' checksums with the owner's minisign key and uploads them ([Signing a release](#signing-a-release)); `minisign.pub` beside it, once made, is the public key built into the app. |
+| `check-release.sh` | Checks a release as the updater does (signature, tag, each package's checksum); run as a release is published by `.github/workflows/release-signed.yml`, which unpublishes one that fails. |
 | `third_party_licenses.py` | Writes `THIRD-PARTY-LICENSES.txt`: every crate the programs are built from, its license, and the license texts, with those of what Moonglow's own crates bundle (`fonts/`, and `icons/`: mg-uikit's Ubuntu Bold and the Lucide notice of its icons) and, on Windows, DXC's (`--dxc`). `crates/mg-uikit/tests/kit/licenses.rs` runs it. |
 
 The application ID is `io.github.moonglow_toolset.Moonglow`
@@ -154,7 +155,9 @@ asking for the password), verifies the signature against
 `packaging/minisign.pub`, and uploads `SHA256SUMS` and
 `SHA256SUMS.minisig` to the release (`gh release upload --clobber`).
 Then publish the release. A package added or rebuilt after signing
-needs the script run again. `MOONGLOW_MINISIGN_KEY` names another
+needs the script run again. A release published unsigned is turned back
+into a draft by `.github/workflows/release-signed.yml`, which checks it
+with `packaging/check-release.sh` as the updater would. `MOONGLOW_MINISIGN_KEY` names another
 secret key file. `crates/mg-update/tests/sign_release.rs` runs the
 script with `gh` and `minisign` stood in for, so the file it writes is
 held to what the app reads.
