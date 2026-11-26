@@ -1,0 +1,29 @@
+name: Release signed
+
+# A release published before packaging/sign-release.sh ran is turned back
+# into a draft: Moonglow refuses to install it, and says so to everyone
+# it offers the update to.
+on:
+  release:
+    types: [published]
+
+jobs:
+  signed:
+    name: Signed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq minisign
+      - name: Checked as the updater checks it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOONGLOW_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if ! packaging/check-release.sh "$TAG"; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true
+            echo "::error::$TAG was unpublished: run packaging/sign-release.sh $TAG, then publish it again"
+            exit 1
+          fi
