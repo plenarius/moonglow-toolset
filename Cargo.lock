@@ -2940,7 +2940,6 @@ dependencies = [
 name = "mg-resman"
 version = "0.0.0"
 dependencies = [
- "memmap2",
  "mg-core",
  "mg-erf",
  "mg-key",

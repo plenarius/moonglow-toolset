@@ -238,7 +238,7 @@ fn main() {
     for key in ["nwn_base.key", "nwn_retail.key"] {
         let ks = KeySet::open(&root.join("data").join(key), &root).unwrap();
         for e in ks.table.entries.iter().filter(|e| e.restype.is_gff()) {
-            add(ks.data(e).unwrap());
+            add(&ks.data(e).unwrap());
         }
     }
     let mut archives = mg_testkit::bundled_modules(&root);
