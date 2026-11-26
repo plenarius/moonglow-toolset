@@ -11,7 +11,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use memmap2::Mmap;
+#[cfg(not(target_family = "wasm"))]
+pub use memmap2::Mmap;
+/// WASI (the browser build) has no memory maps: a file is read whole.
+#[cfg(target_family = "wasm")]
+pub type Mmap = Vec<u8>;
 use mg_core::bin::{BinError, Reader, slice};
 use mg_core::{ResRef, ResType};
 use thiserror::Error;
@@ -159,7 +163,11 @@ impl Bif {
 }
 
 struct OpenBif {
+    #[cfg(not(target_family = "wasm"))]
     map: Mmap,
+    /// WASI: BIFs are read a resource at a time (the base game's are 5 GB, more than a 32-bit memory holds).
+    #[cfg(target_family = "wasm")]
+    file: File,
     table: Bif,
 }
 
@@ -181,7 +189,31 @@ impl std::fmt::Debug for KeySet {
     }
 }
 
+/// WASI: reads a game archive whole.
+#[cfg(target_family = "wasm")]
+pub fn map_file(path: &Path) -> std::io::Result<Mmap> {
+    std::fs::read(path)
+}
+
+/// WASI: a BIF's header and resource table only.
+#[cfg(target_family = "wasm")]
+fn open_bif(path: &Path) -> Result<OpenBif, KeyError> {
+    use std::io::Read;
+    let io = |source| KeyError::Io { path: path.into(), source };
+    let mut file = File::open(path).map_err(io)?;
+    let mut head = vec![0u8; 20];
+    file.read_exact(&mut head).map_err(io)?;
+    let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+    let table = u32::from_le_bytes(head[16..20].try_into().unwrap()) as usize;
+    head.resize(table + count * 16, 0);
+    file.read_exact(&mut head[20..]).map_err(io)?;
+    let table =
+        Bif::read(&head).map_err(|e| KeyError::Bif { path: path.into(), source: Box::new(e) })?;
+    Ok(OpenBif { file, table })
+}
+
 /// Maps a game archive (a KEY, BIF, ERF or HAK) into memory, read-only.
+#[cfg(not(target_family = "wasm"))]
 #[allow(unsafe_code)]
 pub fn map_file(path: &Path) -> std::io::Result<Mmap> {
     let file = File::open(path)?;
@@ -206,10 +238,15 @@ impl KeySet {
             .iter()
             .map(|b| {
                 let path = install_root.join(&b.filename);
-                let map = map(&path)?;
-                let table = Bif::read(&map)
-                    .map_err(|e| KeyError::Bif { path: path.clone(), source: Box::new(e) })?;
-                Ok(OpenBif { map, table })
+                #[cfg(target_family = "wasm")]
+                return open_bif(&path);
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let map = map(&path)?;
+                    let table = Bif::read(&map)
+                        .map_err(|e| KeyError::Bif { path: path.clone(), source: Box::new(e) })?;
+                    Ok(OpenBif { map, table })
+                }
             })
             .collect::<Result<Vec<_>, KeyError>>()?;
         // Later entries win, as in the engine's key table lookup.
@@ -224,7 +261,7 @@ impl KeySet {
     }
 
     /// The bytes of a listed resource.
-    pub fn data(&self, entry: &KeyEntry) -> Result<&[u8], KeyError> {
+    pub fn data(&self, entry: &KeyEntry) -> Result<std::borrow::Cow<'_, [u8]>, KeyError> {
         let dangling = || KeyError::Dangling {
             resref: entry.resref,
             restype: entry.restype,
@@ -233,11 +270,31 @@ impl KeySet {
         };
         let bif = self.bifs.get(entry.bif).ok_or_else(dangling)?;
         let res = bif.table.resource(entry.slot).ok_or_else(dangling)?;
-        Ok(slice(&bif.map, res.offset as usize, res.size as usize)?)
+        #[cfg(not(target_family = "wasm"))]
+        return Ok(std::borrow::Cow::Borrowed(slice(
+            &bif.map,
+            res.offset as usize,
+            res.size as usize,
+        )?));
+        #[cfg(target_family = "wasm")]
+        {
+            use std::io::{Read, Seek, SeekFrom};
+            let io = |source| KeyError::Io { path: self.path.clone(), source };
+            // (WASI has no dup: `&File` reads and seeks, and the build is single-threaded.)
+            let mut f = &bif.file;
+            f.seek(SeekFrom::Start(u64::from(res.offset))).map_err(io)?;
+            let mut out = vec![0u8; res.size as usize];
+            f.read_exact(&mut out).map_err(io)?;
+            Ok(std::borrow::Cow::Owned(out))
+        }
     }
 
     /// Looks up and returns a resource's bytes.
-    pub fn get(&self, resref: &ResRef, restype: ResType) -> Option<Result<&[u8], KeyError>> {
+    pub fn get(
+        &self,
+        resref: &ResRef,
+        restype: ResType,
+    ) -> Option<Result<std::borrow::Cow<'_, [u8]>, KeyError>> {
         self.find(resref, restype).map(|e| self.data(e))
     }
 }
@@ -307,7 +364,7 @@ mod tests {
         std::fs::write(dir.join("data/t.key"), key).unwrap();
         let ks = KeySet::open(&dir.join("data/t.key"), &dir).unwrap();
         let rr = ResRef::from_str("classes").unwrap();
-        assert_eq!(ks.get(&rr, ResType::TWODA).unwrap().unwrap(), b"abc");
+        assert_eq!(&*ks.get(&rr, ResType::TWODA).unwrap().unwrap(), b"abc");
         assert!(ks.get(&rr, ResType::TXT).is_none());
     }
 

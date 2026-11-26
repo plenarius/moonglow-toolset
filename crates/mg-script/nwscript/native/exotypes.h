@@ -87,7 +87,7 @@ namespace std
 };
 #endif
 
-#if ((defined __linux__) || (defined __APPLE__))
+#if ((defined __linux__) || (defined __APPLE__) || (defined __wasi__))
 #define stricmp strcasecmp
 #define strnicmp strncasecmp
 #endif // LINUX
