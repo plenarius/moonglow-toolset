@@ -6,10 +6,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use memmap2::Mmap;
 use mg_core::{ResRef, ResType};
 use mg_erf::{Entry, Erf};
 use mg_key::KeySet;
+use mg_key::Mmap;
 
 use crate::{ResError, ResKey};
 
@@ -132,7 +132,6 @@ impl Container for KeyContainer {
         let e = self.0.find(&key.resref, key.restype).ok_or(ResError::NotFound(*key))?;
         self.0
             .data(e)
-            .map(Cow::Borrowed)
             .map_err(|e| ResError::Container { path: self.0.path.clone(), message: e.to_string() })
     }
 
@@ -179,6 +178,15 @@ fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::
             done += n;
         }
         Ok(())
+    }
+    // WASI (the browser build): no positional read, so the handle seeks.
+    #[cfg(not(any(unix, windows)))]
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        // (WASI has no dup: `&File` reads and seeks, and the build is single-threaded.)
+        let mut f = file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read_exact(buf)
     }
 }
 
