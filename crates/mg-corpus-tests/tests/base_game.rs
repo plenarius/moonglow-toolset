@@ -32,7 +32,7 @@ fn every_key_resource_is_readable_and_gffs_round_trip() {
                 if !e.restype.is_gff() {
                     return None;
                 }
-                match Gff::read(data) {
+                match Gff::read(&data) {
                     Err(err) => Some(format!("{name}: {err}")),
                     Ok(g) => {
                         let back = Gff::read(&g.to_bytes().unwrap()).unwrap();
