@@ -579,6 +579,7 @@ pub(crate) fn list(dirs: &[PathBuf], project: Option<&Path>) -> Result<Output> {
                     );
                     all.push(json!({
                         "id": m.id, "name": m.name, "version": m.version, "api": m.api,
+                        "layonara_api": m.layonara_api,
                         "license": m.license, "description": m.description,
                         "authors": m.authors, "folder": p.dir.display().to_string(),
                         "commands": m.commands.iter().map(|c| json!({

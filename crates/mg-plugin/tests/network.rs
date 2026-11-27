@@ -1,4 +1,4 @@
-//! API 0.10: the network a plugin reaches (declared hosts, asked once),
+//! Layonara API 1: the network a plugin reaches (declared hosts, asked once),
 //! signing in by a device code, and lossless GFF JSON, against a stub
 //! server that plays both the issuer and the service.
 
@@ -325,7 +325,7 @@ fn the_network_is_the_declared_hosts_with_leave_from_a_command() {
     std::fs::write(
         dir.join("plugin.cfg"),
         "[plugin]\nid = \"t.net\"\nname = \"Net\"\nversion = \"1\"\napi = \"0.10\"\n\
-         license = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
          [command]\nid = \"get\"\ntitle = \"Get\"\n\n[check]\nid = \"c\"\ntitle = \"C\"\n",
     )
     .unwrap();

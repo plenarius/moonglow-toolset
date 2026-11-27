@@ -1,4 +1,4 @@
-//! Signing in (API 0.10): OAuth 2.0's device authorization (RFC 8628)
+//! Signing in (Layonara API 1): OAuth 2.0's device authorization (RFC 8628)
 //! against an OpenID issuer a plugin's manifest declares (`[signin]`),
 //! run by the host. The refresh token is kept in the system's keychain
 //! (or, where there is none, in memory for the session); access tokens

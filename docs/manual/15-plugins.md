@@ -14,7 +14,7 @@ doesn't have: **commands** (a batch edit, a report, a generator) and
 plugin is a folder with a few text files; anyone can write one
 ([Writing plugins](16-writing-plugins.md)).
 
-**Plugins are experimental.** The plugin API (version 0.12) may change in a
+**Plugins are experimental.** The plugin API (version 0.9) may change in a
 later release as the people who write plugins try it. A plugin written for
 an older version of the API runs (each version only adds to the one
 before); one written for a version this Moonglow doesn't have is not run:
@@ -59,7 +59,7 @@ A plugin's code runs in a sandbox. It can:
   it ask again. Disabling, removing or installing the plugin anew
   forgets it too;
 - send to and receive from the hosts **its manifest names**, **if you
-  allow it** (since plugin API 0.10): the Plugins tab lists them
+  allow it** (since Layonara API 1): the Plugins tab lists them
   ("Talks to: …") before you ever enable it, and the plugin asks before
   its first request, once for all of them: "*Plugin* wants to send and
   receive data with *hosts*. It can send what it reads of your module
@@ -68,7 +68,7 @@ A plugin's code runs in a sandbox. It can:
   only those hosts. What you allowed is kept as a folder's leave is
   (for the plugin's code as it is), the Plugins tab says which hosts,
   and **Forget** takes it back;
-- sign you in to a service its manifest names (since plugin API 0.10):
+- sign you in to a service its manifest names (since Layonara API 1):
   Moonglow, not the plugin, shows the code to enter and the page to enter
   it at (**Open Browser**, **Copy Code**), and keeps the sign-in in your
   system's keychain (Windows' Credential Manager, the macOS Keychain, the
@@ -78,7 +78,7 @@ A plugin's code runs in a sandbox. It can:
   the Plugins tab, Forget, disabling and removing the plugin sign you out
   (the service is told, and the keychain's entry deleted);
 - download a whole hak into your hak folder from one of those hosts
-  (since plugin API 0.11, in Moonglow's Layonara build): it asks first,
+  (since Layonara API 1): it asks first,
   as for writing a hak ("*Plugin* wants to download the hak *name*.hak
   (*size* MB) from *host* into your hak folder…"). The download shows its
   progress in the status bar and stops on **Cancel**; one cut short goes
@@ -91,8 +91,8 @@ A plugin's code runs in a sandbox. It can:
   released copy); take it out of that list to read the released copy
   again.
 
-A command that makes a module (since plugin API 0.12, in Moonglow's
-Layonara build) is offered with no module open too: in **File** after
+A command that makes a module (since Layonara API 1, in Moonglow's
+Layonara build only) is offered with no module open too: in **File** after
 **Open Folder…** and on the Welcome page. It writes the module's files
 into a folder you choose (a zip's, with the leave asked for any folder)
 and Moonglow then opens that folder, asking first to save the open

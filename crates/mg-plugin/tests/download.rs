@@ -1,4 +1,4 @@
-//! API 0.11: `ctx.hak:download`, a whole hak streamed into the hak folder
+//! Layonara API 1: `ctx.hak:download`, a whole hak streamed into the hak folder
 //! from a declared host, checked by its size and SHA-256, resumed where
 //! it stopped, and put in place by the host with the job's haks.
 
@@ -125,8 +125,8 @@ fn plugin(dir: &Path, sha256: &str, bytes: usize) -> Plugin {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
         dir.join("plugin.cfg"),
-        "[plugin]\nid = \"t.dl\"\nname = \"Dl\"\nversion = \"1\"\napi = \"0.11\"\n\
-         license = \"MIT\"\n\n[network]\nhosts = \"forge.example.org\"\n\n\
+        "[plugin]\nid = \"t.dl\"\nname = \"Dl\"\nversion = \"1\"\napi = \"0.10\"\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n[network]\nhosts = \"forge.example.org\"\n\n\
          [signin]\nid = \"forge\"\nissuer = \"https://forge.example.org/o/\"\n\
          client = \"dl\"\nscopes = \"openid\"\n\n\
          [command]\nid = \"get\"\ntitle = \"Get\"\n\n[check]\nid = \"c\"\ntitle = \"C\"\n",

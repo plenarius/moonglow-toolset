@@ -171,7 +171,7 @@ pub enum Item {
     Wizards,
     /// The enabled plugins' commands.
     PluginCommands,
-    /// The enabled plugins' commands that make a module (API 0.12).
+    /// The enabled plugins' commands that make a module (Layonara API 1).
     PluginNewModule,
     /// A command, and the enabled plugins' entries of a kind after it in
     /// a submenu of the command's name where there are any (File › Export

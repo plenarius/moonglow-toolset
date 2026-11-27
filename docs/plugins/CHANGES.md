@@ -3,7 +3,7 @@ type: Changelog
 title: Plugin API changes
 description: What changed in each version of the plugin API, and what a plugin written for the version before has to change.
 tags: [plugins, api, changelog]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T12:00:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-09T00:38:51Z }
 ---
 
 # Plugin API changes
@@ -14,64 +14,11 @@ each version may change what the one before had. This file lists each
 version's changes and what a plugin written for the version before has
 to change.
 
-## 0.12
-
-In Moonglow's Layonara build (the fork's `layonara` branch), not in
-upstream Moonglow. Only an addition: a plugin written for 0.11 or before
-runs as it is. A plugin that uses what is new says `api = "0.12"`.
-
-- **A command that makes a module.** `[command] new = "module"`: it
-  runs with no module open as well as with one (an empty `ctx.module`,
-  and no edits), and is in File after Open Folder… and on the Welcome
-  page's Start, besides the Plugins menu.
-- **Unzipping into a folder.** `folder:unzip(bytes, { strip })` writes a
-  zip's files, folders and all, into a folder the user chose, when the
-  handler returns, with `folder:write`'s leave; hidden files and links
-  are left out (`skipped`), a path out of the folder is an error.
-  Returns `{ files, skipped }`.
-- **Opening it.** `folder:open({ target })` opens the folder as the
-  module once its files are written, as File › Open Folder does, a
-  nasher project as the target named.
-- **Tests.** `written` lists `unzip`'s files by their paths;
-  `opened` and `opened_as` hold the job to the folder it opens.
-
-## 0.11
-
-In Moonglow's Layonara build (the fork's `layonara` branch), not in
-upstream Moonglow. Only an addition: a plugin written for 0.10 or before
-runs as it is. A plugin that uses what is new says `api = "0.11"`.
-
-- **Downloading a hak.** `ctx.hak:download(hak, { url, sha256, bytes,
-  signin, above_nwsync })` streams a whole hak (up to 512 MB) from one
-  of the plugin's declared hosts into the user's hak folder, as
-  `hak.hak.part`, never through the plugin's memory, with the sign-in's
-  token as `ctx.net:request` sends it. No time limit while bytes arrive
-  (60 seconds without one ends it), progress in the status bar, Cancel;
-  the next download of the hak goes on from where one stopped (a
-  `Range` request), and a file whose size or SHA-256 isn't the one given
-  is not kept. A hak with that SHA-256 already is not downloaded again.
-  The user's leave is the one `ctx.hak:write` asks for; when the handler
-  returns the hak takes the place of the one there (kept as `.bak`) and
-  goes with the command's edits (Undo puts the old one back). Commands
-  and wizards only. Returns `{ downloaded, bytes, resumed }`.
-- **Above NWSync.** `above_nwsync = true` names the hak in the
-  builder's own `.moonglow/user.toml` (`[haks] above_nwsync`): Moonglow
-  layers it over the project's NWSync content, so a reworked tileset
-  wins over its released copy. Every other hak keeps the game's order.
-- **Tests.** A test's download goes into a scratch hak folder;
-  `downloaded = [...]` and `above_nwsync = [...]` hold the job to what
-  it downloaded, and `hak_folder = "..."` puts a folder's haks in the
-  scratch hak folder first (a hak there already).
-
 ## 0.10
 
-In Moonglow's Layonara build (the fork's `layonara` branch). Upstream
-Moonglow 5.4.0 numbers its own addition 0.10 too, and has only that (the
-seeds, first below): the fork's 0.10 has both, so a plugin written for
-upstream's 0.10 runs here. Only an addition: a plugin written for 0.9 or
-before runs as it is, and has nothing to change. A plugin that uses what
-is new says `api = "0.10"`, so that a Moonglow without it refuses it
-with the reason.
+In Moonglow 5.4.0. Only an addition: a plugin written for 0.9 or
+before runs as it is, and has nothing to change. A plugin that uses
+what is new says `api = "0.10"`.
 
 - **Seeds for `ctx.terrain`**, so that an area painted by a plugin can
   be made again tile for tile. `ctx.terrain:seed(n)` begins the job's
@@ -86,43 +33,6 @@ with the reason.
   local area = ctx.terrain:open("market", { seed = 7 })
   area:paint(2, 3, "Grass")
   ```
-- **The network.** A manifest may declare the hosts its plugin talks
-  to, `[network] hosts = "api.example.org"` (exact names, no wildcards,
-  IP addresses or ports). `ctx.net:request{ url, method, headers, body,
-  json, signin }` sends a request to one of them over HTTPS and returns
-  `{ status, ok, headers, body }`; a redirect is returned, not followed.
-  The user is asked once, before the first request, for all the
-  plugin's hosts; the answer is kept for the plugin's code as it is,
-  shown on the Plugins tab (which lists the hosts before the plugin is
-  ever enabled) and taken back by Forget, disabling or removing it. Only
-  a command's job and a wizard's reach the network (a check, an event's
-  handler, a panel's view, an exporter and an importer don't). Limits:
-  30 seconds a request, 64 MB a body, 200 requests a job; Cancel lets go
-  of a request under way. `mg plugin run` (and `import`, `wizard`)
-  reaches only the hosts `--allow-network HOST` names, and
-  `--allow-network-insecure` plain HTTP to this computer, for tests.
-- **Signing in.** `[signin] id, issuer, client, scopes` declares an
-  OpenID issuer with the OAuth 2.0 device flow (RFC 8628), a public
-  client. `ctx.signin:start(id)` signs the user in: Moonglow shows the
-  code and the page to enter it at (Open Browser, Copy Code) and polls
-  the issuer; `status(id)` and `stop(id)` (which revokes the refresh
-  token) go with it. The refresh token is kept in the system's keychain
-  (Credential Manager, Keychain, Secret Service; where there is none,
-  for the session), access tokens in memory; `ctx.net:request{ signin =
-  id }` sends the access token as the Authorization header, refreshed
-  when it runs out or is refused, and the plugin never sees either.
-  The Plugins tab's Sign Out does what `stop` does.
-- **JSON.** `mg.json.encode`, `decode`, `raw` and `null`, lossless: a
-  whole number past 2⁵³ (a GFF's 64-bit fields) decodes as a raw value
-  that encodes as its digits again, empty arrays stay arrays, null
-  stays. `ctx.module:json(name)` (and `ctx.game:json`) gives a GFF as
-  `mg gff` writes its JSON, `ctx.edit:write_json(name, json)` writes
-  one from it (text, or what `decode` made of it). The example
-  `area-share` signs in, sends an area and fetches it back.
-- **Tests against a stub.** A plugin's tests (`mg plugin test`) answer
-  its requests from `[[test.reply]]`, hold what it sent to
-  `[[test.request]]`, and sign it in with `signed_in = "name"` (or run
-  the device flow against replies of the issuer's).
 
 ## 0.9
 
@@ -619,3 +529,88 @@ The first version, in Moonglow 1.0.0. Experimental.
   `ctx.log`, `ctx.progress`, `ctx.ui` (message, confirm, form) and
   `ctx.plugin`.
 - `require` for the plugin's own files.
+
+## Layonara API 1
+
+In Moonglow's Layonara build (the fork's `layonara` branch), not in
+upstream Moonglow. Numbered apart from `api`, which is upstream's alone:
+a manifest that uses any of this says `layonara_api = "1"` beside its
+`api`, so that a Moonglow without it refuses the plugin with the reason
+(here, `[network]`, `[signin]` and `new = "module"` are refused without
+it; `mg.layonara_api` is `"1"` here, `nil` elsewhere). A plugin that uses
+none of it has nothing to change. (Before, the fork numbered these
+additions 0.10, 0.11 and 0.12 of `api`; upstream gives those numbers to
+its own, so a fork plugin says `api = "0.10"` and `layonara_api = "1"`.)
+
+- **The network.** A manifest may declare the hosts its plugin talks
+  to, `[network] hosts = "api.example.org"` (exact names, no wildcards,
+  IP addresses or ports). `ctx.net:request{ url, method, headers, body,
+  json, signin }` sends a request to one of them over HTTPS and returns
+  `{ status, ok, headers, body }`; a redirect is returned, not followed.
+  The user is asked once, before the first request, for all the
+  plugin's hosts; the answer is kept for the plugin's code as it is,
+  shown on the Plugins tab (which lists the hosts before the plugin is
+  ever enabled) and taken back by Forget, disabling or removing it. Only
+  a command's job and a wizard's reach the network (a check, an event's
+  handler, a panel's view, an exporter and an importer don't). Limits:
+  30 seconds a request, 64 MB a body, 200 requests a job; Cancel lets go
+  of a request under way. `mg plugin run` (and `import`, `wizard`)
+  reaches only the hosts `--allow-network HOST` names, and
+  `--allow-network-insecure` plain HTTP to this computer, for tests.
+- **Signing in.** `[signin] id, issuer, client, scopes` declares an
+  OpenID issuer with the OAuth 2.0 device flow (RFC 8628), a public
+  client. `ctx.signin:start(id)` signs the user in: Moonglow shows the
+  code and the page to enter it at (Open Browser, Copy Code) and polls
+  the issuer; `status(id)` and `stop(id)` (which revokes the refresh
+  token) go with it. The refresh token is kept in the system's keychain
+  (Credential Manager, Keychain, Secret Service; where there is none,
+  for the session), access tokens in memory; `ctx.net:request{ signin =
+  id }` sends the access token as the Authorization header, refreshed
+  when it runs out or is refused, and the plugin never sees either.
+  The Plugins tab's Sign Out does what `stop` does.
+- **JSON.** `mg.json.encode`, `decode`, `raw` and `null`, lossless: a
+  whole number past 2⁵³ (a GFF's 64-bit fields) decodes as a raw value
+  that encodes as its digits again, empty arrays stay arrays, null
+  stays. `ctx.module:json(name)` (and `ctx.game:json`) gives a GFF as
+  `mg gff` writes its JSON, `ctx.edit:write_json(name, json)` writes
+  one from it (text, or what `decode` made of it). The example
+  `area-share` signs in, sends an area and fetches it back.
+- **Tests against a stub.** A plugin's tests (`mg plugin test`) answer
+  its requests from `[[test.reply]]`, hold what it sent to
+  `[[test.request]]`, and sign it in with `signed_in = "name"` (or run
+  the device flow against replies of the issuer's).
+- **Downloading a hak.** `ctx.hak:download(hak, { url, sha256, bytes,
+  signin, above_nwsync })` streams a whole hak (up to 512 MB) from one
+  of the plugin's declared hosts into the user's hak folder, as
+  `hak.hak.part`, never through the plugin's memory, with the sign-in's
+  token as `ctx.net:request` sends it. No time limit while bytes arrive
+  (60 seconds without one ends it), progress in the status bar, Cancel;
+  the next download of the hak goes on from where one stopped (a
+  `Range` request), and a file whose size or SHA-256 isn't the one given
+  is not kept. A hak with that SHA-256 already is not downloaded again.
+  The user's leave is the one `ctx.hak:write` asks for; when the handler
+  returns the hak takes the place of the one there (kept as `.bak`) and
+  goes with the command's edits (Undo puts the old one back). Commands
+  and wizards only. Returns `{ downloaded, bytes, resumed }`.
+- **Above NWSync.** `above_nwsync = true` names the hak in the
+  builder's own `.moonglow/user.toml` (`[haks] above_nwsync`): Moonglow
+  layers it over the project's NWSync content, so a reworked tileset
+  wins over its released copy. Every other hak keeps the game's order.
+- **Tests.** A test's download goes into a scratch hak folder;
+  `downloaded = [...]` and `above_nwsync = [...]` hold the job to what
+  it downloaded, and `hak_folder = "..."` puts a folder's haks in the
+  scratch hak folder first (a hak there already).
+- **A command that makes a module.** `[command] new = "module"`: it
+  runs with no module open as well as with one (an empty `ctx.module`,
+  and no edits), and is in File after Open Folder… and on the Welcome
+  page's Start, besides the Plugins menu.
+- **Unzipping into a folder.** `folder:unzip(bytes, { strip })` writes a
+  zip's files, folders and all, into a folder the user chose, when the
+  handler returns, with `folder:write`'s leave; hidden files and links
+  are left out (`skipped`), a path out of the folder is an error.
+  Returns `{ files, skipped }`.
+- **Opening it.** `folder:open({ target })` opens the folder as the
+  module once its files are written, as File › Open Folder does, a
+  nasher project as the target named.
+- **Tests.** `written` lists `unzip`'s files by their paths;
+  `opened` and `opened_as` hold the job to the folder it opens.

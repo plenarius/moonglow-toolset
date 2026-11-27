@@ -1,4 +1,4 @@
--- Area share: ctx.signin, ctx.net and the lossless JSON of API 0.10.
+-- Area share: ctx.signin, ctx.net and the lossless JSON of Layonara API 1.
 local mg = require("@moonglow")
 
 local SERVICE = "https://areas.example.org/v1/areas/"

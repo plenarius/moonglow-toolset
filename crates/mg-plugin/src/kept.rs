@@ -121,7 +121,7 @@ pub struct HakWritten {
     /// Resources added to it, and those of the same name replaced.
     pub added: usize,
     pub replaced: usize,
-    /// The hak was put in place whole, downloaded (API 0.11).
+    /// The hak was put in place whole, downloaded (Layonara API 1).
     pub whole: bool,
     before: Option<PathBuf>,
     after: PathBuf,

@@ -1,4 +1,4 @@
-//! `ctx.hak:download` (API 0.11, Moonglow's Layonara build): a whole hak
+//! `ctx.hak:download` (Layonara API 1): a whole hak
 //! streamed from a host the plugin declares into the user's hak folder,
 //! beside the hak as `<hak>.hak.part`, never through the plugin's memory;
 //! checked by its size and SHA-256, and handed back with the job's haks to

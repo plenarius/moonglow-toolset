@@ -139,7 +139,7 @@ pub struct Plugins {
     /// The open panels (API 0.6), by plugin and panel id: what each
     /// showed last, and its render under way.
     pub panels: std::collections::HashMap<(String, String), crate::plugin_kinds::PanelState>,
-    /// The network plugins' commands reach (API 0.10), made when one
+    /// The network plugins' commands reach (Layonara API 1), made when one
     /// first does: HTTPS, and the system's keychain for sign-ins.
     pub network: Option<mg_plugin::Network>,
     /// What a sign-in's question's buttons asked for, done the next frame
@@ -374,7 +374,7 @@ pub struct PluginCommand {
     pub targets: Vec<mg_plugin::Target>,
     /// The submenus it is in, in every menu it is in (API 0.7's `menu`).
     pub menu: Vec<String>,
-    /// It makes a module (API 0.12's `new = "module"`): it runs with none
+    /// It makes a module (Layonara API 1's `new = "module"`): it runs with none
     /// open, and is in File and on the Welcome page.
     pub new_module: bool,
 }
@@ -711,9 +711,9 @@ struct JobHost {
     answers: RefCell<VecDeque<Option<Answer>>>,
     /// An event's job: what was allowed before is not asked again.
     granted: Option<Granted>,
-    /// A plugin's job that may reach the network (API 0.10).
+    /// A plugin's job that may reach the network (Layonara API 1).
     net: Option<NetGrants>,
-    /// Where its haks are written, and downloaded into (API 0.11).
+    /// Where its haks are written, and downloaded into (Layonara API 1).
     hak_dir: Option<std::path::PathBuf>,
 }
 
@@ -1401,8 +1401,8 @@ impl Moonglow {
         self.sign_out_plugin(id);
     }
 
-    /// Signs a plugin out of the services its manifest signs in to (API
-    /// 0.10): its tokens revoked at the issuer, on a thread, and deleted
+    /// Signs a plugin out of the services its manifest signs in to
+    /// (Layonara API 1): its tokens revoked at the issuer, on a thread, and deleted
     /// from the keychain.
     pub fn sign_out_plugin(&mut self, id: &str) {
         let found = (self.plugins.installed.iter())
@@ -2126,7 +2126,7 @@ impl Moonglow {
     }
 
     /// [`run_plugin`](Self::run_plugin), `anywhere` with no module open
-    /// too (a command that makes one, API 0.12).
+    /// too (a command that makes one, Layonara API 1).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_plugin_on(
         &mut self,

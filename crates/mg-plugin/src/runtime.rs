@@ -215,13 +215,13 @@ pub(crate) struct Shared {
     /// have ended: none until [`start`] has the plugin's code run.
     budget: Option<std::time::Duration>,
     deadline: std::cell::Cell<Option<std::time::Instant>>,
-    /// The plugin's hosts and sign-ins, and what the job sent (API 0.10).
+    /// The plugin's hosts and sign-ins, and what the job sent (Layonara API 1).
     pub(crate) net: crate::net::NetJob,
     /// The haks the user let the job write or download into, by name.
     pub(crate) hak_leave: RefCell<std::collections::BTreeSet<String>>,
-    /// The haks it downloaded to go above NWSync (API 0.11).
+    /// The haks it downloaded to go above NWSync (Layonara API 1).
     pub(crate) above_nwsync: RefCell<Vec<String>>,
-    /// The folder to open as the module (`folder:open`, API 0.12).
+    /// The folder to open as the module (`folder:open`, Layonara API 1).
     pub(crate) open: RefCell<Option<crate::OpenModule>>,
     /// Whether the job was found past its deadline, and stopped for it.
     ran_out: std::cell::Cell<bool>,
@@ -1560,6 +1560,7 @@ fn api(lua: &Lua, sh: &Rc<Shared>) -> mlua::Result<Table> {
     mg.set("tlk", crate::tables::tlk_api(lua, &sh.budget_held)?)?;
     mg.set("vars", vars_api(lua, sh)?)?;
     mg.set("json", crate::json::json_api(lua)?)?;
+    mg.set("layonara_api", crate::layonara::API)?;
     // Where a struct read with `gff` is: its path, for the edits.
     mg.set(
         "path",
