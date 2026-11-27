@@ -9,11 +9,11 @@ pub use mg_module::project_plugins::SettingValue;
 use mg_rules::ObjectKind;
 
 /// The plugin API this Moonglow serves (a manifest's `api`).
-pub const API: &str = "0.12";
+pub const API: &str = "0.10";
 /// The APIs a plugin may be written for: each later one has all of the
 /// ones before.
-pub const APIS: [&str; 12] =
-    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10", "0.11", "0.12"];
+pub const APIS: [&str; 10] =
+    ["0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "0.10"];
 
 /// What a manifest says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,14 +43,16 @@ pub struct Manifest {
     pub importers: Vec<ImporterDecl>,
     pub wizards: Vec<WizardDecl>,
     pub panels: Vec<PanelDecl>,
-    /// The hosts its code may send to and receive from (`[network]`, API
-    /// 0.10), once the user allows it: exact names, in lower case.
+    /// The Layonara API it was written for (`layonara_api`): empty, none.
+    pub layonara_api: String,
+    /// The hosts its code may send to and receive from (`[network]`,
+    /// Layonara API 1), once the user allows it: exact names, in lower case.
     pub network: Vec<String>,
-    /// The services it signs the user in to (`[signin]`, API 0.10).
+    /// The services it signs the user in to (`[signin]`, Layonara API 1).
     pub signins: Vec<SigninDecl>,
 }
 
-/// An OAuth 2.0 sign-in a plugin declares (`[signin]`, API 0.10): the
+/// An OAuth 2.0 sign-in a plugin declares (`[signin]`, Layonara API 1): the
 /// host runs the device flow and keeps its tokens; the plugin names it
 /// by its id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -731,7 +733,7 @@ pub struct CommandDecl {
     /// Crafting"`: Crafting within Make), each name a level deeper; none:
     /// the menu itself (API 0.7).
     pub menu: Vec<String>,
-    /// It makes a module (`new = "module"`, API 0.12): it runs with no
+    /// It makes a module (`new = "module"`, Layonara API 1): it runs with no
     /// module open, beside File › New Module and on the Welcome page.
     pub new_module: bool,
 }
@@ -1148,7 +1150,7 @@ impl Manifest {
         let mut events = Vec::<EventDecl>::new();
         let mut settings = Vec::<SettingDecl>::new();
         let (mut network, mut signins) = (None::<(usize, Vec<String>)>, Vec::<SigninDecl>::new());
-        let mut since_0_10: Option<(usize, String)> = None;
+        let mut since_layonara_1: Option<(usize, String)> = None;
         // (What API 0.6 added, read into a manifest of its own, and the
         // first section of it, for the error of an earlier `api`.)
         let mut of_0_6 = Manifest::default();
@@ -1170,6 +1172,7 @@ impl Manifest {
                             "description",
                             "author",
                             "entry",
+                            "layonara_api",
                         ],
                     )?;
                     let api = required(s, "api", get("api"))?;
@@ -1214,6 +1217,7 @@ impl Manifest {
                         importers: Vec::new(),
                         wizards: Vec::new(),
                         panels: Vec::new(),
+                        layonara_api: crate::layonara::parse(get("layonara_api"))?,
                         network: Vec::new(),
                         signins: Vec::new(),
                     });
@@ -1324,7 +1328,7 @@ impl Manifest {
                     kind_0_6(s, &mut of_0_6)?;
                 }
                 "network" => {
-                    since_0_10.get_or_insert((s.line, s.name.clone()));
+                    since_layonara_1.get_or_insert((s.line, s.name.clone()));
                     if network.is_some() {
                         return Err(format!("line {}: a second [network] section", s.line));
                     }
@@ -1340,7 +1344,7 @@ impl Manifest {
                     network = Some((s.line, hosts));
                 }
                 "signin" => {
-                    since_0_10.get_or_insert((s.line, s.name.clone()));
+                    since_layonara_1.get_or_insert((s.line, s.name.clone()));
                     let get = keys(s, &["id", "issuer", "client", "scopes"])?;
                     let id = id_of(s, get("id"))?;
                     if signins.iter().any(|d| d.id == id) {
@@ -1448,23 +1452,6 @@ impl Manifest {
                 plugin.api
             ));
         }
-        if let Some(c) = commands.iter().find(|c| c.new_module)
-            && api_before(&plugin.api, "0.12")
-        {
-            return Err(format!(
-                "the command {:?} makes a module (`new = \"module\"`), which is plugin API \
-                 0.12; the manifest says api = {:?}",
-                c.id, plugin.api
-            ));
-        }
-        if let Some((line, name)) = since_0_10
-            && api_before(&plugin.api, "0.10")
-        {
-            return Err(format!(
-                "line {line}: [{name}] is plugin API 0.10; the manifest says api = {:?}",
-                plugin.api
-            ));
-        }
         plugin.network = network.map(|(_, h)| h).unwrap_or_default();
         plugin.signins = signins;
         plugin.exporters = of_0_6.exporters;
@@ -1473,6 +1460,7 @@ impl Manifest {
         plugin.panels = of_0_6.panels;
         plugin.commands = commands;
         plugin.checks = checks;
+        crate::layonara::require(&plugin, since_layonara_1.as_ref())?;
         plugin.events = events;
         plugin.settings = settings;
         Ok(plugin)
@@ -1590,56 +1578,8 @@ severity = "error"
         }
         let e = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.6\"")).unwrap_err();
         assert!(e.contains("plugin API 0.7") && e.contains("\"fix-tags\""), "{e}");
-        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.13\"")).unwrap_err();
-        assert!(later.contains("0.13"), "{later}");
-    }
-
-    /// API 0.12: a command that makes a module (`new = "module"`).
-    #[test]
-    fn a_command_may_make_a_module() {
-        let text = "[plugin]\nid = \"a.b\"\nname = \"B\"\nversion = \"1\"\napi = \"0.12\"\nlicense = \"MIT\"\n\
-                    [command]\nid = \"get\"\ntitle = \"Get…\"\nnew = \"module\"\n\
-                    [command]\nid = \"other\"\ntitle = \"Other\"\n";
-        let m = Manifest::parse(text).unwrap();
-        assert!(m.commands[0].new_module && !m.commands[1].new_module);
-        let e = Manifest::parse(&text.replace("api = \"0.12\"", "api = \"0.11\"")).unwrap_err();
-        assert!(e.contains("plugin API 0.12") && e.contains("\"get\""), "{e}");
-        let e = Manifest::parse(&text.replace("new = \"module\"", "new = \"area\"")).unwrap_err();
-        assert!(e.contains("new is \"module\""), "{e}");
-    }
-
-    /// API 0.10: the hosts a plugin talks to, and the services it signs
-    /// in to; held to plain names and https.
-    #[test]
-    fn a_plugin_declares_its_hosts_and_sign_ins() {
-        let with = |extra: &str| {
-            Manifest::parse(&format!(
-                "{}\n{extra}",
-                SAMPLE.replace("api = \"0.1\"", "api = \"0.10\"")
-            ))
-        };
-        let m = with(
-            "[network]\nhosts = \"builders.layonara.com, files.example.org\"\n\n[signin]\n\
-             id = \"layonara\"\nissuer = \"https://auth.layonara.com/application/o/x/\"\n\
-             client = \"x\"\nscopes = \"openid  profile offline_access\"\n",
-        )
-        .unwrap();
-        assert_eq!(m.network, ["builders.layonara.com", "files.example.org"]);
-        assert_eq!(m.signins[0].scopes, "openid profile offline_access");
-        assert_eq!(m.signins[0].host(), "auth.layonara.com");
-        assert_eq!(m.hosts(), ["builders.layonara.com", "files.example.org", "auth.layonara.com"]);
-        for bad in ["*.example.org", "10.0.0.1", "example.org:443", "Example.org", "localhost", ""]
-        {
-            let e = with(&format!("[network]\nhosts = \"{bad}\"\n")).unwrap_err();
-            assert!(e.contains("host") || e.contains("needs hosts"), "{bad}: {e}");
-        }
-        let e =
-            with("[signin]\nid = \"a\"\nissuer = \"http://auth.example.org/\"\nclient = \"c\"\n");
-        assert!(e.unwrap_err().contains("https://"));
-        let e = with("[signin]\nid = \"a\"\nissuer = \"https://a.org/\"\n").unwrap_err();
-        assert!(e.contains("needs client"), "{e}");
-        let old = Manifest::parse(&format!("{SAMPLE}\n[network]\nhosts = \"a.example.org\"\n"));
-        assert!(old.unwrap_err().contains("[network] is plugin API 0.10"));
+        let later = Manifest::parse(&text.replace("api = \"0.7\"", "api = \"0.11\"")).unwrap_err();
+        assert!(later.contains("0.11"), "{later}");
     }
 
     /// API 0.5: a command for placed objects alone or blueprints alone,

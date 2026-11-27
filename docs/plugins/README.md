@@ -54,7 +54,7 @@ What a plugin author needs besides the manual:
     command when the picker closes (`ctx.values`), and a choice of named
     tints, each with its swatch; tests of its own.
   - [`area-share`](examples/area-share): the network, signing in and
-    JSON (API 0.10). Signs in to a service by a device code, sends the
+    JSON (Layonara API 1). Signs in to a service by a device code, sends the
     areas selected to it as `mg gff` JSON with the sign-in's token, and
     fetches them back, losslessly.
   - [`creature-report`](examples/creature-report): reading the game's

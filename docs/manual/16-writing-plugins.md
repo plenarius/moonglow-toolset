@@ -17,7 +17,7 @@ plugin can call. What plugins are to the people who use them is in
 
 You need a text editor and Moonglow. Nothing is compiled or built.
 
-The plugin API is **experimental** (version 0.12): it may change in a
+The plugin API is **experimental** (version 0.10): it may change in a
 later release, and Versions, below, says what that means for a plugin.
 
 ## A first plugin
@@ -237,11 +237,12 @@ running the plugin, to list what it adds.
 | `id` | Needed. The plugin's name for programs, the same wherever it is installed: `author.plugin-name`, in lower-case letters, digits, `.`, `-` and `_`. Settings and keys are kept under it, so don't change it between versions. |
 | `name` | Needed. Its name for people. |
 | `version` | Needed. The plugin's own version, as you number it. |
-| `api` | Needed. The plugin API it was written for: `"0.12"`, or an earlier one (`"0.11"`, `"0.10"`, `"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
+| `api` | Needed. The plugin API it was written for: `"0.10"`, or an earlier one (`"0.9"`, `"0.8"`, `"0.7"`, `"0.6"`, `"0.5"`, `"0.4"`, `"0.3"`, `"0.2"`, `"0.1"`) for a plugin that uses nothing added since (it then runs in older versions of Moonglow too). |
 | `license` | Needed. Its license, as an [SPDX](https://spdx.org/licenses/) name. Moonglow is GPL-3.0, and a plugin runs inside it: choose a license compatible with the GPL (`GPL-3.0-or-later`, `MIT`, `Apache-2.0`…). |
 | `description` | One or two sentences on what it does, shown on the Plugins tab. |
 | `author` | Who wrote it. Repeat the line for each author. |
 | `entry` | The script that registers the handlers; `main.luau` unless given. A file of the plugin's folder. |
+| `layonara_api` | `"1"` for a plugin that uses what Moonglow's Layonara build adds, numbered apart from `api` (`[network]`, `[signin]`, `new = "module"`, `mg.json`, `ctx.hak:download`, `folder:unzip`, `folder:open`); left out, none of it. A manifest with `[network]`, `[signin]` or `new = "module"` and no `layonara_api` is refused, and so is a plugin with it in a Moonglow without the Layonara build. |
 
 `[command]`, once for each command:
 
@@ -253,7 +254,7 @@ running the plugin, to list what it adds.
 | `key` | A key it has until the user chooses another: `Ctrl+Alt+T` (`Ctrl`, `Alt`, `Shift` and a key's name; Ctrl is Cmd on macOS). A key something else has already is reported as a conflict in Options › Keyboard, so choose an unusual one, or none. |
 | `for` | What it is for (since API 0.4): kinds of object, `creature`, `door`, `encounter`, `item`, `placeable`, `sound`, `store`, `trigger`, `waypoint`, and `area`, as a list (`"placeable, creature"`) or one to a line; since API 0.5 also a kind's placed objects alone (`"placed creature"`) or its blueprints alone (`"creature blueprint"`), `tile`, and another resource's type (`nss`, `dlg`, `ifo`, `fac`, `jrl`, `2da`, `gui`, `jui`). It is then in their right-click menus too, and runs on what was clicked ([Commands on what is selected](#commands-on-what-is-selected)). |
 | `menu` | The submenu it is in (since API 0.7), in every menu it is in (the right-click menus and the Plugins menu): `"Make"`, or nested with `›` (or `>`) between the names, `"Make › Crafting"`. Each submenu is made once, where the first command naming it is, and holds the commands that name it in the manifest's order; the title is then the command's name within it (`Workbench…`). Quick Open, Options › Keyboard and `mg plugin list` name it by the whole path, `Make › Crafting › Workbench`, so it is still found by name. Left out, the command is in the menu itself, as before. |
-| `new` | `"module"`: the command makes a module (since API 0.12, in Moonglow's Layonara build). It runs with no module open, as well as with one (its `ctx.module` is empty either way, and it may not edit: its job writes a folder with `folder:unzip` or `folder:write` and opens it with `folder:open`), and it is in **File** after **Open Folder…** and on the Welcome page's Start, besides the Plugins menu. |
+| `new` | `"module"`: the command makes a module (since Layonara API 1). It runs with no module open, as well as with one (its `ctx.module` is empty either way, and it may not edit: its job writes a folder with `folder:unzip` or `folder:write` and opens it with `folder:open`), and it is in **File** after **Open Folder…** and on the Welcome page's Start, besides the Plugins menu. |
 
 `[check]`, once for each check:
 
@@ -327,14 +328,14 @@ importers](#exporters-and-importers)):
 | `hint` | What its tip says. |
 | `refresh` | When it is drawn again besides when it opens, by its Refresh and after a job of the plugin's: `"edits"` (each change of the module), `"selection"` (what is selected changes), both (`"edits, selection"`) or, left out, neither. |
 
-`[network]`, once (since API 0.10; [The network](#the-network)):
+`[network]`, once (since Layonara API 1; [The network](#the-network)):
 
 | Key | |
 | --- | --- |
 | `hosts` | Needed. The hosts the plugin may send to and receive from, as a list (`"api.example.org, files.example.org"`): exact names in lower case, no wildcards, IP addresses or ports. |
 
 `[signin]`, once for each service the plugin signs the user in to
-(since API 0.10; [Signing in](#signing-in)):
+(since Layonara API 1; [Signing in](#signing-in)):
 
 | Key | |
 | --- | --- |
@@ -738,8 +739,8 @@ same names (no copy is kept, and Undo does not take them back). A name
 is a name: not a path into a folder of the folder, nothing above it,
 nothing hidden.
 
-A zip's files go into the folder whole (since API 0.12, in Moonglow's
-Layonara build), with the same leave, and the folder may then be opened
+A zip's files go into the folder whole (since Layonara API 1),
+with the same leave, and the folder may then be opened
 as the module, once its files are written:
 
 ```lua
@@ -774,7 +775,7 @@ until the hak is written).
 
 ## The network
 
-A plugin that declares hosts (`[network]`; since API 0.10) sends
+A plugin that declares hosts (`[network]`; since Layonara API 1) sends
 requests to them with `ctx.net:request`, over HTTPS, from a command or a
 wizard (a check, an event's handler, a panel's view, an exporter and an
 importer reach none). Before the first, Moonglow asks the user, once for
@@ -826,8 +827,8 @@ an area and fetches it back.
 ### Downloading a hak
 
 A whole hak, too large for a request's 64 MB or a job's memory, is
-downloaded into the user's hak folder with `ctx.hak:download` (since API
-0.11, in Moonglow's Layonara build). It streams to disk from one of the
+downloaded into the user's hak folder with `ctx.hak:download` (since
+Layonara API 1). It streams to disk from one of the
 plugin's hosts, never through the plugin's memory, and the plugin gives
 the hak's size and SHA-256 (from the service's listing), which the file
 is checked against:
@@ -1461,8 +1462,8 @@ A test (`[[test]]`) has a `name` and runs one thing:
 | `by` | What made the objects or resources (`ctx.event.by`). |
 | `settings` | The plugin's settings for the run (`settings = { code = "ab" }`), over what the fixture's project files hold and the defaults. |
 | `game`, `root` | The test's own folder of game resources and the game it reads, as the file's `game` and `root` (above) say them, for this test alone (since Moonglow 2.2.0; `root = false` and `true` since 2.3.0). |
-| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (API 0.10): its requests with `signin` carry a test token. A download (`ctx.hak:download`, API 0.11) goes into a scratch hak folder of the test's, empty at its start (or with `hak_folder`'s files), and gets the reply's whole body (a `file`, for a hak). |
-| `[[test.reply]]` | What the network answers (API 0.10), a stub of the plugin's service, whose hosts are then allowed: each with `url` (exactly, or ending in `*`, any URL that starts so), and as wanted `method`, `status` (200 if left out), `headers`, and the body as `json` (a value), `body` (text) or `file` (from the test file's folder). The first reply not yet used that fits answers a request; `again = true` answers every such request. `fail` (text) gives no answer at all, the request failing so, as a dropped connection does. A request no reply fits fails, as no answer would. |
+| `signed_in` | The user is signed in, as this name, to each of the plugin's sign-ins (Layonara API 1): its requests with `signin` carry a test token. A download (`ctx.hak:download`, Layonara API 1) goes into a scratch hak folder of the test's, empty at its start (or with `hak_folder`'s files), and gets the reply's whole body (a `file`, for a hak). |
+| `[[test.reply]]` | What the network answers (Layonara API 1), a stub of the plugin's service, whose hosts are then allowed: each with `url` (exactly, or ending in `*`, any URL that starts so), and as wanted `method`, `status` (200 if left out), `headers`, and the body as `json` (a value), `body` (text) or `file` (from the test file's folder). The first reply not yet used that fits answers a request; `again = true` answers every such request. `fail` (text) gives no answer at all, the request failing so, as a dropped connection does. A request no reply fits fails, as no answer would. |
 
 and says what is to come of it (each key may be left out):
 
@@ -1475,17 +1476,17 @@ and says what is to come of it (each key may be left out):
 | `[[test.field]]` | A field after the edits: `resource`, `field` (its path, as `ctx.edit` takes it) and `value` (text, a number, a localized string's English text), or `absent = true`. `field` may be a list's item (`Equip_ItemList[2]`, `/VarTable[0]`; since Moonglow 2.2.0): it is there, or with `absent = true` it is not; an item has no `value`. |
 | `edits`, `resources` | How many edits there were, and which resources they change. |
 | `haks` | What the job puts into haks, by hak, every resource in any order (since Moonglow 3.3.0): `haks = { tiles = ["tiles.set", "grass.tga"] }`. Nothing is written. |
-| `downloaded` | The haks the job downloads (API 0.11), all of them, by name: `downloaded = ["tb_intro_"]`. Nothing is put in the hak folder. |
-| `above_nwsync` | The haks it puts over NWSync (API 0.11), all of them. |
-| `hak_folder` | A folder (from the test file's) whose files are in the test's scratch hak folder before the job (API 0.11): a hak there already, which a download of the same SHA-256 leaves as it is. |
+| `downloaded` | The haks the job downloads (Layonara API 1), all of them, by name: `downloaded = ["tb_intro_"]`. Nothing is put in the hak folder. |
+| `above_nwsync` | The haks it puts over NWSync (Layonara API 1), all of them. |
+| `hak_folder` | A folder (from the test file's) whose files are in the test's scratch hak folder before the job (Layonara API 1): a hak there already, which a download of the same SHA-256 leaves as it is. |
 | `written` | The files the job writes into folders the user chose (`folder:write`, `folder:unzip` by their paths with `/`, or an export's `out:write`), by their names, every one in any order (since 3.3.0). Nothing is written. |
-| `opened`, `opened_as` | The folder the job opens as the module (`folder:open`, API 0.12), by its name in the test file's folder, and the nasher target it names (left out: none); `opened = ""`, none. A command that makes a module runs on an empty module. |
+| `opened`, `opened_as` | The folder the job opens as the module (`folder:open`, Layonara API 1), by its name in the test file's folder, and the nasher target it names (left out: none); `opened = ""`, none. A command that makes a module runs on an empty module. |
 | `content` | For an export: what the files it writes have, by name, each text part of the file (`content = { "creatures.csv" = ["guard,gate_guard"] }`; since API 0.6). |
 | `shows` | For a panel: texts it shows, each part of one of its texts (a value's as `Areas: 1`, a button's, a list item's; since API 0.6; a field's as its label and the value it is given, `Tint: #2a4d8f`, since API 0.9). |
 | `log` | Lines the log must have: each is part of one. |
 | `error` | The job fails, saying this (part of what it says). |
 | `set` | The settings the command or event sets (`ctx.settings:set`), each with the value it ends with: `set = { code = "cd" }`. |
-| `[[test.request]]` | The requests the job sends (API 0.10), all of them, in order: each with `url` (as a reply's), and as wanted `method`, `has` (texts its body has, each part of it) and `signin` (whether it went with the sign-in's token). `request = []`: none. |
+| `[[test.request]]` | The requests the job sends (Layonara API 1), all of them, in order: each with `url` (as a reply's), and as wanted `method`, `has` (texts its body has, each part of it) and `signin` (whether it went with the sign-in's token). `request = []`: none. |
 | `warned`, `refused` | What a `resource-saving` handler says: its warnings and its refusals, all of them in order, each part of one as `name.ext: text` (`"cellar.are: its tag was OLD_CELLAR"`); `[]`: none. |
 
 Without a game, and with no game folder of its own, a test's

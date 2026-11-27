@@ -1,5 +1,5 @@
 --!strict
--- The types of Moonglow's plugin API, version 0.12, for editors that check
+-- The types of Moonglow's plugin API, version 0.10, for editors that check
 -- Luau (luau-lsp): point the alias "moonglow" at this file in a `.luaurc`
 -- in or above your plugin's folder, and `require("@moonglow")` is typed
 -- and completed:
@@ -82,7 +82,7 @@ export type Module = Reader & {
     gff: (self: Module, name: string) -> Struct,
     text: (self: Module, name: string) -> string,
     bytes: (self: Module, name: string) -> string,
-    -- A GFF as `mg gff` writes its JSON (API 0.10).
+    -- A GFF as `mg gff` writes its JSON (Layonara API 1).
     json: (self: Module, name: string) -> string,
     new_name: (self: Module, name: string, kind: string) -> string,
 }
@@ -105,12 +105,12 @@ export type Edit = {
     write: (self: Edit, name: string, text: string) -> (),
     write_bytes: (self: Edit, name: string, bytes: string) -> (),
     write_gff: (self: Edit, name: string, document: Struct) -> (),
-    -- A GFF from its JSON: text, or what mg.json.decode made of it (API 0.10).
+    -- A GFF from its JSON: text, or what mg.json.decode made of it (Layonara API 1).
     write_json: (self: Edit, name: string, json: any) -> (),
     delete: (self: Edit, name: string) -> (),
 }
 
--- A request to a host the manifest declares (API 0.10).
+-- A request to a host the manifest declares (Layonara API 1).
 export type Request = {
     url: string,
     method: string?,
@@ -134,7 +134,7 @@ export type Net = {
 
 export type SignInStatus = { signed_in: boolean, name: string?, kept: boolean }
 
--- Signing in by a device code (API 0.10): Moonglow keeps the tokens.
+-- Signing in by a device code (Layonara API 1): Moonglow keeps the tokens.
 export type SignIn = {
     start: (self: SignIn, id: string) -> SignInStatus,
     status: (self: SignIn, id: string) -> SignInStatus,
@@ -177,9 +177,9 @@ export type Folder = {
     text: (self: Folder, name: string) -> string,
     to_hak: (self: Folder, hak: string, file: string, name: string?) -> (),
     write: (self: Folder, name: string, bytes: string) -> (),
-    -- A zip's files into the folder, `strip` folders off each path (API 0.12, the Layonara build).
+    -- A zip's files into the folder, `strip` folders off each path (Layonara API 1).
     unzip: (self: Folder, bytes: string, options: { strip: number? }?) -> { files: number, skipped: { string } },
-    -- Opened as the module once its files are written, a nasher project as `target` (API 0.12).
+    -- Opened as the module once its files are written, a nasher project as `target` (Layonara API 1).
     open: (self: Folder, options: { target: string? }?) -> (),
 }
 
@@ -196,7 +196,7 @@ export type Ui = {
 export type Hak = {
     write: (self: Hak, hak: string, name: string, bytes: string) -> (),
     -- A whole hak streamed into the hak folder from a declared host,
-    -- checked by its size and SHA-256 (API 0.11, the Layonara build).
+    -- checked by its size and SHA-256 (Layonara API 1).
     download: (self: Hak, hak: string, spec: HakDownload) -> HakDownloaded,
     attach: (self: Hak, hak: string) -> (),
 }
@@ -354,7 +354,7 @@ export type Context = {
     edit: Edit,
     hak: Hak,
     terrain: Terrain,
-    -- The declared hosts, and signing in to them (API 0.10).
+    -- The declared hosts, and signing in to them (Layonara API 1).
     net: Net,
     signin: SignIn,
     log: Log,
@@ -435,7 +435,9 @@ export type Element = string | {
 
 local mg = {}
 
-mg.api = "0.12"
+mg.api = "0.10"
+-- The Layonara build's own API (nil elsewhere).
+mg.layonara_api = "1"
 
 -- A command's handler may return what Undo calls the change:
 -- { label = "..." }, or the text alone.
@@ -545,7 +547,7 @@ mg.vars = {
     described = function(): { VarDescription } return {} end,
 }
 
--- JSON, losslessly (API 0.10): a whole number past 2^53 decodes as a raw
+-- JSON, losslessly (Layonara API 1): a whole number past 2^53 decodes as a raw
 -- value, which encodes as its digits again.
 mg.json = {
     encode = function(value: any, options: { pretty: boolean? }?): string return "" end,

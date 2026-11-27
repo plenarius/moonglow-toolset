@@ -8,7 +8,7 @@ generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T04:59:16Z }
 
 # Plugin API reference
 
-Everything a plugin's code can use, for plugin API 0.12. The API is
+Everything a plugin's code can use, for plugin API 0.10. The API is
 experimental: a later release may change it, and each change is listed
 in the API's [change list](https://github.com/jadzziaa/moonglow-toolset/tree/develop/docs/plugins).
 How plugins work and how to write one is in
@@ -29,7 +29,8 @@ nothing, and a check is reported as failed.
 
 | | |
 | --- | --- |
-| `mg.api` | The plugin API of the Moonglow running, as text: `"0.12"`. |
+| `mg.api` | The plugin API of the Moonglow running, as text: `"0.10"`. |
+| `mg.layonara_api` | The Layonara API of the Moonglow running, as text: `"1"`; `nil` in a Moonglow without the Layonara build. |
 | `mg.command(id, handler)` | Registers the function for the command the manifest declares as `id`. `handler(ctx)` makes its edits with `ctx.edit`. It may return what Undo calls the change, as `{ label = "…" }` or the text alone; else that is the command's title. |
 | `mg.check(id, handler)` | Registers the function for the check the manifest declares as `id`. `handler(ctx)` returns a list of findings (below), or nothing for none. A check that edits fails. |
 | `mg.on(id, handler)` | Registers the function for the event the manifest declares as `id` (`[event]`, its `on` one of the events of [`ctx.event`](#ctxevent)). `handler(ctx)` is called when it happens, as a command's is, with what happened as `ctx.event`: `ctx.event.name`, and what the event is of. It may return what Undo calls its change. |
@@ -43,7 +44,7 @@ nothing, and a check is reported as failed.
 | `mg.path(struct)` | Where a struct read with `gff` is, as a path for `ctx.edit`: `""` for the root, `"/ClassList[0]"`. Nil for a table that is no such struct. |
 | `mg.struct_id(struct)` | A struct's id (since Moonglow 2.2.0): of one read with `gff`, kept beside its table as its path is, never among its fields (an equipped item's is its slot, `Equip_ItemList`); of one read with `raw`, its `__struct_id`. Nil for a table that is neither. |
 | `mg.vars` | The variables the module's project describes (its `variables.toml`): `describe(name)` and `described()` (below; since Moonglow 2.13.0). |
-| `mg.json` | JSON, losslessly: `encode(value, options?)`, `decode(text)`, `raw(text)` and `null` (below; since API 0.10). |
+| `mg.json` | JSON, losslessly: `encode(value, options?)`, `decode(text)`, `raw(text)` and `null` (below; since Layonara API 1). |
 
 An id is registered once; registering one the manifest doesn't declare,
 or not registering one it does, is a fault `mg plugin check` reports.
@@ -60,7 +61,7 @@ A **finding** is a table:
 
 ### `mg.json`
 
-JSON text and the plugin's values (since API 0.10), for what a plugin
+JSON text and the plugin's values (since Layonara API 1), for what a plugin
 sends and gets over the network (`ctx.net`) and for a GFF's JSON
 (`ctx.module:json`, `ctx.edit:write_json`). Nothing is lost on the way
 there and back: a whole number past 2⁵³ (a GFF's `dword64` and `int64`
@@ -423,7 +424,7 @@ and without anything that changes in the window while it runs.
 | `ctx.module:raw(name, path?)` | A GFF resource with every field's type, as `mg gff` writes it: fields as `{ type = "…", value = … }`, structs with `__struct_id`, the root with `__data_type`. With `path`, the struct there alone. |
 | `ctx.module:text(name)` | A resource as text (a script, a 2DA), converted from the module's codepage. |
 | `ctx.module:bytes(name)` | A resource as it is, a string of bytes. |
-| `ctx.module:json(name)` | A GFF resource as JSON text, as `mg gff` writes it (neverwinter.nim's `nwn_gff` JSON, which nasher keeps): every field with its type, 64-bit numbers whole. Read it with `mg.json.decode`, or send it as it is (`mg.json.raw`). Since API 0.10. |
+| `ctx.module:json(name)` | A GFF resource as JSON text, as `mg gff` writes it (neverwinter.nim's `nwn_gff` JSON, which nasher keeps): every field with its type, 64-bit numbers whole. Read it with `mg.json.decode`, or send it as it is (`mg.json.raw`). Since Layonara API 1. |
 | `ctx.module:new_name(name, kind)` | A name (`name.ext`) for a new resource of a kind (`"utc"`, `"dlg"`, `"are"`…), made from `name` (`"Gate Guard"`) as the window makes one: with the builder's code where the project's pattern puts it (Edit › Builder Code, `[resrefs] pattern`), the first the module hasn't (`ab_gateguard.utc`, `ab_gateguard001.utc`; an area's as the Area Wizard numbers them). Write it with `ctx.edit`. Since Moonglow 2.13.0. |
 
 ### Plain values
@@ -457,7 +458,7 @@ the module's haks over them and its custom talk table.
 | `ctx.game:raw(name, path?)` | As `ctx.module:raw`. |
 | `ctx.game:text(name, layer?)` | As `ctx.module:text` (`nwscript.nss`, say); a `layer`'s copy, as for `gff`. |
 | `ctx.game:bytes(name, layer?)` | As `ctx.module:bytes`; a `layer`'s copy, as for `gff`. |
-| `ctx.game:json(name, layer?)` | As `ctx.module:json`; a `layer`'s copy, as for `gff` (since API 0.10). |
+| `ctx.game:json(name, layer?)` | As `ctx.module:json`; a `layer`'s copy, as for `gff` (since Layonara API 1). |
 | `ctx.game:table(name)` | A 2DA by its name without extension (`"classes"`), as a `twoda` (below). |
 | `ctx.game:string(strref)` | A talk-table string, from the custom talk table for a reference with the custom flag; nil if there is none. |
 
@@ -577,7 +578,7 @@ to the module as one undoable step.
 | `ctx.edit:write(name, text)` | Writes a resource as text (new, or in place of what was there), converted to the module's codepage. A new resource's name is one a file can have (no `/`, `\` or `:`), here and in the two below. |
 | `ctx.edit:write_bytes(name, bytes)` | Writes a resource as the bytes given. |
 | `ctx.edit:write_gff(name, document)` | Writes a GFF resource from its `raw` form (with `__data_type`). |
-| `ctx.edit:write_json(name, json)` | Writes a GFF resource from its JSON, as `ctx.module:json` gives it: the text, or a value `mg.json.decode` made of it (encoded again, losslessly). An untouched resource read and written back is the same bytes. Since API 0.10. |
+| `ctx.edit:write_json(name, json)` | Writes a GFF resource from its JSON, as `ctx.module:json` gives it: the text, or a value `mg.json.decode` made of it (encoded again, losslessly). An untouched resource read and written back is the same bytes. Since Layonara API 1. |
 | `ctx.edit:delete(name)` | Removes a resource from the module. |
 
 ### Paths
@@ -607,7 +608,7 @@ Undo, and its hak stays. A check can't write one.
 | | |
 | --- | --- |
 | `ctx.hak:write(hak, name, bytes)` | Puts a resource into the hak named `hak` (letters, digits, `_` and `-`; `.hak` may be left out), as `name` (`name.ext`: at most 16 letters, digits, `_` and `-`, and a type the game reads). |
-| `ctx.hak:download(hak, spec)` | Downloads a whole hak into the hak folder (since API 0.11, Moonglow's Layonara build; a command's or a wizard's job only, as `ctx.net`). `spec` is `{ url, sha256, bytes, signin?, above_nwsync? }`: `url` on a declared host, as `ctx.net:request`'s; `sha256` the file's, 64 hex digits; `bytes` its size, up to 512 MB; `signin` as a request's (a refused token refreshed once); `above_nwsync` to layer it over the project's NWSync content. Streams to `hak.hak.part` (never into the plugin's memory), with its progress in the status bar, Cancel, and no time limit while bytes arrive (60 seconds without one is an error); the next download of the hak goes on from where one stopped. A file of another size or SHA-256 is an error, and not kept. Returns `{ downloaded, bytes, resumed }`: `downloaded = false` when the hak there has that SHA-256 already; `resumed` the bytes a part already had. The user's leave is asked as for `write`; the hak takes the place of the one there (kept as `hak.hak.bak`) when the handler returns, before `write`'s resources go into it, and goes with the edits. |
+| `ctx.hak:download(hak, spec)` | Downloads a whole hak into the hak folder (since Layonara API 1; a command's or a wizard's job only, as `ctx.net`). `spec` is `{ url, sha256, bytes, signin?, above_nwsync? }`: `url` on a declared host, as `ctx.net:request`'s; `sha256` the file's, 64 hex digits; `bytes` its size, up to 512 MB; `signin` as a request's (a refused token refreshed once); `above_nwsync` to layer it over the project's NWSync content. Streams to `hak.hak.part` (never into the plugin's memory), with its progress in the status bar, Cancel, and no time limit while bytes arrive (60 seconds without one is an error); the next download of the hak goes on from where one stopped. A file of another size or SHA-256 is an error, and not kept. Returns `{ downloaded, bytes, resumed }`: `downloaded = false` when the hak there has that SHA-256 already; `resumed` the bytes a part already had. The user's leave is asked as for `write`; the hak takes the place of the one there (kept as `hak.hak.bak`) when the handler returns, before `write`'s resources go into it, and goes with the edits. |
 | `ctx.hak:attach(hak)` | Lists the hak at the top of the module's haks (an edit of the module, undone with the command). |
 
 A folder the user chose copies a file straight into a hak, however large
@@ -662,8 +663,8 @@ their tiles have.
 
 ## `ctx.net`
 
-Requests to the hosts the manifest declares (`[network]`; since API
-0.10), over HTTPS. Before the plugin's first request Moonglow asks the
+Requests to the hosts the manifest declares (`[network]`; since
+Layonara API 1), over HTTPS. Before the plugin's first request Moonglow asks the
 user, once for all its hosts (those of `[network]` and its sign-ins'
 issuers): "*Plugin* wants to send and receive data with *hosts*". The
 answer is kept, for the plugin's code as it is (other code asks again),
@@ -686,7 +687,7 @@ an error that says to sign in again.
 
 ## `ctx.signin`
 
-Signing the user in to a service (since API 0.10): an OAuth 2.0 device
+Signing the user in to a service (since Layonara API 1): an OAuth 2.0 device
 authorization (RFC 8628) against the OpenID issuer the manifest
 declares (`[signin]`), run by Moonglow. Moonglow shows the code to enter
 and the page to enter it at (Open Browser, Copy Code), and waits while
@@ -759,8 +760,8 @@ fails. A file of more than 64 MB is not read.
 | `folder:bytes(name)` | A file's bytes. |
 | `folder:text(name)` | A file as text: UTF-8 if it is, else from the module's codepage (Windows-1252, unless a hak of the module has an `encoding.2da`). |
 | `folder:write(name, bytes)` | Writes a file into the folder, when the handler has returned: as `name` (a name alone, not a path; not one that begins with a dot), in place of a file of that name there. The first time a job writes into a folder the user is asked whether to allow it, and a refusal ends the job. Undo does not take it back, and a check can't write. |
-| `folder:unzip(bytes, options?)` | Writes a zip's files into the folder when the handler has returned (since API 0.12, Moonglow's Layonara build), with the leave `write` asks, by their paths in it: `options` is `{ strip = 1 }`, the folders to leave off the front of each (the zip's top folder). Hidden files and links are left out, and so is a file `strip` leaves nothing of; a path that leads out of the folder, a file over 64 MB or more than 20,000 of them is an error, and nothing of the zip is written. Returns `{ files, skipped }`: how many go in, and the zip's names of those left out. |
-| `folder:open(options?)` | Opens the folder as the module when the handler has returned, after the files written into it (since API 0.12, Moonglow's Layonara build; a command's or a wizard's job only), as File › Open Folder does (the open module's changes asked about first): a nasher project as `options.target` (`{ target = "bare" }`), else the target Moonglow opens by default. |
+| `folder:unzip(bytes, options?)` | Writes a zip's files into the folder when the handler has returned (since Layonara API 1), with the leave `write` asks, by their paths in it: `options` is `{ strip = 1 }`, the folders to leave off the front of each (the zip's top folder). Hidden files and links are left out, and so is a file `strip` leaves nothing of; a path that leads out of the folder, a file over 64 MB or more than 20,000 of them is an error, and nothing of the zip is written. Returns `{ files, skipped }`: how many go in, and the zip's names of those left out. |
+| `folder:open(options?)` | Opens the folder as the module when the handler has returned, after the files written into it (since Layonara API 1; a command's or a wizard's job only), as File › Open Folder does (the open module's changes asked about first): a nasher project as `options.target` (`{ target = "bare" }`), else the target Moonglow opens by default. |
 | `folder:to_hak(hak, file, name?)` | Puts a file of the folder into a hak as `ctx.hak:write` does, without reading it into the plugin's memory: as `name`, or under its own. It may be larger than a plugin reads (`ctx.game:has` then says it is there, and `ctx.game:bytes` fails as `folder:bytes` does). |
 
 An `image`, from `mg.image`:

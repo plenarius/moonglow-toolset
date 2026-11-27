@@ -1,4 +1,4 @@
-//! JSON for plugins (API 0.10): `mg.json` (`encode`, `decode`, `raw`,
+//! JSON for plugins (Layonara API 1): `mg.json` (`encode`, `decode`, `raw`,
 //! `null`), `ctx.module:json` and `ctx.edit:write_json`. Lossless: a
 //! whole number a Luau number cannot hold exactly (a GFF's 64-bit
 //! fields) decodes as a raw value, which encodes back as its digits.

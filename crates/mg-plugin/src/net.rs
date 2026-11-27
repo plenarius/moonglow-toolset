@@ -1,4 +1,4 @@
-//! The network a plugin reaches (API 0.10): HTTPS to the hosts its
+//! The network a plugin reaches (Layonara API 1): HTTPS to the hosts its
 //! manifest declares (`[network]`), once the user allows it, from a
 //! command or a wizard only. The host hands the job its [`Network`]
 //! ([`crate::Host::network`]); without one there is none.
@@ -48,7 +48,7 @@ impl Response {
     }
 }
 
-/// Where a streamed answer goes (`ctx.hak:download`, API 0.11): its
+/// Where a streamed answer goes (`ctx.hak:download`, Layonara API 1): its
 /// status and headers, then its body as it arrives.
 pub trait Sink {
     fn head(&mut self, status: u16, headers: &[(String, String)]) -> Result<(), String>;

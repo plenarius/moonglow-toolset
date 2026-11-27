@@ -740,7 +740,7 @@ fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
     out.into_inner()
 }
 
-/// API 0.12: a zip goes into the folder by its paths, its top folder left
+/// Layonara API 1: a zip goes into the folder by its paths, its top folder left
 /// off, hidden files left out; a path out of the folder writes nothing.
 #[test]
 fn a_zip_goes_into_a_folder_the_user_chose() {

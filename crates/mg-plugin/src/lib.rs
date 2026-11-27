@@ -23,6 +23,7 @@ mod files;
 mod json;
 mod kept;
 mod kinds;
+pub mod layonara;
 mod manifest;
 pub mod net;
 mod package;
@@ -333,11 +334,11 @@ pub enum Question {
     Folder { title: String },
     /// A page of a wizard (API 0.6), answered by [`Answer::Page`].
     Page(Page),
-    /// Leave to send to and receive from these hosts (API 0.10): the
+    /// Leave to send to and receive from these hosts (Layonara API 1): the
     /// plugin's name, and its hosts not allowed yet. Yes or no; a host
     /// that keeps the answer does not ask again.
     Network { plugin: String, hosts: Vec<String> },
-    /// A sign-in's code to enter at the issuer (API 0.10), shown until the
+    /// A sign-in's code to enter at the issuer (Layonara API 1), shown until the
     /// issuer answers ([`SignInCode::waiting`] is done: then answered
     /// with yes) or the user cancels (`None`).
     SignIn(SignInCode),
@@ -418,13 +419,13 @@ pub trait Host {
     /// module and the test's game folder (or that there is none).
     fn game_listed(&self) {}
 
-    /// The network a command's or a wizard's job may reach (API 0.10);
+    /// The network a command's or a wizard's job may reach (Layonara API 1);
     /// none: no request is sent.
     fn network(&self) -> Option<Network> {
         None
     }
 
-    /// The hak folder `ctx.hak:download` streams into (API 0.11): the one
+    /// The hak folder `ctx.hak:download` streams into (Layonara API 1): the one
     /// the host writes a job's haks into. None: no download.
     fn hak_dir(&self) -> Option<PathBuf> {
         None
@@ -655,15 +656,15 @@ pub struct Outcome {
     /// called for: warnings, and refusals.
     pub said: Vec<Said>,
     /// Haks it downloaded that go above the NWSync layer
-    /// (`ctx.hak:download{ above_nwsync = true }`, API 0.11), for the host
+    /// (`ctx.hak:download{ above_nwsync = true }`, Layonara API 1), for the host
     /// to record in the builder's own project file.
     pub above_nwsync: Vec<String>,
     /// A folder the user chose, to open as the module once its files are
-    /// written (`folder:open`, API 0.12).
+    /// written (`folder:open`, Layonara API 1).
     pub open: Option<OpenModule>,
 }
 
-/// A folder to open as the module (`folder:open`, API 0.12): a nasher
+/// A folder to open as the module (`folder:open`, Layonara API 1): a nasher
 /// project's `target`, or the one Moonglow opens by default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenModule {
@@ -690,7 +691,7 @@ pub struct Said {
 pub struct FolderWrite {
     pub dir: PathBuf,
     /// Each file's path in it (`folder:write`'s a name alone;
-    /// `folder:unzip`'s with `/`, API 0.12) and bytes.
+    /// `folder:unzip`'s with `/`, Layonara API 1) and bytes.
     pub files: Vec<(String, Vec<u8>)>,
 }
 
@@ -835,7 +836,7 @@ pub struct HakWrite {
     pub files: Vec<(ResKey, HakData)>,
     /// The job's scratch files, kept while this is.
     pub held: Option<Arc<Held>>,
-    /// A whole hak downloaded (`ctx.hak:download`, API 0.11), checked:
+    /// A whole hak downloaded (`ctx.hak:download`, Layonara API 1), checked:
     /// put in the hak's place before `files` go into it.
     pub whole: Option<PathBuf>,
 }

@@ -243,7 +243,7 @@ enum Link {
 #[derive(Clone, Copy)]
 enum Button {
     Start(Id, Icon),
-    /// A plugin's command that makes a module (API 0.12), by its place
+    /// A plugin's command that makes a module (Layonara API 1), by its place
     /// among them.
     NewModule(usize),
     Without(Id, Icon),
@@ -638,7 +638,7 @@ fn learn_section(
     y
 }
 
-/// The enabled plugins' commands that make a module (API 0.12).
+/// The enabled plugins' commands that make a module (Layonara API 1).
 fn new_module_commands(app: &Moonglow) -> Vec<crate::plugins::PluginCommand> {
     let mut all = app.plugin_commands();
     all.retain(|c| c.new_module);

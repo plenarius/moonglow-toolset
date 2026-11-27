@@ -2785,7 +2785,7 @@ fn u29_pictures_project_plugins_asked() {
     }
 }
 
-/// API 0.10: a plugin's leave to reach its hosts is asked once, kept
+/// Layonara API 1: a plugin's leave to reach its hosts is asked once, kept
 /// among its grants (`net:HOST`) and listed on the Plugins tab; Forget
 /// takes it back, and it asks again.
 #[test]
@@ -2803,7 +2803,7 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     std::fs::write(
         p.join("plugin.cfg"),
         "[plugin]\nid = \"t.net\"\nname = \"Net\"\nversion = \"1\"\napi = \"0.10\"\n\
-         license = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
          [command]\nid = \"get\"\ntitle = \"Get\"\n",
     )
     .unwrap();
@@ -2846,7 +2846,7 @@ fn a_plugin_s_hosts_are_allowed_once_and_forgotten() {
     assert!(h.state().log.entries.iter().any(|(_, m)| m.contains("did not allow Net")));
 }
 
-/// API 0.11: a plugin's download goes into the user's hak folder in the
+/// Layonara API 1: a plugin's download goes into the user's hak folder in the
 /// place of the hak there, and one marked above NWSync is named in the
 /// builder's own file.
 #[test]
@@ -2871,8 +2871,8 @@ fn a_plugin_s_downloaded_hak_is_put_in_place_and_marked_above_nwsync() {
     std::fs::create_dir_all(&p).unwrap();
     std::fs::write(
         p.join("plugin.cfg"),
-        "[plugin]\nid = \"t.dl\"\nname = \"Dl\"\nversion = \"1\"\napi = \"0.11\"\n\
-         license = \"MIT\"\n\n[network]\nhosts = \"forge.example.org\"\n\n\
+        "[plugin]\nid = \"t.dl\"\nname = \"Dl\"\nversion = \"1\"\napi = \"0.10\"\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n[network]\nhosts = \"forge.example.org\"\n\n\
          [command]\nid = \"get\"\ntitle = \"Get\"\n",
     )
     .unwrap();
@@ -2933,7 +2933,7 @@ fn a_bundled_plugin_is_installed_enabled_once_and_updated() {
             let data = if f == "plugin.cfg" {
                 (String::from_utf8(data).unwrap())
                     .replace("1.0.0", version)
-                    .replace("api = \"0.4\"", "api = \"0.10\"")
+                    .replace("api = \"0.4\"", "api = \"0.10\"\nlayonara_api = \"1\"")
                     .replacen(
                         "[command]",
                         "[network]\nhosts = \"areas.example.org\"\n\n[command]",
@@ -3021,7 +3021,7 @@ fn a_test_s_window_keeps_sign_ins_in_memory() {
     assert!(app.plugin_network().sign_ins.in_system_keychain());
 }
 
-/// API 0.12: a plugin's command that makes a module is in File and on
+/// Layonara API 1: a plugin's command that makes a module is in File and on
 /// the Welcome page with no module open; the folder it unzips opens as
 /// the module, as the nasher target it names.
 #[test]
@@ -3048,8 +3048,9 @@ fn a_plugin_s_command_makes_a_module_from_the_welcome_page() {
     let hex: String = zip.iter().map(|b| format!("\\x{b:02x}")).collect();
     std::fs::write(
         plugins.join("maker/plugin.cfg"),
-        "[plugin]\nid = \"test.maker\"\nname = \"Maker\"\nversion = \"1\"\napi = \"0.12\"\n\
-         license = \"MIT\"\n\n[command]\nid = \"make\"\ntitle = \"New Made Module…\"\n\
+        "[plugin]\nid = \"test.maker\"\nname = \"Maker\"\nversion = \"1\"\napi = \"0.10\"\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n\
+         [command]\nid = \"make\"\ntitle = \"New Made Module…\"\n\
          menu = \"Maker\"\nnew = \"module\"\n",
     )
     .unwrap();

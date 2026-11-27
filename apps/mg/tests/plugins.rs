@@ -1279,7 +1279,7 @@ fn a_wizard_is_answered_from_the_command_line() {
     assert_eq!(listed["plugins"][0]["panels"][0]["refresh"], json!(["edits", "selection"]));
 }
 
-/// API 0.10: `mg plugin run` reaches no network unless it is named;
+/// Layonara API 1: `mg plugin run` reaches no network unless it is named;
 /// `--allow-network-insecure` reaches a server on this computer.
 #[test]
 fn a_plugin_reaches_the_network_only_as_allowed() {
@@ -1300,7 +1300,7 @@ fn a_plugin_reaches_the_network_only_as_allowed() {
     std::fs::write(
         plugin.join("plugin.cfg"),
         "[plugin]\nid = \"t.net\"\nname = \"Net\"\nversion = \"1\"\napi = \"0.10\"\n\
-         license = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
+         layonara_api = \"1\"\nlicense = \"MIT\"\n\n[network]\nhosts = \"areas.example.org\"\n\n\
          [command]\nid = \"get\"\ntitle = \"Get\"\n",
     )
     .unwrap();

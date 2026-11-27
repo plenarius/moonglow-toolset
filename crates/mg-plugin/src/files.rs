@@ -318,7 +318,7 @@ fn add(s: &Shared, dir: &Path, name: &str, bytes: Vec<u8>) -> mlua::Result<()> {
 /// Files by their paths, and their bytes.
 type Files = Vec<(String, Vec<u8>)>;
 
-/// `folder:unzip` (API 0.12): a zip's files for the folder, written when
+/// `folder:unzip` (Layonara API 1): a zip's files for the folder, written when
 /// the handler has returned, `strip` folders off the front of each path.
 /// Hidden files and links are left out (`skipped`); a path that leads out
 /// of the folder is an error, and then nothing of the zip is written.

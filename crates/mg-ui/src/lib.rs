@@ -318,7 +318,7 @@ pub enum Action {
     OpenModule(PathBuf),
     /// Opens this module as it is (the answer to that question).
     OpenModuleAsIs(PathBuf),
-    /// Opens a folder a plugin wrote (`folder:open`, API 0.12): a nasher
+    /// Opens a folder a plugin wrote (`folder:open`, Layonara API 1): a nasher
     /// project as `target`, else as Open Folder does.
     OpenPluginFolder(mg_plugin::OpenModule),
     /// Opens a recovery copy as the module it came from (Recover Unsaved

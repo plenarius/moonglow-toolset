@@ -44,7 +44,7 @@
 //! (`builtin = "tag-unique"`, a list of them, or `"all"`) on its fixture,
 //! with the fixture's project file.
 //!
-//! A plugin that reaches the network (API 0.10) is tested against a stub
+//! A plugin that reaches the network (Layonara API 1) is tested against a stub
 //! of its service: `[[test.reply]]` says what each request gets,
 //! `[[test.request]]` what the job is to send, and `signed_in` signs the
 //! user in to the plugin's sign-ins.
@@ -220,7 +220,7 @@ struct Test {
     /// nothing is written (since Moonglow 3.3.0).
     #[serde(default)]
     haks: BTreeMap<String, Vec<String>>,
-    /// The haks the job downloads (`ctx.hak:download`, API 0.11), all of
+    /// The haks the job downloads (`ctx.hak:download`, Layonara API 1), all of
     /// them, by name: into a scratch hak folder, put nowhere.
     downloaded: Option<Vec<String>>,
     /// The haks it puts over NWSync (`above_nwsync`), all of them.
@@ -231,7 +231,7 @@ struct Test {
     /// The files the job writes into folders the user chose, by their
     /// names, all of them, in any order; nothing is written.
     written: Option<Vec<String>>,
-    /// The folder it opens as the module (`folder:open`, API 0.12), from
+    /// The folder it opens as the module (`folder:open`, Layonara API 1), from
     /// the test file's folder, and as which nasher target (`"bare"`;
     /// `""`, the one Moonglow opens by default); `opened = ""`: none.
     opened: Option<String>,
@@ -250,9 +250,9 @@ struct Test {
     #[serde(default)]
     set: BTreeMap<String, toml::Value>,
     /// The user is signed in, as this name, to each of the plugin's
-    /// sign-ins (API 0.10).
+    /// sign-ins (Layonara API 1).
     signed_in: Option<String>,
-    /// What the network answers (API 0.10): a stub of the plugin's
+    /// What the network answers (Layonara API 1): a stub of the plugin's
     /// service, which the hosts are allowed to reach.
     #[serde(default, rename = "reply")]
     replies: Vec<Reply>,
@@ -1336,7 +1336,7 @@ fn held(
         Run::Check(id) => crate::run_check(plugin, id, input, host.clone()).map(Ok),
         Run::Builtin(b) => Ok(Ok(run_builtin(b, module, fixture))),
         Run::Command(id) => {
-            // (One that makes a module runs with none open, API 0.12.)
+            // (One that makes a module runs with none open, Layonara API 1.)
             let new = plugin.manifest.commands.iter().any(|c| c.id == *id && c.new_module);
             let input = if new { Input { module: Module::new(), ..input } } else { input };
             crate::run_command(plugin, id, input, host.clone()).map(Err)
