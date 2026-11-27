@@ -955,8 +955,9 @@ enum Cmd {
         remove_var: Vec<String>,
         /// Make each area's placeables static, where nothing is lost by
         /// it: not those that are Useable, are tilted, scaled or moved by
-        /// a visual transform, or have a script, a conversation, a trap,
-        /// an inventory or an animation switched on. The game loads and
+        /// a visual transform, have a script, a conversation, a trap, an
+        /// inventory or an animation switched on, or are flickering lights
+        /// Moonglow made. The game loads and
         /// draws static placeables more cheaply.
         #[arg(long, conflicts_with = "dynamic_placeables")]
         static_placeables: bool,
@@ -1519,13 +1520,19 @@ enum PluginCmd {
     Allow {
         /// The project: a module folder, a nasher project's folder or its
         /// nasher.cfg.
-        project: PathBuf,
+        #[arg(required_unless_present = "prune")]
+        project: Option<PathBuf>,
         /// The plugins' ids (`mg plugin list --project` shows them); none:
         /// every one of the project's.
         ids: Vec<String>,
         /// Keep them off.
         #[arg(long)]
         deny: bool,
+        /// Instead, take out the answers kept for projects no longer on
+        /// disk (a removed checkout or worktree), and list them. A project
+        /// on a drive not mounted is not on disk either: mount it first.
+        #[arg(long, conflicts_with_all = ["project", "ids", "deny"])]
+        prune: bool,
     },
     /// Check plugins: the manifest reads, and the code registers what it
     /// declares. Exits with an error if one does not. A file is a
@@ -2538,6 +2545,21 @@ fn compiled(out: &mut Output, results: &[mg_module::build::ScriptResult]) -> ser
     })
 }
 
+/// Each script compiled, as JSON: why, and whether its compiled script
+/// and debug file are new or differ.
+fn compiled_scripts(outcomes: &[mg_module::build::Outcome]) -> serde_json::Value {
+    let list: Vec<_> = (outcomes.iter())
+        .map(|o| {
+            serde_json::json!({
+                "script": o.script.resref.to_string(), "why": o.why.id(),
+                "ok": o.error.is_none(), "changed": o.compiled.is_changed(),
+                "debug_changed": o.debug.is_changed(),
+            })
+        })
+        .collect();
+    list.into()
+}
+
 /// What the window and `mg` remember of the scripts of `module` they
 /// compiled with what `made_with` says (`mg_module::build::Remembered`),
 /// kept in Moonglow's data folder: nothing, where none of it was made
@@ -2797,7 +2819,11 @@ fn run(cli: &Cli) -> Result<Output> {
             PluginCmd::Tidy { project, plugins: dirs, dry_run } => {
                 plugins::tidy(project, dirs, *dry_run)?
             }
-            PluginCmd::Allow { project, ids, deny } => plugins::allow(project, ids, *deny)?,
+            PluginCmd::Allow { prune: true, .. } => plugins::prune()?,
+            PluginCmd::Allow { project, ids, deny, .. } => {
+                // (Clap requires a project without --prune.)
+                plugins::allow(project.as_deref().unwrap_or(Path::new(".")), ids, *deny)?
+            }
             // (A plugin that reads no game data needs no game.)
             PluginCmd::Test { plugin, module } => {
                 plugins::test(install(cli).ok().as_ref(), plugin, module.as_deref())?
@@ -3067,7 +3093,9 @@ fn run(cli: &Cli) -> Result<Output> {
                     .collect()
             });
             let pass = build::compile_changed(&mut m, &rm, None, &known, only, *ndb);
+            let outcomes = build::outcomes(&pass, &was, &m);
             out.json = compiled(&mut out, &pass.results);
+            out.json["compiled_scripts"] = compiled_scripts(&outcomes);
             if module_changed(&was, &m) {
                 save_asked(cli, &was, &mut m, &mut out)?;
             }
@@ -3853,9 +3881,12 @@ fn run(cli: &Cli) -> Result<Output> {
             // it keeps them among its sources.)
             let made_with = mg_module::build::made_with(Some(project), None, Some(&gi.root), &rm);
             let known = remembered(project, made_with);
+            let before = m.clone();
             let pass = mg_module::build::compile_changed(&mut m, &rm, None, &known, None, *ndb);
             let results = &pass.results;
+            let outcomes = mg_module::build::outcomes(&pass, &before, &m);
             let mut compile = compiled(&mut out, results);
+            compile["compiled_scripts"] = compiled_scripts(&outcomes);
             compile["unchanged"] = json!(pass.scripts.saturating_sub(results.len()));
             remember(&mut out, project, &pass.now);
             let failed = compile["failed"].as_u64().unwrap_or(0) as usize;
@@ -4546,6 +4577,11 @@ fn cmd_areas(cli: &Cli) -> Result<Output> {
     // The game's data where there is a game: the areas' names as
     // the module tree shows them, and the rows named.
     let game = game_data_if_any(cli, &m, &mut out);
+    // (Lights Moonglow made that flicker stay dynamic, as the game's
+    // placeables.2da tells them: the game plays no static one's flicker.)
+    if *static_placeables && let Some(t) = game.as_ref().and_then(|g| g.table("placeables").ok()) {
+        m.project_file.make_static.flickering_rows = mg_module::lights::flickering_rows(&t);
+    }
     // A surface material by surfacemat.2da's label (the module's
     // haks' over the game's).
     let material = |name: &str| -> Option<u32> {

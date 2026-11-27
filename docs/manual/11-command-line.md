@@ -3,7 +3,7 @@ type: Manual Page
 title: Command-line tools
 description: The mg command-line tool - archives and files, the game's resources, modules, setting fields and edit files, several areas at once, JSON output, nasher projects and NWScript in other editors.
 tags: [manual, command-line, mg]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-21T23:55:14Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T12:35:56Z }
 ---
 
 # Command-line tools
@@ -103,6 +103,7 @@ kind and the path as given: `hak:build/hak/top.hak`, `folder:assets/models`.
 | `mg verify MODULE --fix CHECK` | make the fixes the findings of a check offer (repeatable; a check's id, as a finding's `check` says: `tag-unique`, `area-variables`, `var-runtime`, `static-transform`, `example.tag-conventions/tag-case`) and save: each as Verify Module's button makes it, refused (and named) where an earlier fix changed what it would change (one that takes items out is followed: two variables of one object both go). The report is of the module as it was found, with a `fixed` line a fix; only errors not fixed fail. `--dry-run` says which it would make and changes nothing. Without `--fix`, nothing is changed. A check there is none of (mistyped, or a plugin's that `--plugins` doesn't name) is an error, not "nothing to fix"; a plugin's fix that asks (runs a command) is said and not made |
 | `mg plugin list DIR…` | the plugins in the folders and what each adds: its commands (each by its submenus and title, `Make › Crafting › Workbench`), checks, events, exporters, importers, wizards, panels and settings (each setting's kind, scope and value). `--project PROJECT` adds the project's own plugins, each with what you answered (`allowed`, `not asked`, `changed since allowed`, `denied`), its digest, and its settings' values in the project |
 | `mg plugin allow PROJECT [ID…]` | allow a project's own plugins to run, as they are now (no ids: every one of its plugins), as Moonglow asks when the project is opened; `--deny` keeps them off. The answer is kept in Moonglow's own folder (`project-plugins.toml`), by the project's place on disk, the plugin and a digest of its files, never in the project: a changed plugin is asked about again, and a yes holds for the same files wherever the project is (moved or copied) |
+| `mg plugin allow --prune` | take out the answers kept for projects no longer on disk (a checkout or worktree removed), each listed. Only when asked, never on its own: a project on a drive that isn't mounted is not on disk either, so mount it first. A yes taken out no longer holds for the same files elsewhere: a project that ran on it is asked again |
 | `mg plugin check DIR…` | check plugins: the manifest reads, and the code registers what it declares; fails if not, or if the code takes more than 5 seconds to load. A file is a plugin's archive (or several plugins'): checked as the installer checks it, and each plugin's code as it is in the archive. A folder's test files (`tests/*.toml`) are read too, not run: one that doesn't read, a test of what the manifest lacks, a fixture not there |
 | `mg plugin test PLUGIN` | (PLUGIN a plugin's folder, or a folder of plugins: each one's that has tests, its lines under its id) run a plugin's own tests (`tests/*.toml` in its folder: a fixture module and what its checks, commands and events are to make of it; [Writing plugins](16-writing-plugins.md#a-plugins-own-tests)): a line a test, `ok` or `FAIL` with what was not as wanted, a `note` under a test that passed without a game resource it read, and a summary; fails if a test fails or there are none. `--module FIXTURE` runs every test on another module. The fixture is never written. A test reads the game's data from the game `mg` finds (`--root`), the one at its own `root` (none with `root = false`), and over either its own folder of game resources (`game/` beside the test file), which is all it reads without a game. A test may run one of Moonglow's own checks on its fixture (`builtin = "tag-unique"`), by the fixture's project file |
 | `mg plugin run MODULE PLUGIN COMMAND` | run a plugin's command on a module and save: its edits as one command, all or none. `--answer ID=VALUE` fills a form's field (the others take their defaults), `--file PATH` is the file or folder it gets where it asks for one (in the order it asks), `--yes` agrees where it asks, and to the haks it writes (into `--hak-dir DIR`, else the user folder's `hak`); `--dry-run` prints the edits (a file `mg apply` reads) and changes nothing. With `--event`, COMMAND is the id of what the plugin does by itself, run as the window would run it then ([its events](17-plugin-api.md#ctxevent)): `--changed NAME` names a resource the save changed or writes, or that was made (as often as needed; none named: all of the module's), `--was MODULE` is the module as it was before a save (its resources are the old ones, and those that differ are what the save writes), `--select` names the objects placed or pasted, and `--by` what made them; what a `resource-saving` handler says is in the notes (and the JSON's `said`), and a refusal fails the run. The plugin's settings are what the module's project files hold, else the defaults; `--setting ID=VALUE` gives one for the run. What the plugin sets (`ctx.settings:set`) is kept in the project's files, and one of scope `user` where Moonglow keeps those (its own folder's `plugin-settings.json`, shared with the window), which a run reads too (with `--dry-run`, said and not kept) |
@@ -314,7 +315,8 @@ mg areas mymodule.mod --where 'Fog*=0' --where OnEnter=kz_enter
 - **`--static-placeables`**: sets Static on each area's placeables that
   lose nothing by it (not the Useable ones, those a visual transform
   changes, those with a script, conversation, trap, inventory or
-  animation switched on, those with variables, those the project
+  animation switched on, flickering lights Custom Light made (where the
+  game's data can be read), those with variables, those the project
   file keeps dynamic, nor those whose tags the module's scripts name as
   text); see [Areas](04-areas.md#static-placeables-many-at-once). Each placeable left
   dynamic is named with why (a note, and `left_dynamic` in the JSON).
@@ -395,7 +397,9 @@ place of the one in your tlk folder.
 - **`--json`** prints each of these as a line of JSON (`event`:
   `started`, `passwords`, `ready`, `log`, `marker`, `console`, `engine`,
   `note`, `changed`, `ended`, the last with `how` it ended and whether
-  it `failed`, as `mg watch --serve` ends too).
+  it `failed`, as `mg watch --serve` ends too). `ready` is reported
+  whenever the server says its module loaded, also when that line
+  comes only as the server is stopping or exiting.
 
 ## Testing scripts in the server
 
@@ -600,7 +604,8 @@ and nothing on standard error, for scripts, build pipelines and tools
   and `warnings`, each once however many scripts met it (with `script`,
   `line`, `message` and `scripts`, how many: a function's return type
   declared one way and defined another, as in the base game's
-  `x2_inc_cutscene`, which compiles as in Aurora; see
+  `x2_inc_cutscene`, which compiles as in Aurora, or an include's own
+  `main` that Aurora compiles in place of the script's; see
   [Scripts](07-scripts.md)); and so on.
 - **Notes:** warnings and summaries, otherwise sent to standard error,
   are in `notes`.

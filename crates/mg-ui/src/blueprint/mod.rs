@@ -1298,11 +1298,21 @@ impl Form<'_> {
         if kept.targets_revision != revision {
             kept.targets_revision = revision;
             kept.targets.clear();
+            kept.targets_last = None;
+        }
+        if let Some(((key, path, also), hit)) = &kept.targets_last
+            && *key == self.key
+            && Arc::ptr_eq(also, &self.also)
+            && *path == self.path
+            && hit.first().is_some_and(|t| t.at == self.root)
+        {
+            return hit.clone();
         }
         let map_key = (self.key, self.path.clone(), self.also.clone());
         if let Some(hit) = kept.targets.get(&map_key)
             && hit.first().is_some_and(|t| t.at == self.root)
         {
+            kept.targets_last = Some((map_key, hit.clone()));
             return hit.clone();
         }
         let mut out = vec![lists::Target::new(self.key, self.path.clone(), self.root.clone())];
@@ -1314,7 +1324,9 @@ impl Form<'_> {
             }
         }
         let out = Arc::new(out);
-        self.app.palette.kept.targets.insert(map_key, out.clone());
+        let kept = &mut self.app.palette.kept;
+        kept.targets.insert(map_key.clone(), out.clone());
+        kept.targets_last = Some((map_key, out.clone()));
         out
     }
 
@@ -2182,7 +2194,7 @@ impl Form<'_> {
         game: &mg_rules::GameData,
         what: &str,
         label: &str,
-        palette: &str,
+        palette: &'static str,
     ) {
         self.mark_mixed(ui, label);
         let current = self.int(label).clamp(0, 175) as u8;
@@ -2201,15 +2213,15 @@ impl Form<'_> {
         game: &mg_rules::GameData,
         what: &str,
         label: &str,
-        palette: &str,
+        palette: &'static str,
         current: u8,
         text: Option<&str>,
     ) -> Option<u8> {
         let pal = {
             let app = &mut *self.app;
-            let mut l = crate::images::Loader {
+            let l = crate::images::Loader {
                 pictures: &mut app.pictures,
-                palettes: &mut app.palettes,
+                palettes: &app.palettes,
                 ws: app.ws.as_ref(),
                 game,
             };
@@ -2727,6 +2739,13 @@ pub(crate) fn instance_type(path: &GffPath) -> Option<ResType> {
 /// The lists a placed object holds items in.
 pub(crate) const HELD_LISTS: [&str; 2] = ["ItemList", "Equip_ItemList"];
 
+/// Whether `path` (in an area's GIT) is an item a placed object holds or a
+/// store sells, which opens in Properties of its own: not an item in a bag
+/// held, nor anything further in.
+pub(crate) fn held_item(path: &GffPath) -> bool {
+    held_item_at(path).is_some_and(|n| n == path.0.len())
+}
+
 /// Where `path` goes into an item a placed object holds: how many of its
 /// steps lead to the item (the rest go on into the item).
 fn held_item_at(path: &GffPath) -> Option<usize> {
@@ -3163,10 +3182,11 @@ pub(crate) fn tab_of(key: ResKey, path: &GffPath, also: &[(ResKey, GffPath)]) ->
             Tab::Blueprints(std::iter::once(key).chain(also.iter().map(|(k, _)| *k)).collect())
         }
         (false, true) => Tab::Instance { area: key.resref, path: path.clone() },
+        // (Each in its own area: objects of several areas are edited
+        // together, Advanced Search's.)
         (false, false) => Tab::Instances {
-            area: key.resref,
-            paths: std::iter::once(path.clone())
-                .chain(also.iter().map(|(_, p)| p.clone()))
+            objects: std::iter::once((key.resref, path.clone()))
+                .chain(also.iter().map(|(k, p)| (k.resref, p.clone())))
                 .collect(),
         },
     }
@@ -3267,8 +3287,6 @@ pub(crate) struct FormShown<'p> {
 pub(crate) fn form_ui(app: &mut Moonglow, ui: &mut Ui, shown: FormShown<'_>) -> usize {
     let FormShown { key, path, also, root, restype, page, held, is_viewed, heading, all } = shown;
     let several = !also.is_empty();
-    let targets: Vec<(ResKey, GffPath)> =
-        std::iter::once((key, path.clone())).chain(also.iter().cloned()).collect();
     let viewed = is_viewed || held.is_some();
     let refused_id = egui::Id::new(("view-refused", key));
     if viewed {
@@ -3420,6 +3438,15 @@ pub(crate) fn form_ui(app: &mut Moonglow, ui: &mut Ui, shown: FormShown<'_>) -> 
     // some of them only, as it means to: it is let through.
     if several {
         let one = if form.is_instance() { "object" } else { "blueprint" };
+        // (Made only for a change to look at: 5,000 objects selected made
+        // it of 5,000 paths each frame.)
+        let changes = form.app.actions[pending..]
+            .iter()
+            .any(|a| matches!(a, Action::Apply(_) | Action::ApplyTyped(_)));
+        let targets: Vec<(ResKey, GffPath)> = match changes {
+            true => form.targets().map(|(k, p)| (k, p.clone())).collect(),
+            false => Vec::new(),
+        };
         let each = std::mem::take(&mut form.together.each);
         let app = &mut *form.app;
         let mut dropped = false;

@@ -2788,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "mg"
-version = "5.3.0-layonara.1"
+version = "5.4.0-layonara.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2958,6 +2958,7 @@ version = "0.0.0"
 dependencies = [
  "mg-core",
  "png",
+ "rayon",
  "thiserror 2.0.21",
 ]
 
@@ -3402,7 +3403,7 @@ dependencies = [
 
 [[package]]
 name = "moonglow"
-version = "5.3.0-layonara.1"
+version = "5.4.0-layonara.1"
 dependencies = [
  "eframe",
  "egui",

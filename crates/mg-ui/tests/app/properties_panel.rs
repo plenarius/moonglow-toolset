@@ -240,6 +240,26 @@ fn several_of_one_type_edit_together() {
     }
 }
 
+/// The panel keeps the objects' places only while the selection is the
+/// same: a change typed after it changes goes to the new selection alone,
+/// and the same objects in another order are shown by their new first.
+#[test]
+fn the_panel_edits_what_is_selected_now() {
+    let Some((mut h, area)) = props_area("props-kept", MODES[0], 1600.0) else { return };
+    let (first, second) = ((ObjectKind::Placeable, 0), (ObjectKind::Placeable, 1));
+    select(&mut h, area, &[first, second]);
+    let before = placeables(&mut h, area);
+    retype(&mut h, &tag(&before[0]), "BOTH_OF_THEM");
+    select(&mut h, area, &[second]);
+    retype(&mut h, "BOTH_OF_THEM", "SECOND_ALONE");
+    let now = placeables(&mut h, area);
+    assert_eq!((tag(&now[0]), tag(&now[1])), ("BOTH_OF_THEM".into(), "SECOND_ALONE".into()));
+    select(&mut h, area, &[second, first]);
+    retype(&mut h, "SECOND_ALONE", "SECOND_FIRST");
+    let now = placeables(&mut h, area);
+    assert_eq!((tag(&now[0]), tag(&now[1])), ("SECOND_FIRST".into(), "SECOND_FIRST".into()));
+}
+
 /// Under 1400 the sections fold into one tab bar, Palette, Properties,
 /// Preview (Narrow), the palette's types a dropdown with Standard and
 /// Custom beside it and Expand All and Collapse All at the Group by
@@ -1551,9 +1571,20 @@ fn rearrange_right_dock_and_half_height_on_ultrawide() {
     let bar = h.get_by_label(mg_ui::RIGHT_DOCK).get_by_label("Palette").rect();
     assert!(h.get_by_label(OPEN_IN_TAB).rect().top() > bar.bottom());
 
-    // Drag Properties header up onto Palette | Preview tab bar -> combines into One Tab Bar.
+    // Let go over the Left Dock: the toolset keeps its panels in their
+    // own dock, so the drop lands nowhere.
     let props_header = h.get_by_label(OPEN_IN_TAB).rect();
     let drag_from = egui::pos2(props_header.left() - 60.0, props_header.center().y);
+    let left = left_dock_rect(&h);
+    drag(&mut h, drag_from, left.center());
+    settle(&mut h);
+    assert_eq!(
+        h.state().settings.area_right_layout,
+        Some(mg_ui::settings::AreaRightLayout::stacked()),
+        "a drop over the Left Dock moves nothing"
+    );
+
+    // Drag Properties header up onto Palette | Preview tab bar -> combines into One Tab Bar.
     let drag_to = bar.center();
     drag(&mut h, drag_from, drag_to);
     settle(&mut h);

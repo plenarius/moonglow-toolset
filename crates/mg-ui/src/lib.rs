@@ -53,6 +53,7 @@ mod model_textures;
 pub mod model_view;
 pub mod module_folder;
 pub mod module_props;
+mod narrowing;
 mod nui_view;
 /// The NUI designer's header and panels' names (M4's U18), for the tests
 /// and plugins that find its controls.
@@ -662,7 +663,15 @@ pub struct Log {
     /// Each line's height as the panel last drew it (0: not yet): the
     /// lines out of sight take their room alone.
     rows: Vec<f32>,
+    /// The lines under an entry's fold (Compile All's: which scripts were
+    /// compiled, and why), by the entry's place.
+    pub details: HashMap<usize, Vec<String>>,
+    /// The entries whose fold is open.
+    pub(crate) unfolded: std::collections::HashSet<usize>,
 }
+
+/// How many detail lines an entry keeps; the rest are counted.
+const DETAIL_LINES: usize = 500;
 
 /// A fix offered beside a line of the log (a finding of Verify Module's):
 /// made only when its button is clicked, as one undoable command.
@@ -692,6 +701,30 @@ impl Log {
         self.fixes.clear();
         self.fixes_revision += 1;
         self.rows.clear();
+        self.details.clear();
+        self.unfolded.clear();
+    }
+
+    /// A message with details under a fold, closed until asked: at most
+    /// [`DETAIL_LINES`] of them, "and N more" for the rest.
+    pub fn info_with(&mut self, s: impl Into<String>, mut details: Vec<String>) {
+        let line = self.entries.len();
+        self.info(s);
+        if details.len() > DETAIL_LINES {
+            let more = details.len() - DETAIL_LINES;
+            details.truncate(DETAIL_LINES);
+            details.push(format!("and {more} more"));
+        }
+        if !details.is_empty() {
+            self.details.insert(line, details);
+        }
+    }
+
+    /// Opens or closes the fold under line `line`.
+    pub fn toggle_fold(&mut self, line: usize) {
+        if self.details.contains_key(&line) && !self.unfolded.remove(&line) {
+            self.unfolded.insert(line);
+        }
     }
 
     /// The fix offered beside line `line`, if one is.
@@ -728,8 +761,18 @@ impl Log {
 
     /// The whole log as text, a line each as the log shows it (its time
     /// first), for Copy Log and Save Log….
+    /// An entry's details follow it, indented, whether its fold is open
+    /// or not: a copy is complete.
     pub fn text(&self) -> String {
-        (0..self.entries.len()).map(|i| self.shown(i) + "\n").collect()
+        let mut out = String::new();
+        for i in 0..self.entries.len() {
+            out += &self.shown(i);
+            out.push('\n');
+            for d in self.details.get(&i).into_iter().flatten() {
+                out += &format!("    {d}\n");
+            }
+        }
+        out
     }
 }
 
@@ -758,6 +801,9 @@ pub struct Moonglow {
         std::collections::HashSet<(audio::Role, mg_core::ResRef, ResType, usize)>,
     /// Game images decoded for the UI, by lowercase name.
     pictures: images::Pictures,
+    /// The module (identity and revision) `pictures` was last checked
+    /// against ([`images::forget_changed`]).
+    pictures_seen: Option<(u64, u64)>,
     /// The game's NUI skin, its fonts and the pictures the open windows
     /// use, as the NUI Creator's preview draws them.
     pub(crate) nui_assets: nui_view::skin::Assets,
@@ -892,6 +938,11 @@ pub struct Moonglow {
     pub typed: talk_typed::TypedState,
     /// The haks layered into the game data, as the module listed them.
     pub(crate) haks_layered: Vec<String>,
+    /// Changes to the game data asked for while something else still read
+    /// it, made once it is free ([`Moonglow::make_waiting_game_changes`]),
+    /// and whether the log has said so.
+    pub(crate) game_waits: GameWaits,
+    pub(crate) game_waits_told: bool,
     /// The keys of commands (Options › Keyboard), and the settings they
     /// were read from.
     pub keymap: keys::Keymap,
@@ -1161,6 +1212,8 @@ pub struct Moonglow {
     /// A Properties form is being drawn in the Properties panel: its ids
     /// are the panel's own (`blueprint::window_state_id`).
     pub(crate) panel_form: bool,
+    /// The Properties panel's paths, kept while its area's selection stays.
+    pub(crate) panel_kept: Option<crate::properties_panel::PanelKept>,
     /// The editors dragged out into windows too narrow for their right pane
     /// (`shell::window_panes`, the last frame's): a double click in such an
     /// area opens the Properties window, there being no panel to show; a
@@ -1220,10 +1273,6 @@ pub struct Moonglow {
     /// A command asked for by its key while a text field was typed in:
     /// run in the next frame, after the field has set its text.
     pub(crate) command_after_text: Option<commands::AfterText>,
-    /// The window's egui context, for a plugin's job to take the keyboard.
-    pub(crate) egui_ctx: Option<egui::Context>,
-    /// A plugin's job held for a field to set its text, and the frame asked in.
-    pub(crate) plugin_after_text: Option<(u64, plugins::StartLater)>,
     /// What each script was compiled from when Compile All last compiled
     /// it (its stamp), and what those stamps were made with: a script
     /// whose stamp is the same is not compiled again.
@@ -1756,11 +1805,12 @@ impl Moonglow {
             speaker: Box::new(audio::Silence::default()),
             sound_said: Default::default(),
             pictures: HashMap::new(),
+            pictures_seen: None,
             nui_assets: Default::default(),
             nui_views: HashMap::new(),
             new_nui: None,
             nui_import: None,
-            palettes: HashMap::new(),
+            palettes: Default::default(),
             area_audio: Default::default(),
             heard: None,
             scripts: HashMap::new(),
@@ -1811,6 +1861,8 @@ impl Moonglow {
             talk_view: Default::default(),
             game_talk: None,
             haks_layered: Vec::new(),
+            game_waits: GameWaits::default(),
+            game_waits_told: false,
             keymap: Default::default(),
             keymap_from: Default::default(),
             project_keys_from: Vec::new(),
@@ -1902,8 +1954,6 @@ impl Moonglow {
             references: Default::default(),
             text_typed: None,
             command_after_text: None,
-            egui_ctx: None,
-            plugin_after_text: None,
             script_stamps: Default::default(),
             compiled_dir: None,
             locks_dir: None,
@@ -1957,6 +2007,7 @@ impl Moonglow {
             tile_props_focus: false,
             props_focus: false,
             panel_form: false,
+            panel_kept: None,
             panes_dropped: Default::default(),
             panel_pages: HashMap::new(),
             area_stats: None,
@@ -2194,7 +2245,6 @@ impl Moonglow {
         // (Tab is a 2DA grid's with its keys, before any control can take
         // it: M4's U16.)
         self.active_tab_now = table_view::front_of_focused(self);
-        self.egui_ctx = Some(ui.ctx().clone());
         report_table::tab_from_the_rows(ui.ctx());
         table_view::keep_tab_for_the_grid(self, ui.ctx());
         faction_view::keep_tab_for_the_matrix(self, &ui.ctx().clone());
@@ -2253,7 +2303,13 @@ impl Moonglow {
         // (A color being picked, as the windows asked in the frame before.)
         self.var_preview = std::mem::take(&mut self.var_preview_next);
         let female = self.settings.armor_on_woman;
-        self.thumbnails.begin_frame(self.ws.as_ref().map(|ws| ws.revision()), female);
+        self.thumbnails.begin_frame(self.ws.as_ref(), female);
+        images::forget_changed(
+            &mut self.pictures,
+            &self.palettes,
+            self.ws.as_ref(),
+            &mut self.pictures_seen,
+        );
         widgets::install_fonts(ui.ctx());
         script_layout::watch_fonts(ui.ctx());
         // (Ctrl+Insert, Shift+Delete and Shift+Insert as Copy, Cut and
@@ -2320,6 +2376,25 @@ impl Moonglow {
             }
             for view in self.model_views.values_mut() {
                 view.redraw_picture();
+            }
+        }
+        // (Options › Area › Anti-aliasing changed: the renderer made anew
+        // for the count, the views' targets and the pictures made again.)
+        if let Some(vp) = self.viewport.as_ref() {
+            let samples = options::samples_drawn(self.settings.anti_aliasing, vp.sample_counts());
+            if vp.samples() != samples {
+                self.thumbnails.forget(self.viewport.as_ref());
+                self.thumbnails.targets = None;
+                self.let_go_of_view_targets();
+                if let Some(vp) = self.viewport.as_mut() {
+                    vp.set_samples(samples);
+                }
+                for view in self.area_views.values_mut() {
+                    view.redraw_picture();
+                }
+                for view in self.model_views.values_mut() {
+                    view.redraw_picture();
+                }
             }
         }
         if let Some(vp) = self.viewport.as_mut() {
@@ -2435,6 +2510,7 @@ impl Moonglow {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
         self.poll_job(ui.ctx());
+        self.make_waiting_game_changes(ui.ctx());
         updates::frame(self, ui.ctx());
         self.next_plugin_event();
         self.panels_frame(ui.ctx());
@@ -2770,16 +2846,6 @@ impl Moonglow {
         if !self.actions.is_empty() || !self.closing_cancels.is_empty() {
             self.run_actions();
             // Show the result now, not at the next input event.
-            ui.ctx().request_repaint();
-        }
-        // A held plugin's job starts once its field has set its text.
-        if self
-            .plugin_after_text
-            .as_ref()
-            .is_some_and(|(at, _)| *at < ui.ctx().cumulative_pass_nr())
-            && let Some((_, start)) = self.plugin_after_text.take()
-        {
-            start(self);
             ui.ctx().request_repaint();
         }
         self.open_tabs_frame(ui.ctx());
@@ -3467,6 +3533,21 @@ impl Moonglow {
         self.nui_views.get(key).map(nui_view::chosen)
     }
 
+    /// Selects the control at `path` (a JSON pointer) in NUI window `key`'s
+    /// designer, as a problem's link does: as the next frame starts, on the
+    /// Design page. For the timing (`nui_perf`).
+    #[doc(hidden)]
+    pub fn nui_choose(&mut self, key: &ResKey, path: &str) {
+        nui_view::choose(self.nui_views.entry(*key).or_default(), path);
+    }
+
+    /// Whether NUI window `key`'s designer is in Interact. For the timing
+    /// (`nui_perf`).
+    #[doc(hidden)]
+    pub fn nui_interacts(&self, key: &ResKey) -> bool {
+        self.nui_views.get(key).is_some_and(nui_view::interacts)
+    }
+
     /// The controls chosen together in NUI window `key`'s designer, by
     /// path (for the tests: M4's U19 review).
     #[doc(hidden)]
@@ -3565,6 +3646,15 @@ impl Moonglow {
     #[doc(hidden)]
     pub fn nui_copies(&self, key: &ResKey) -> usize {
         self.nui_views.get(key).map_or(0, nui_view::copies)
+    }
+
+    /// NUI window `key`'s generation (one more for each frame in which it
+    /// may have changed), and how many times its canvas drew with the
+    /// layout kept from the frame before. For the tests (batch 5 of the
+    /// timing views).
+    #[doc(hidden)]
+    pub fn nui_kept(&self, key: &ResKey) -> (u64, usize) {
+        self.nui_views.get(key).map_or((0, 0), nui_view::kept)
     }
 
     /// Where NUI window `key`'s designer keeps its working copy's words (the
@@ -3675,12 +3765,8 @@ impl Moonglow {
     /// Drops popped-out state for any area whose `Instance`/`Instances`
     /// window or tab is no longer open.
     pub(crate) fn sync_props_popped_out(&mut self) {
-        self.props_popped_out.retain(|area| {
-            self.dock.iter_all_tabs().any(|(_, t)| match t {
-                Tab::Instance { area: a, .. } | Tab::Instances { area: a, .. } => a == area,
-                _ => false,
-            })
-        });
+        self.props_popped_out
+            .retain(|area| self.dock.iter_all_tabs().any(|(_, t)| t.edits_in(*area)));
     }
 
     /// Notes a tab closed, for Reopen Closed Tab: those that show a
@@ -4622,6 +4708,7 @@ impl Moonglow {
                     ui.scroll_with_delta_animation(egui::vec2(0.0, scroll), now);
                 }
                 let mut clicked = None;
+                let mut folded = None;
                 let mut fix_all = None;
                 // (Fix All beside the first fix of a check with several
                 // to make.)
@@ -4675,7 +4762,34 @@ impl Moonglow {
                     // A finding's fix: a button beside it, made when
                     // clicked (Verify Module).
                     let Some(offer) = self.log.fix_at(i) else {
-                        ui.label(text);
+                        // Details under a fold: a button beside the line
+                        // opens it, and they follow, indented.
+                        match self.log.details.get(&i) {
+                            Some(lines) => {
+                                let open = self.log.unfolded.contains(&i);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(text);
+                                    let button =
+                                        ui.add(egui::Button::new("Details").small().selected(open));
+                                    let hint = match open {
+                                        true => "Hides the details of this message",
+                                        false => "Shows the details of this message",
+                                    };
+                                    if button.on_hover_text(hint).clicked() {
+                                        folded = Some(i);
+                                    }
+                                });
+                                if open {
+                                    ui.indent(("log-details", i), |ui| {
+                                        for l in lines {
+                                            let l = egui::RichText::new(l).monospace();
+                                            ui.label(l.color(level.color(ui)));
+                                        }
+                                    });
+                                }
+                            }
+                            None => _ = ui.label(text),
+                        }
                         heights[i] = ui.cursor().top() - before;
                         continue;
                     };
@@ -4716,6 +4830,9 @@ impl Moonglow {
                     ui.add_space(skipped);
                 }
                 self.log.rows = heights;
+                if let Some(line) = folded {
+                    self.log.toggle_fold(line);
+                }
                 if let Some(check) = fix_all {
                     self.actions.push(Action::ApplyFixesOf(check));
                 }
@@ -4833,37 +4950,20 @@ impl Moonglow {
             self.game.as_ref().map_or(0, |g| Arc::strong_count(g) - 1),
             if self.install.is_some() { "known" } else { "none" },
         ));
-        self.release_game_data();
-        if let (Some(game), Some(gi)) = (exclusive(&mut self.game), &self.install) {
-            let mg_module::Stacked { missing, wrong, nwsync } = m.stack(&mut game.resman, gi);
-            for h in missing {
-                self.log.warn(text::capitalized(&gi.hak_not_found(&h)));
-            }
-            if let Some(e) = wrong {
-                self.log.error(format!("Could not open the module's haks: {e}"));
-            }
-            // (The NWSync server the project names: its content over the
-            // haks, from what is here; Build › NWSync Content downloads.)
-            self.nwsync_content.module_closed();
-            if let Some(n) = nwsync {
-                if let Some(line) = n.summary() {
-                    self.log.info(line);
-                }
-                for w in n.warnings() {
-                    self.log.warn(format!("NWSync content: {w}"));
-                }
-                self.nwsync_content.mounted = Some(n);
-            }
+        self.nwsync_content.module_closed();
+        // (Something still reading the game data: the haks are layered
+        // once it is free, and the log says so meanwhile.)
+        if self.game_free_for(|w| w.layers = true)
+            && let (Some(game), Some(gi)) = (exclusive(&mut self.game), &self.install)
+        {
+            let stacked = m.stack(&mut game.resman, gi);
+            told_stacked(&mut self.log, &mut self.nwsync_content, gi, stacked);
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
             self.haks_layered = m.haks().unwrap_or_default();
-        } else if self.game.is_some() && self.install.is_some() {
-            // (Something still reads the game data: said, rather than a
-            // module opened without its haks and nothing to show why.)
-            self.log.error(
-                "The module's haks could not be added to the game data (it is in use): its \
-                 custom content will be missing. Close and open the module again.",
-            );
+            // (The textures drawn are read again from these haks: the last
+            // module's were forgotten as it closed, before its layers went.)
+            self.forget_drawn_textures();
         }
         let mut m = m;
         self.restore_locks(&mut m);
@@ -4933,7 +5033,9 @@ impl Moonglow {
     /// the user's `tlk/` folder, as the game looks) when the module names
     /// another one than is loaded.
     fn load_custom_tlk(&mut self) {
-        self.release_game_data();
+        if self.ws.is_none() || !self.game_free_for(|w| w.tlk = true) {
+            return;
+        }
         let (Some(ws), Some(game)) = (&self.ws, exclusive(&mut self.game)) else { return };
         let name = ws.module.custom_tlk().ok().flatten().filter(|n| !n.trim().is_empty());
         if name == self.custom_tlk {
@@ -5346,13 +5448,10 @@ impl Moonglow {
         self.palette.forget_game_data();
         self.search_kept = Default::default();
         self.nwsync_content.module_closed();
-        self.release_game_data();
-        if let Some(game) = exclusive(&mut self.game) {
-            remove_layers(&mut game.resman, |l| {
-                l.priority == priority::MODULE
-                    || is_hak_layer(l)
-                    || mg_module::nwsync_content::is_nwsync_layer(l)
-            });
+        if self.game_free_for(|w| w.layers = true)
+            && let Some(game) = exclusive(&mut self.game)
+        {
+            remove_layers(&mut game.resman, is_module_layer);
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
         }
@@ -5360,7 +5459,9 @@ impl Moonglow {
 
     /// Refreshes the module layer of the game data after edits.
     pub(crate) fn refresh_module_layer(&mut self) {
-        self.release_game_data();
+        if self.ws.is_none() || !self.game_free_for(|w| w.layers = true) {
+            return;
+        }
         let (Some(game), Some(ws)) = (exclusive(&mut self.game), &mut self.ws) else { return };
         if ws.flush().is_err() {
             return;
@@ -5371,7 +5472,8 @@ impl Moonglow {
         // and before every job, and the renderer reads all its textures
         // again once they are forgotten.)
         let layer = game.resman.layer_mut("module").and_then(|l| l.container.as_mem_mut());
-        let textures = layer.is_some_and(|was| drawn_with_changed(was, &ws.module));
+        let textures = layer.as_deref().is_some_and(|was| drawn_with_changed(was, &ws.module));
+        let sets = layer.as_deref().map(|was| sets_changed(was, &ws.module)).unwrap_or_default();
         game.resman.remove("module");
         game.resman.add(priority::MODULE, "module", LayerClass::Erf, ws.module.container());
         game.invalidate();
@@ -5379,6 +5481,7 @@ impl Moonglow {
         if textures {
             self.forget_drawn_textures();
         }
+        self.module_tilesets_changed(&sets);
         self.load_order_changed();
     }
 
@@ -5388,7 +5491,9 @@ impl Moonglow {
     /// ([`crate::outside`]). The game data's tables are forgotten only
     /// where a 2DA is among them.
     pub(crate) fn update_module_layer(&mut self, keys: &[ResKey]) {
-        self.release_game_data();
+        if self.ws.is_none() || !self.game_free_for(|w| w.layers = true) {
+            return;
+        }
         let (Some(game), Some(ws)) = (exclusive(&mut self.game), &mut self.ws) else { return };
         if ws.flush().is_err() {
             return;
@@ -5418,7 +5523,42 @@ impl Moonglow {
         if keys.iter().any(|k| DRAWN_WITH.contains(&k.restype)) {
             self.forget_drawn_textures();
         }
+        let sets: Vec<_> =
+            (keys.iter()).filter(|k| k.restype == ResType::SET).map(|k| k.resref).collect();
+        self.module_tilesets_changed(&sets);
         self.load_order_changed();
+    }
+
+    /// The module's tilesets whose `.set` is not the one in the game
+    /// data's module layer (a step undone or redone, a plugin's write):
+    /// put in the layer, and the open areas drawn from them read them
+    /// again. Only the `.set` files are compared.
+    pub(crate) fn follow_module_sets(&mut self) {
+        let (Some(game), Some(ws)) = (self.game.as_deref(), self.ws.as_ref()) else { return };
+        let layer = game.resman.layers().iter().find(|l| l.label == "module");
+        let Some(was) = layer.and_then(|l| l.container.as_mem()) else { return };
+        let sets = sets_changed(was, &ws.module);
+        if !sets.is_empty() {
+            let keys: Vec<ResKey> = sets.iter().map(|s| ResKey::new(*s, ResType::SET)).collect();
+            self.update_module_layer(&keys);
+        }
+    }
+
+    /// Tilesets kept in the module changed (`sets`): the open areas drawn
+    /// from one read it again, and the tiles palette and the groups'
+    /// pictures made from it are made again, as a tileset changed in a
+    /// folder the game data reads is (M5's W5).
+    fn module_tilesets_changed(&mut self, sets: &[mg_core::ResRef]) {
+        if sets.is_empty() {
+            return;
+        }
+        for view in self.area_views.values_mut() {
+            if view.tileset_read().is_some_and(|t| sets.contains(&t)) {
+                view.reload();
+            }
+        }
+        self.palette.forget_tilesets(sets);
+        self.thumbnails.forget_tilesets(sets, self.viewport.as_ref());
     }
 
     fn run_actions(&mut self) {
@@ -5673,32 +5813,25 @@ impl Moonglow {
                 }
             }
             Action::PopInProperties(tab) => {
-                if let Some(held) = self.held_text.take() {
-                    if let Some(command) = held.command {
-                        match held.typed {
-                            true => talk_typed::apply(self, command),
-                            false => {
-                                if let Err(e) = self.apply(command)
-                                    && !std::mem::take(&mut self.claims.held)
-                                {
-                                    self.log.error(e.to_string());
-                                }
-                            }
-                        }
-                    } else if let Some(action) = held.action {
-                        self.actions.push(action);
-                    }
-                    self.buffers.remove(&held.id);
-                }
+                self.set_held_text();
                 self.properties_changed.retain(|_, c| c.tab != tab);
                 self.closing_cancels.retain(|(_, c)| c.tab != tab);
                 let (area, objects, first_path) = match &tab {
                     Tab::Instance { area, path } => {
                         (Some(*area), vec![path.clone()], Some(path.clone()))
                     }
-                    Tab::Instances { area, paths } => {
-                        (Some(*area), paths.clone(), paths.first().cloned())
-                    }
+                    // (Its first object's area, and those of its objects in
+                    // it: the area whose panel it came from.)
+                    Tab::Instances { objects } => match objects.first() {
+                        Some((area, first)) => (
+                            Some(*area),
+                            (objects.iter().filter(|(a, _)| a == area))
+                                .map(|(_, p)| p.clone())
+                                .collect(),
+                            Some(first.clone()),
+                        ),
+                        None => (None, Vec::new(), None),
+                    },
                     _ => (None, Vec::new(), None),
                 };
                 if let (Some(area), Some(first)) = (area, first_path) {
@@ -5894,6 +6027,7 @@ impl Moonglow {
                         bake_view::follow(self, step, redo);
                         self.fixes_follow(step, redo);
                         self.sync_haks();
+                        self.follow_module_sets();
                         self.log.info(format!(
                             "{} {label}",
                             if action == Action::Undo { "Undid" } else { "Redid" }
@@ -6482,7 +6616,7 @@ impl Moonglow {
             Ok(()) => {
                 let path = self.module_path().unwrap_or_default();
                 self.log.info(format!("Saved {}", path.display()));
-                self.settings.remember(&path);
+                self.settings.remember_saved(&path);
                 self.forget_recovery();
                 // (Saved elsewhere, or a new module's first save: the copy
                 // made under its old place holds work that is saved now,
@@ -6905,11 +7039,12 @@ impl Moonglow {
                         data: staged.get(k).map(<[u8]>::to_vec),
                     })
                     .collect();
-                let mg_module::build::Pass { results, now, scripts } = pass;
-                Some((results, edits, now, scripts))
+                let outcomes = mg_module::build::outcomes(&pass, &job.module, &staged);
+                let mg_module::build::Pass { results, now, scripts, .. } = pass;
+                Some((results, edits, now, scripts, outcomes))
             },
             move |app, made| {
-                let Some((results, edits, now, scripts)) = made else { return };
+                let Some((results, edits, now, scripts, outcomes)) = made else { return };
                 let failed: Vec<String> = results
                     .iter()
                     .filter_map(|r| r.result.as_ref().err().map(|e| e.message.clone()))
@@ -6925,7 +7060,14 @@ impl Moonglow {
                     });
                 }
                 app.keep_compiled(now, file.as_deref());
-                let changed = edits.len();
+                // (Compiled scripts whose bytes changed; debug files said
+                // apart, only when there are any.)
+                let changed = outcomes.iter().filter(|o| o.compiled.is_changed()).count();
+                let debug = outcomes.iter().filter(|o| o.debug.is_changed()).count();
+                let debug = match debug {
+                    0 => String::new(),
+                    n => format!(", {n} debug files changed"),
+                };
                 if !edits.is_empty()
                     && let Err(e) = app.apply(Command::new("Compile scripts", edits))
                 {
@@ -6936,11 +7078,15 @@ impl Moonglow {
                     true => format!("; {left} as they were when last compiled, left alone"),
                     false => String::new(),
                 };
-                app.log.info(format!(
-                    "Compiled {} scripts: {} failed, {changed} changed{unchanged}",
-                    results.len(),
-                    failed.len()
-                ));
+                let details = outcomes.iter().map(mg_module::build::Outcome::line).collect();
+                app.log.info_with(
+                    format!(
+                        "Compiled {} scripts: {} failed, {changed} changed{debug}{unchanged}",
+                        results.len(),
+                        failed.len()
+                    ),
+                    details,
+                );
             },
         );
     }
@@ -7154,7 +7300,9 @@ impl Moonglow {
     /// refreshes what was shown from them. Asked for (Tools › Reload
     /// Resources), it says when nothing changed.
     pub fn reload_resources(&mut self, asked: bool) {
-        self.release_game_data();
+        if !self.game_free_for(|w| w.reload = Some(asked || w.reload == Some(true))) {
+            return;
+        }
         let Some(game) = exclusive(&mut self.game) else { return };
         let mut changed = match game.resman.reload_changed(user_content) {
             Ok(c) => c,
@@ -7197,10 +7345,11 @@ impl Moonglow {
 
     /// What was shown from the game data is shown anew: its layers changed.
     fn game_data_changed(&mut self) {
-        self.release_game_data();
         // (Quick Open's part of the load order is read again from it.)
         self.quick_open.index.forget_game();
-        if let Some(game) = exclusive(&mut self.game) {
+        if self.game_free_for(|w| w.changed = true)
+            && let Some(game) = exclusive(&mut self.game)
+        {
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
         }
@@ -7246,8 +7395,13 @@ impl Moonglow {
             .game
             .as_deref()
             .map_or(mg_core::Codepage::WINDOWS_1252, mg_rules::GameData::text_codepage);
+        // (Lights Moonglow made that flicker stay dynamic.)
+        let table = self.game.as_deref().and_then(|g| g.table("placeables").ok());
         let Some(ws) = self.ws.as_mut() else { return };
-        let rules = ws.module.project_file.make_static.clone().with_scripts(&ws.module);
+        let mut rules = ws.module.project_file.make_static.clone().with_scripts(&ws.module);
+        if let Some(t) = table {
+            rules = rules.with_flickering_rows(&t);
+        }
         let mut edits = Vec::new();
         let (mut made, mut within) = (0, 0);
         let mut left = mg_module::areas::StaticPlan::default();
@@ -7273,7 +7427,11 @@ impl Moonglow {
                 use mg_module::areas::Kept;
                 if matches!(
                     why,
-                    Kept::Variable(_) | Kept::Tag(_) | Kept::ResRef(_) | Kept::Script(..)
+                    Kept::Variable(_)
+                        | Kept::Tag(_)
+                        | Kept::ResRef(_)
+                        | Kept::Script(..)
+                        | Kept::Flickers
                 ) {
                     let tag = list[*i].string("Tag").map(text::decode).unwrap_or_default();
                     named.push(format!("{tag} in {area}: {}", why.describe()));
@@ -7362,8 +7520,19 @@ impl Moonglow {
         if self.haks_layered.is_empty() {
             return false;
         }
-        self.release_game_data();
-        let Some(game) = exclusive(&mut self.game) else { return false };
+        // (Needed now, before the command runs: not kept for later, and not
+        // waited for again where other changes wait already.)
+        let waiting = self.game_waits.any();
+        if !waiting {
+            self.release_game_data();
+        }
+        let Some(game) = exclusive(&mut self.game).filter(|_| !waiting) else {
+            self.log.warn(
+                "The module's haks stay open while the command runs: the game data is still in \
+                 use",
+            );
+            return false;
+        };
         remove_layers(&mut game.resman, is_hak_layer);
         self.haks_layered.clear();
         self.game_data_changed();
@@ -7378,7 +7547,9 @@ impl Moonglow {
             return;
         }
         let baked = self.ws.as_ref().and_then(|ws| ws.module.project_file.baked_rows().ok());
-        self.release_game_data();
+        if !self.game_free_for(|w| w.layers = true) {
+            return;
+        }
         let (Some(game), Some(gi)) = (exclusive(&mut self.game), &self.install) else { return };
         remove_layers(&mut game.resman, is_hak_layer);
         match game.resman.add_haks(gi, &listed) {
@@ -7411,7 +7582,9 @@ impl Moonglow {
         if !had && now.is_none() {
             return;
         }
-        self.release_game_data();
+        if !self.game_free_for(|w| w.layers = true) {
+            return;
+        }
         let Some(game) = exclusive(&mut self.game) else { return };
         mg_module::bake::layer_pending(&mut game.resman, Default::default(), baked.as_ref());
         self.game_data_changed();
@@ -8080,6 +8253,113 @@ impl Moonglow {
         }
     }
 
+    /// Whether the game data may be changed now ([`exclusive`] then gives
+    /// it): the window lets go of it first ([`Moonglow::release_game_data`]),
+    /// unless a change waits already. Where it is still held, or a change
+    /// waits, what `wait` marks is kept, to be made once it is free
+    /// ([`Moonglow::make_waiting_game_changes`]), and the log says so, once:
+    /// not lost, as it was, and not waited for again by every change after.
+    pub(crate) fn game_free_for(&mut self, wait: impl FnOnce(&mut GameWaits)) -> bool {
+        if self.game.is_none() {
+            return false;
+        }
+        if !self.game_waits.any() {
+            self.release_game_data();
+            if exclusive(&mut self.game).is_some() {
+                return true;
+            }
+        }
+        wait(&mut self.game_waits);
+        trace::note(format!("game data still held: {} wait", self.game_waits.said()));
+        if !std::mem::replace(&mut self.game_waits_told, true) {
+            self.log.warn(format!(
+                "The game data is still in use (read on another thread, or by a job): {} will \
+                 be updated once it is free",
+                self.game_waits.said()
+            ));
+        }
+        false
+    }
+
+    /// Each frame: the changes to the game data that wait for it
+    /// ([`Moonglow::game_free_for`]) made once it is free, as the window
+    /// has things then (the module open now, its haks as listed now: not
+    /// as they were when asked). Never waits: where a job or a thread
+    /// still holds it, asks again in a while. Where only the 3D views and
+    /// the haks' model views hold it, it is let go of here.
+    pub(crate) fn make_waiting_game_changes(&mut self, ctx: &egui::Context) {
+        if !self.game_waits.any() {
+            return;
+        }
+        if self.game.is_none() {
+            (self.game_waits, self.game_waits_told) = Default::default();
+            return;
+        }
+        if exclusive(&mut self.game).is_none() && !self.busy() && !self.game_data_held() {
+            self.release_game_data();
+        }
+        if exclusive(&mut self.game).is_none() {
+            self.frame_after(ctx, std::time::Duration::from_millis(250));
+            return;
+        }
+        let waits = std::mem::take(&mut self.game_waits);
+        self.game_waits_told = false;
+        trace::note(format!("game data free: {} made", waits.said()));
+        if waits.layers {
+            self.layer_open_module();
+        }
+        if let Some(asked) = waits.reload {
+            self.reload_resources(asked);
+        }
+        if waits.layers || waits.tlk {
+            self.reload_custom_tlk();
+        }
+        if waits.layers || waits.changed {
+            self.game_data_changed();
+        }
+        self.log.info(format!("The game data is free again: {} updated", waits.said()));
+    }
+
+    /// The game data's module layers (its haks, the walkmesh bake's rows
+    /// and the module itself) made as the open module has them now, the
+    /// last module's taken out: none with no module open. The game data
+    /// must be free.
+    fn layer_open_module(&mut self) {
+        let Some(game) = exclusive(&mut self.game) else { return };
+        remove_layers(&mut game.resman, is_module_layer);
+        let mut layered = Vec::new();
+        match (&mut self.ws, &self.install) {
+            (Some(ws), Some(gi)) => {
+                // (Module Properties' hak list as it is now, unsaved
+                // changes included.)
+                let _ = ws.flush();
+                let stacked = ws.module.stack(&mut game.resman, gi);
+                told_stacked(&mut self.log, &mut self.nwsync_content, gi, stacked);
+                layered = ws.module.haks().unwrap_or_default();
+            }
+            // (No game install: the module's own layer alone, as
+            // `refresh_module_layer` makes it.)
+            (Some(ws), None) => {
+                let _ = ws.flush();
+                let c = ws.module.container();
+                game.resman.add(priority::MODULE, mg_resman::MODULE_LABEL, LayerClass::Erf, c);
+            }
+            (None, _) => {
+                mg_module::bake::layer_pending(&mut game.resman, Default::default(), None);
+            }
+        }
+        game.invalidate();
+        text::set_game_codepage(Some(game.codepage()));
+        self.haks_layered = layered;
+    }
+
+    /// Whether changes to the game data wait for it to be free
+    /// ([`Moonglow::game_free_for`]).
+    #[doc(hidden)]
+    pub fn game_changes_waiting(&self) -> bool {
+        self.game_waits.any()
+    }
+
     /// Whether something other than the window reads the game data (a job,
     /// an area read on a thread): not the 3D views, which let go of it to
     /// have it changed ([`Moonglow::release_game_data`]).
@@ -8090,6 +8370,51 @@ impl Moonglow {
         // go with the views: `hak_view::resources`.)
         let haks = self.haks.iter().filter(|d| d.holds_game()).count();
         Arc::strong_count(game) - 1 > usize::from(views) + haks
+    }
+}
+
+/// Changes to the game data that could not be made when they were asked
+/// for, something else reading it still: made once it is free
+/// ([`Moonglow::make_waiting_game_changes`]), worked out from what the
+/// window has then.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GameWaits {
+    /// The module's haks, the walkmesh bake's rows and the module's own
+    /// layer, made as the open module has them (none with none open).
+    pub(crate) layers: bool,
+    /// The module's custom talk table, read again.
+    pub(crate) tlk: bool,
+    /// Tools › Reload Resources (`Some(asked)`: said when nothing changed).
+    pub(crate) reload: Option<bool>,
+    /// The game's tables and names, read again from its layers.
+    pub(crate) changed: bool,
+}
+
+impl GameWaits {
+    pub(crate) fn any(&self) -> bool {
+        *self != Self::default()
+    }
+
+    /// What waits, in a few words, for the log.
+    pub(crate) fn said(&self) -> String {
+        let mut what = Vec::new();
+        if self.layers {
+            what.push("the module's haks and resources");
+        }
+        if self.tlk {
+            what.push("the custom talk table");
+        }
+        if self.reload.is_some() {
+            what.push("the reloaded resources");
+        }
+        if self.changed && !self.layers {
+            what.push("the game's tables");
+        }
+        match what.split_last() {
+            Some((last, [])) => (*last).into(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+            None => "nothing".into(),
+        }
     }
 }
 
@@ -8112,6 +8437,40 @@ fn kept_by_kind<'a, T>(kept: &'a [(String, T)], tab: &Tab) -> Option<&'a (String
 /// `ResMan::add_haks` labels them).
 fn is_hak_layer(layer: &mg_resman::Layer) -> bool {
     layer.label.starts_with("hak:")
+}
+
+/// A layer of the open module's: its own, a hak's or its NWSync content's.
+fn is_module_layer(l: &mg_resman::Layer) -> bool {
+    l.priority == priority::MODULE
+        || is_hak_layer(l)
+        || mg_module::nwsync_content::is_nwsync_layer(l)
+}
+
+/// Logs what stacking the module's haks found, and keeps its NWSync content
+/// (the server the project names, over the haks; Build › NWSync Content downloads).
+fn told_stacked(
+    log: &mut Log,
+    content: &mut nwsync_content_view::NwSyncContent,
+    gi: &mg_resman::GameInstall,
+    stacked: mg_module::Stacked,
+) {
+    let mg_module::Stacked { missing, wrong, nwsync } = stacked;
+    for h in missing {
+        log.warn(text::capitalized(&gi.hak_not_found(&h)));
+    }
+    if let Some(e) = wrong {
+        log.error(format!("Could not open the module's haks: {e}"));
+    }
+    content.mounted = None;
+    if let Some(n) = nwsync {
+        if let Some(line) = n.summary() {
+            log.info(line);
+        }
+        for w in n.warnings() {
+            log.warn(format!("NWSync content: {w}"));
+        }
+        content.mounted = Some(n);
+    }
 }
 
 /// Takes the layers `gone` says out of the load order.
@@ -8297,6 +8656,24 @@ const DRAWN_WITH: [ResType; 5] =
 /// Whether the module's textures (and their MTR and TXI files) are others
 /// than the module's layer of the game data was made with (`was`): one
 /// set again (the module holds another `Arc` for it), added or removed.
+/// The tilesets kept in the module whose `.set` is not the one the game
+/// data's module layer `was` made with: changed, added or removed.
+fn sets_changed(was: &mg_resman::MemContainer, module: &Module) -> Vec<mg_core::ResRef> {
+    use mg_resman::Container;
+    let before = was.keys().filter(|k| k.restype == ResType::SET);
+    let now = module.keys_of(ResType::SET).copied();
+    let mut sets: Vec<mg_core::ResRef> = (before.chain(now))
+        .filter(|k| match (was.shared(k), module.shared(k)) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            _ => true,
+        })
+        .map(|k| k.resref)
+        .collect();
+    sets.sort();
+    sets.dedup();
+    sets
+}
+
 fn drawn_with_changed(was: &mg_resman::MemContainer, module: &Module) -> bool {
     use mg_resman::Container;
     let now = || DRAWN_WITH.iter().flat_map(|t| module.keys_of(*t));

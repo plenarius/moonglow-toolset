@@ -3,7 +3,7 @@ type: Manual Page
 title: Scripts
 description: Scripts - the script editor, finding your way in code, and the compiler.
 tags: [manual, scripts, nwscript]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T10:35:01Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T12:35:56Z }
 ---
 
 # Scripts
@@ -34,7 +34,7 @@ saved into the module it asks first, as closing the tab does (its ×,
 Ctrl+W, the tab's menu, its window's Close): **Save** puts the text
 into the module, as Save does, and closes the tab, **Don't Save** closes
 it as last saved, and **Cancel** keeps it open. A script closed with
-nothing unsaved, or closed by that question's Save, and opened again in
+nothing unsaved (by its ×, its menu or its header's Cancel), or closed by that question's Save, and opened again in
 the same session has its bookmarks, Undo history, codepage and External
 Editor link as it left them; one closed by Don't Save opens anew. A script deleted from the module while closed loses what was kept. Where the
 editor is narrow, Save and Compile lose their words first, then the icons go into More from the end of the row, then
@@ -477,6 +477,19 @@ declaration says `void` overwrites a variable of the script that calls
 it; one that returns another type stops the script where the value is
 used. Make the two agree to be rid of the warning.
 
+One way of writing compiles otherwise than in Aurora, on purpose: a
+script that includes a file with a `void main()` of its own. Aurora's
+Build compiles the include's `main` in place of the script. A
+condition (`int StartingConditional()`) becomes the include's `main`,
+which in the game always fails as a condition, and a script that is
+only the `#include` becomes it too (and a script with no entry point
+of its own, whose include has a `StartingConditional`, becomes that).
+Moonglow compiles what was written: the script's own entry point, and
+nothing for a script without one, which is an include. Each such script
+is warned of, in Compile All's log and by `mg compile`: the include's
+`main`, its line, and what Aurora makes of it. A module built in Aurora
+and then in Moonglow counts these scripts as changed.
+
 To compile with a program of your own instead (a newer build of the
 compiler, `nwnsc`), choose it in **Tools › Options › Script Editor ›
 External Script Compiler** (see [Options](10-options.md)); what it says
@@ -491,7 +504,22 @@ takes more than two minutes is stopped, and says so.
 
 **Build › Compile All Scripts** (F7, or **Compile** at the Top Bar's
 right end) compiles every script in the module;
-the log lists the failures and how many changed. An include file (a
+the log lists the failures and says how many were compiled, how many
+failed, and how many changed (compiled scripts whose bytes differ from
+what was there; debug files, with Generate Debug Information, are
+counted apart, when there are any). **Details**, beside that line,
+opens a line for each script compiled, those changed first, then the
+rest by name: the script, why it was compiled, and what came of it
+(compiled again with the bytes differing or the same, a new compiled
+script, or the compiler's error). The reasons are: Moonglow had not
+compiled it before (nothing is remembered of it here, as after the
+first Compile All of a module, or when the haks or settings changed);
+it or something it includes changed; its compiled script was not
+Moonglow's (another tool made it, or it was changed); it had no
+compiled script; it had no debug file (with Generate Debug Information);
+it was asked for (compiling the scripts named). `mg compile --json`
+says the same for each script (`compiled_scripts`: `script`, `why`,
+`ok`, `changed`, `debug_changed`). An include file (a
 script with no `main` and no `StartingConditional`; one in a comment
 doesn't count) isn't compiled on its own: it is compiled into the
 scripts that include it, and may lean on what they bring. (Aurora's

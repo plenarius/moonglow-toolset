@@ -249,7 +249,11 @@ export type Area = {
 export type Terrain = {
     tilesets: (self: Terrain) -> { { resref: string, name: string } },
     new_area: (self: Terrain, spec: { name: string, tileset: string, width: number, height: number }) -> string,
-    open: (self: Terrain, area: string) -> Area,
+    -- A seed (API 0.10): the area's tiles and lights chosen by its own
+    -- random choices, begun from it.
+    open: (self: Terrain, area: string, options: { seed: number? }?) -> Area,
+    -- The job's random choices begun again from n (API 0.10).
+    seed: (self: Terrain, n: number) -> (),
 }
 
 -- Something selected or open in the window (API 0.4): what it is, and

@@ -3,7 +3,7 @@ type: Backlog
 title: 'Deferred: what was left out, for a decision later'
 description: What finished work left undone or unchecked, filed by area of the program (an entry's last words say which report, issue or review it came from), each awaiting a verdict - fix, add or drop; what is settled by decision or design is gathered at the end.
 tags: [backlog, deferred, after-parity]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-23T01:04:04Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T12:52:22Z }
 ---
 
 # Deferred: what was left out, for a decision later
@@ -55,17 +55,6 @@ Size: S (an hour or two), M (a day or so), L (several days).
   own. (S, waits on the reviewer's run against the code before the
   fixes) (the review of November 2026, [its
   fixes](review-2026-11/fixes.md))
-- **Tests that write under the real cache folder:** since the last
-  pass of the review of November 2026 (its item 24), several tests make
-  a run folder through `mg_module::build::own_scratch_dir()` under the
-  real `~/.cache/moonglow/scratch`, as `mg lsp`'s tests already wrote
-  to the real cache, where the rest of the suite's scratch folders are
-  under `target/test-output`. Seen on the way by that pass's fixer, not
-  changed: beyond what was asked. (S) (the review of November 2026, the
-  last pass)
-
-## Script intelligence (`mg lsp`, the script editor)
-
 - **Editor setups:** the manual's Neovim and Helix snippets are untried
   in those editors. On Windows, `mg lsp` is checked only by CI's
   tests. (S) (waits on Neovim and Helix: neither is on the
@@ -97,33 +86,6 @@ Size: S (an hour or two), M (a day or so), L (several days).
     git's stages. A conflict file (the edits each side wants, for `mg
     apply`) or a Moonglow window would. (M)
   (The Domains of Dread's builder proposal, C9)
-- **NWNT and a typed line break, the owner's call:** a nasher NWNT
-  project refuses to save a file whose text holds a typed `\n` or `\r`
-  (`C:\new`), naming the field, as it refuses a label with a dot (the
-  review's F5): NWNT would read it back as a line break. The review's
-  entry allowed saying so in the log instead; which the owner prefers
-  is asked. Labels with `[`, `]` or a trailing space are kept
-  (Moonglow's reader reads them back); how `nwn_nwnt` reads them is not
-  measured (it would not convert the probe file). (S) (the review of
-  November 2026, F5)
-- **A resource name past ASCII in a module folder, the owner's call:**
-  a name with a byte above 0x7F keeps its name through a folder as
-  text, each such byte written as the character of its number and read
-  back as that byte (the review's F7), so that file names are the same
-  on every system and valid in a repository, not raw bytes as haks keep
-  them on Linux. A loose file another tool named in UTF-8
-  (`pièce01.utc`) is read as byte 0xE8, not as the game on Linux reads
-  it from `override/`. Whether that is the rule wanted is asked. (S)
-  (the review of November 2026, F7)
-- **Bulk saves are not flushed file by file, the owner's call:** every
-  file mg-module keeps is written through `write_replacing` (the
-  review's P17), but a module folder's save, a project's save and
-  NWSync's data files go through `write_replacing_one_of_many`, which
-  removes its temporary file on a failure and does not flush: a flush
-  cost about 1 ms a file here (3,000 files 0.07 s without, 2.95 s
-  with), so a first save of 30,000 files would go from under a second
-  to half a minute. They were never flushed before. Whether to flush
-  them anyway is asked. (S) (the review of November 2026, P17)
 
 ## Test loop
 
@@ -164,13 +126,6 @@ Size: S (an hour or two), M (a day or so), L (several days).
   Windows and macOS (the stock include normalizing a zero tangent; read
   on Linux, `reading_tangents`; Moonglow draws the same black on CI's
   Direct3D 12 and Metal). (S, waits on a builder's machine)
-- **Verify's hak cache and a hak rebuilt alike, the owner's call:**
-  what Verify keeps of a hak is named by its folder and its entries as
-  well as its name, time and size (the review's V14); a hak rebuilt
-  with the same time, size and layout, only its data changed, is still
-  taken for the old one. Hashing a hak's data would tell them apart, at
-  the cost of reading every hak on every run; asked of the owner. (S)
-  (the review of November 2026, V14)
 
 ## Frames (a steady 144 a second)
 
@@ -195,7 +150,14 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   its draws
   encoded in 6.1 ms (7.4); TDoD's synthetic
   woods (33,000 meshes in sight, 25,000 draws of meshes mostly drawn
-  once each) 14 to 31 ms, as before. Done that day: the lights' sets
+  once each) 14 to 31 ms, as before (its overview with 4x MSAA and the
+  Shaders on lands in one of two GPU levels from run to run, the code
+  unchanged: the median pinned near 11.2 ms and the quickest tenth 6.8
+  to 8.0, or a median of 6 to 8.5 and a tenth of 5.3 to 6.9; the slow
+  level goes with the card's automatic clocks settling low, not with
+  memory. Compare two builds in one run on alternate frames, or by many
+  runs sorted by level; [the frames note](research/notes_frames.md), 26
+  November). Done that day: the lights' sets
   numbered as a mesh's lights are chosen and a mesh's choice found by
   its place among the scene's meshes, the sun's shadows planned and the
   game's solid draws sorted on threads beside the other work (the
@@ -220,43 +182,45 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
 - **The performance audit's leftovers** ([the audit](performance-audit.md)
   of 2026-11-01; beyond what it was asked, filed by the owner's word the
   same day):
-  - **An area's placed sounds read from its GIT each frame** while its
-    sounds play (`area_audio::update`: every `SoundList` entry made a
-    `PlacedSound` again), seen in the frame test's stacks on area084
-    (2026-11-02, the large entry 10's samples) as a few percent of a
-    frame, not measured apart. Kept per area by the workspace's revision
-    it would be read once; not done for a real unintended consequence
-    until checked: what an editor holds unflushed (a sound dragged, its
-    command not yet given) would be heard where it was. (S, measure first)
-  - **A setting for MSAA:** 4× is fixed (`model_view::SAMPLES`). Off
-    saves about a tenth of an integrated GPU's picture and 107 MB of
-    targets a view at 3440×1400 (27 MB at 50% resolution); the renderer
-    is made anew on a change. (M)
-  - **TGA and PLT textures are uncompressed** (RGBA8: Tyrants of the
-    Moonsea's 70 of 96 MB of textures). Compressing them on the CPU as
-    they are read would take a quarter to an eighth of that, at a cost
-    in reading time (the encoder is there since 2026-11-10,
-    `mg_image::encode::compress`; what it costs a module's load is not
-    measured). (M)
   - **The animation step could follow what a picture costs:** a slow GPU
     stepping less often while the window is in front, measured with the
     GPU's timestamps (not on every backend). (M)
-  - **An area's opening to its last texture** is about 50 ms longer since
-    3.0.0 (area092: 112 to 165 ms); not taken apart. (S)
-- **Small slowdowns the timing run of 10 November did not trace:**
-  against the review's figures of 9 November (one run each; these the
-  lowest of three, beyond their spread), `frame_perf`'s area092 turned,
-  its draws encoded 2.18 ms where 1.95 (on the processor 1.85 where
-  1.58); the grass test's field close up without grass 1.03 ms where
-  0.86, and its draws encoded with the Shaders switch on 0.58 where 0.41
-  (on the processor less than before: waiting, not work); TDoD's woods
-  turned with Moonglow's own shader, the GPU 8.3 ms where 7.2 (more
-  material changes since its see-through runs keep to a chunk, against
-  1.4 ms less encoding). Each is under 2.2 ms a frame, inside the
-  budget; a bisect of the fix pass's merges, three runs a step, would
-  name the commits. Left as smaller than a run of the review moves
-  between sessions. (S) (the review of November 2026, [its
-  fixes](review-2026-11/fixes.md))
+- **The grass field's window frame close up, slower than in 3.18.1:**
+  the grass test's field close up without grass, the window's frames
+  (pointer, idle, wheel), took 1.17 to 1.25 ms where 3.18.1 took 0.98
+  to 1.02 (load about 10), and 2.63 to 4.14 where 1.62 to 2.50 at load
+  16 to 21. A bisect on a quieter machine (load 2.5 to 4, three runs a
+  step, the idle line) found three steps: b4da2984 (the box around
+  points in one place, the review's R20), +0.2 to 0.3 ms (0.84 to 1.14);
+  a small one between 992ed8d2 and 27a4050c, +0.06; and 89e62b7f (the UI
+  redesign's M3 shell), +0.11, which is Interface's. The first is given
+  back: the sun's shadow plan, on a thread of its own beside the meshes'
+  draws, put `box_of` around the receivers' box and each receiving mesh's
+  (about 10,000 a frame in the field), so it took 0.31 ms against the
+  draws' 0.18 and the frame waited about 0.18 ms for it; the receivers'
+  box is now taken as it goes (their boxes are already known to be
+  somewhere), and `box_of` is a plain loop. The plan takes 0.09 ms and
+  the frame no longer waits (temporary timers, load 15 to 22); the idle
+  line, develop and the fix alternated four rounds at load 15 to 16:
+  1.37 to 1.65 ms against 1.16 to 1.33. Confirmed on a quiet machine
+  (26 November, load 2.8 to 4.8, six rounds of the four alternated):
+  the idle line 0.84 ms before b4da2984, 1.21 on develop, 1.04 to 1.06
+  with the fix (spread 0.02 to 0.03). The fix gives back 0.17 of the
+  0.37 between 3.18.1's base and develop. Left: the small step between
+  992ed8d2 and 27a4050c, and the shell's. The review saw it as waiting
+  rather than work. The rest of the old entry is settled: area092
+  is quicker than in 3.18.1, the field's GPU step is dd8d0bc1 (grass
+  taking the shadows, kept) and the woods' is 6b26e702 (kept), as [the
+  frames note](research/notes_frames.md) of 25 November says. The
+  last step, 89e62b7f (M3's shell) +0.11 ms: profiled against 4.2.1
+  (abe3e024), it is the shell's own chrome drawn each frame, three fifths
+  widgets (the Outliner beside the module tree, the Status Bar, the Top
+  Bar's Quick Open, the tree's guide lines and eye icons) and two fifths
+  their shapes' tessellation, nothing drawn twice or for nothing: left,
+  since under the line would mean taking parts of the shell away
+  (Interface's, 26 November). (S, waits on a calm machine: load under 5
+  to time the small step) (the review of
+  November 2026, [its fixes](review-2026-11/fixes.md))
 - **The review of November 2026's performance fixes without a timing
   view:** its fixers ran no timing test and named the views that would
   show each change. The reviewer's run of 10 November timed every view
@@ -264,78 +228,147 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   but where the builder's rebuilt haks changed what is drawn, and
   world_perf's content doctor, fixed: V6, V10, V12), and gave views to
   the five largest costs that grew with the module (D20, D23, B22, A18,
-  N16; [the log](log.md), 10 November). These have no view yet:
-  - the area editor: every object selected and dragged, and so with
-    Adjust Location or the context menu open (A16); Paint at radius 25
-    m and density 50, the pointer still (A17); Update Instances with
-    30,000 listed (A18's rest: Edit Areas Together with 3,000 areas has
-    its view since M4's U29, `frame_perf::edit_areas_together_3000`);
-    2,000 placeables with the Position menu open (A20); a light placed
-    with 30,000 more rows in placeables.2da (A21); a 2,000-tile set's
-    Tiles page, its last tile chosen (A22); a hill tileset's 32 by 32
-    area all selected (A24);
-  - the blueprint editors: the Instances window of 100 creatures on its
-    Inventory page (B20); Setup Area Transition in a module of hundreds
-    of areas (B21); the Creature Wizard's appearance page and a
-    creature's Feats with long tables (B22's rest); a large Custom
-    palette, List and Gallery, a search typed (B23, B24); the gallery's
-    scroll bar dragged to its end (B25); an item's Appearance page with
-    a thousand icons, Select Portrait, Select Texture with a search
-    (B26);
-  - an item blueprint's Properties page with text in its search, which
-    still matches every subtype row a frame (G4's half; the page is
-    timed without it, 1.6 ms);
-  - the editors: `spells.2da` at full width (D20's rest); Choose Model
-    open, and a described table whose `Row` column names itself (D21);
-    Advanced Search with a plugin menu command (D23's rest); the Claims
-    Table of 1,400 areas, a conversation's Search of 20,000 results,
-    Build Module with 20,000, an area's object list of 3,000 placeables
-    in the raw fields view (D24); Custom Content with a 20,000-line map
-    (D25); a typed line on a world-sized table (D27); `nwscript.nss`
-    read-only (D29); the Variables window on a variable with `rows =
-    "placeables"` (S20);
-  - the NUI Creator and the script editor: two Creator tabs side by
-    side, and Split source while a picture's name is typed (N3); a
-    column of 1,000 rows (N12); the Design page with 300 controls and a
-    list bound to 1,000 rows (N13); a combo of 10,000 entries, closed
-    (N14); 2,000 findings (N15); a docked panel's 2,000-option choice
-    (X5); Search Results after Find In Files (X8); Open Script with All
-    Resources (X10); the end of a huge script with completions open
-    (X18); Choose Image with a name typed (X11, X20); the Bindings page
-    of many binds (X22); Design with a deep window (X23); a list cell of
-    thousands of rows (X24);
-  - the renderer: a model view drawn beside the area, `FRAME_DETAIL=1`
-    (R9); `FRAME_SHADOW_QUALITY=high FRAME_MEMORY=labels` after a view
-    lets go (R5, R10); an animated cloaked NPC out of the map's region
-    (R15); an interior with a flame on every tile (R16); a TDoD area of
-    tinted placeables (R22); texture memory and area opening with DDS
-    heads and many colored NPCs (R12, R13);
-  - Verify, the plugins and the models: a second Find with haks and
-    game, Delete's question and Rename in a large module (V15 to V17); a
-    panel with `refresh = "selection"` over a large selection (C3), a
-    plugin check of many fixes in Verify Module (C4); `mg haks --usage`
-    on a module of many part-based creatures (M17); opening a large
-    nasher project (P19);
-  - the review's last pass (its item 17): the Blueprint Wizard's
-    category page, the Variables window on a variable with a large
-    `rows` table, the module tree with an area opened out, and a hak
-    saved with a large module open.
-  Each is a view to build in its timing test, timed before and after
-  its fix's commit: left as beyond what the reviewer's run was asked
-  (at most eight new views, the largest costs). (M) (the review of
+  N16; [the log](log.md), 10 November). The renderer's six (R9, R12,
+  R13, R15, R16, R22) have theirs since 26 November
+  (`frame_perf::render_views::renderer_fixes_at_scale`, [the
+  log](log.md)); what they leave, each an area's draw alone: 2,000 of
+  The Domains of Dread's placeables tinted in 50 colorways encode 0.6
+  to 0.8 ms more than untinted, as much before R22's fix as after (its
+  lookup was not this cost; their 288 more draws, each colorway of a
+  model batched apart, are about a third by the average time a draw
+  takes, the rest not found): under a millisecond, and the area's draw
+  of 2,000 placeables (5.8 to 7.6 ms encoded) is "The largest areas in
+  full view"'s cost, so left; and a second view drawn through a large
+  area's renderer between its frames still costs the area's encoding
+  0.20 to 0.43 ms more than the same view drawn through a renderer of
+  its own (develop, three runs at a load of 10 to 17; the shadow map is
+  drawn again in neither): something of a view's still redone that R9's
+  fix did not keep, not found within the 5.4.0 release's time for these
+  views (finding it is a profile of the renderer's own caches), under a
+  millisecond, so left.
+  The command line's and Verify's (V15 to V17, C3, C4, M17, P19) were timed on 26 November
+  (`mg-module`'s `tests/timing.rs`, `mg-plugin`'s `tests/timing.rs`, `apps/mg`'s
+  `tests/timing.rs`; three alternating rounds at load 10 to 30, the lowest, the
+  median, the highest of nine runs, [the log](log.md)). All held; what is
+  left, each with its reason: a second Find with the haks and the game
+  over 45,000 blueprints (V15) 1,952 / 2,169 / 3,731 ms before, 54 / 77 / 112
+  after, 29 / 36 / 41 with the sort's rank looked up once; the rest
+  (the layers' key lists walked and sorted again at each Find, about 25 ms)
+  is a cache of the wanted list by the game's generation and the module's
+  revision, a design of its own (beyond a local change). Delete's question
+  of 20 areas in 5,000 (V16) 29.8 / 39.0 / 58.7 s before, 0.65 / 0.70 / 1.05
+  s after, 0.35 s the first time and 0.14 to 0.17 s after with the tag
+  counts kept per index; the rest is the index's walk for the transitions
+  (7 ms an area, over the line; beyond a local change: a map of the
+  transitions by their destination tag, made with the index). Rename of a
+  script in 5,000 areas (V17) 21.4 / 23.1 / 40.1 ms before, 5.6 / 6.6 /
+  11.1 after (the module's copy and the 255 references' rewrite, at the
+  line). A panel over 500 selected objects (C3) 389 / 411 / 564 ms before
+  (it ran out of time), 3.5 / 4.3 / 6.8 after; 1,024 tiles 13.4 to 2.7 ms.
+  A check of 2,000 fixes over 10,000 resources (C4) 1,752 / 2,262 / 3,114
+  ms before, 61 / 90 / 92 after (a job's thread, not a frame).
+  `mg haks --usage` of 20,000 creatures and 10,000 scripts (M17) 3.1 / 3.3 /
+  4.6 s before, 1.4 / 1.5 / 2.8 after, against 0.94 / 1.0 / 1.4 and 0.82 /
+  0.85 / 1.3 for a small module (the process's own cost): +2.2 s to +0.6
+  s (a command, no frame). Opening a project of 30,000 sources (P19) 272 /
+  289 / 522 ms before, 230 / 239 / 255 after, its walk for the files left
+  out 117 / 118 / 214, then 69 / 71 / 78 (what is left is the folder's own
+  walk). Quiet-machine confirmation of all: waits on a calm machine
+  (load under 5).
+  The area editor's have
+  theirs since 25 November (`frame_perf::area_editor_at_scale`, [the
+  log](log.md)); what they leave, timed in a quiet slot (26 November
+  07:10, the load 3 to 4, three runs): with 5,000 placeables selected,
+  +0.54 to +0.80 ms a frame at rest (from +2.07; the Properties panel
+  keeps its objects' places and counts their items anew only when they
+  change), most of it their turning rings, 96 pieces each (now kept on
+  screen while the view and the rings stand, not yet timed quietly),
+  and 0.4 to 0.7 ms more at rest after a drag and its undo than before
+  it (measured before these changes, cause not found, not timed again);
+  in a drag +3.3 to +3.5 ms (from +8.3), most of it their boxes' 480,000
+  vertices made anew each frame as the drag poses them (Engine and
+  Rendering's task: the renderer is to draw selection boxes instanced,
+  the hand-off in the area view's overlay code agreed with Interface
+  first); every tile of a hilly area selected, its outlines
+  put on screen each frame the camera turns (0.8 to 1.1 ms); and the
+  Position menu's walkmesh items, untimed, since the scratch module has
+  no `[bake]` (a project with one would time them).
+  The blueprint editors' have theirs since 26 November
+  (`frame_perf::blueprint_editors_at_scale`, [the log](log.md)); what
+  they leave, timed in the same slot: Select Texture's first opening
+  11.7 to 12.6 ms (from 27; 135,094 textures, their names sorted as
+  numbers) and a letter typed in its Find 6.0 to 6.3 (within the
+  budget: it looks among what the last filter found); Select Portrait's
+  opening 4.8 ms with the install's portraits.2da (from 9.9) and 8.1 to
+  8.6 with 32,000 rows (from 18.8; the portraits' names gathered in one
+  walk); an item's Appearance page of 999 icons opened in 8.75 to 8.87
+  ms (its icons' numbers 1.8, the grid 1.1 to 1.3, the rest the
+  window's first frame); the
+  Custom palette with 8,000 items found against 100, List +105 (to 108),
+  Gallery +150 (to 168) (likely a header built each frame for every
+  category holding a find, in sight or not: laying the palette's tree
+  out by rows is a change of its own); the Instances window of 100
+  creatures on its Feats page +90 (to 130) µs, its timers' remaining
+  costs each under the line (Classes 20 µs, the inventory's rows 40);
+  and the Appearance Gallery's drag to the end, its median 3.5 (to 4.6)
+  ms at 30,000 rows but worst frames of 10.4 to 14.0, and its pictures
+  in sight made in frames of up to 4.9 to 7.9 ms (a creature's picture
+  drawn on the window's thread at about 5 ms, past the 2 ms a frame
+  gives pictures, one drawn whatever it costs: drawing them apart is a
+  renderer change).
+  The editors' have theirs since 26 November
+  (`frame_perf::editors_at_scale`, [the log](log.md)); what they leave,
+  timed again at the final commit, three runs each, each view against
+  its rest (the line 70 µs). Truly quiet (26 November 03:22 to 03:24,
+  the load 3 to 5, the encoding job paused): `spells.2da` at its full
+  width +58 to +82 µs over the same rows cut to the 26 columns in sight
+  (at the line; the cells out of sight sideways are one place a run
+  since 26 November; a run at 00:00, the processors idle but the load
+  still 12 to 18, had read +194 to +330); Choose Model open over 82,856
+  models +34 to +41 (within). At 00:00 (load 12 to 18): the raw fields
+  view with an area's Placeable List of 3,000 opened, +79 to +80 µs
+  over 20: each item out of sight is still asked whether it is open (an
+  id made and egui's memory looked up, 3,000 a frame), and passing them
+  over in blocks needs to know which are open without asking, which
+  egui's memory can't say: left, beyond a local change; within then: a
+  hak's Save with the large module open (the click 0.8 to 0.9 ms, its
+  frames until saved 3.8 to 5.5 ms), the typed line (2.5 to 3.6 ms on
+  the small module, 4.1 to 5.2 on the large), the Claims Table (+26 to
+  +31 µs), the conversation's Search of 20,000 (+37 to +43 µs, Find's
+  click 3.8 to 4.3 ms), Build Module's 20,000 (+11 to +22), Custom
+  Content (−100 to +23), `nwscript.nss` (−2 to +5), the Variables
+  window (+2 to +61), the module tree (−32 to −28).
+  The NUI Creator's and the script editor's have theirs since 26
+  November (`nui_perf::the_creator_at_scale`, `NUI_VIEW` picks its
+  groups, and `editor_perf::scripts_at_scale`, `EDITOR_VIEW`; [the
+  log](log.md)), timed truly quiet at their final commit (26 November
+  03:22 to 03:24, the load 3 to 5; three runs), and the four that were
+  over the line timed again at batch 5's (05:15, the load 2; three
+  runs): the column of 1,000 rows +35 to +40 µs (+826 to +867 before),
+  the combo of 10,000 entries in Interact +3 to +11 (+160 to +197), a
+  key a frame in Choose Image's Find +10 to +15 (+1.34 to +1.61 ms):
+  the canvas keeps its layout, the pictures and strings the window
+  names and Interact's check of its session from one frame to the next
+  while the window is known unchanged (a quiet frame `end` found it
+  unchanged in), Find looks among what the filter before it found, and
+  a picture lingers 30 passes after it is last asked for. Left, for the
+  reason given: Design of 511 controls eight deep +157 to +164 µs
+  (+356 to +372 before): what is left is the 239 more containers drawn
+  than the shallow window, a third of it their properties looked up,
+  a sixth their hit areas and the rest their drawing; with no lookups
+  at all it would still be about +105, and under the line would mean
+  containers in sight without a hit area, which could not be clicked,
+  dragged or dropped on. Within: two
+  Creator tabs side by side (+13 to +23), Split source as a picture's
+  name is typed (−0 to +3), the Bindings page of 60 binds (+10 to +11),
+  the list's cell of 5,000 rows (+17 to +23) and New Bind open on it
+  (+12 to +18), 2,000 findings (−127 to −109), Choose Image with a name
+  typed (−35 to −25), Search Results of 10,000 lines (+4 to +10; the
+  loaded runs' "over in every run" was the load), Open Script with All
+  Resources (+1 to +9), the completion list at a huge script's end (+12
+  to +18), a plugin panel's choice of 2,000 options (+5 to +6).
+  (M) (the review of
   November 2026, [its fixes](review-2026-11/fixes.md))
-- **The area's Right Dock layout worked out anew each frame:**
-  `shell::active_area_right_base` clones the builder's layout through
-  `AreaRightLayout::normalized` (settings.rs); `area_visible_columns`
-  builds its nested lists two or three times a frame (`arrange_area`,
-  `area_wants_one_column`); and `Moonglow::docked_instance_tabs` is
-  collected again with the other tab lists each frame. Each is a few
-  small allocations, not measured as a share of a frame. Kept by the
-  layout, the wide flag and whether Properties shows (and by the dock's
-  change, for the tab list) they would be made once. Left as beyond
-  what 5.1.0's review asked (it listed them, and settings.rs was
-  another task's file then). (S, measure first) (5.1.0's review, F1)
-
 ## Blueprint editors and inventories
 
 - **Random item properties, what is left** (done: the Item Wizard's
@@ -353,27 +386,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   Godly, whose Weight Reduction would tell the table), read against
   `aurora_item_wizard.rs` (M). (Gems and gauntlets are offered Magical
   since 2026-10-30.) (a second builder's review, October 2026)
-- **Inventories, what is left** (done: the Creature Wizard's ResRef and Tag, its appearances
-  as pictures with Find, and every portrait; the inventory's Equip to a
-  free slot, To Backpack and Open Blueprint; talk-table text in its own
-  color; a Variables window that is sized; drag and drop and right-click
-  menus in the inventory, items dragged between inventories and within
-  a list, Copy and Paste; an item moved as it is, in one step; what a
-  taken slot held sent to the backpack, as Aurora does; Copy and Paste
-  carrying the item as it is, as a drag does; drags between two
-  objects' windows under test both ways, a slot's item onto a chest and
-  a chest's onto a taken slot; a weapon dropped on the secondary weapon
-  slot while the primary is free going in the primary, as Aurora puts a
-  longsword, a dagger and a hand axe, a torch in the secondary, and the
-  primary's own dragged there staying in the primary; the Creature
-  Wizard's categories without Familiars, as Aurora's: 2026-10-30; new
-  strings written to a talk-table range, 2026-11-02: [Text typed into the
-  talk table](typed-text-proposal.md)). Left:
-  - **Several items at once:** the inventory selects several (Ctrl,
-    Shift), but a drag, Copy and Paste carry one: `Dragged` and
-    `item_clip` hold one item each place; carrying the selection is a
-    drag of many rows, and where each lands (slots, grid places). (M)
-  (a second builder's review, October 2026)
 - **The feats' order in the Levelup Wizard's spell capture, the
   owner's call:** the capture that settled the review's G8
   (`levelup/spells-after.mod`) was made through Aurora's creature
@@ -382,27 +394,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   that capture alone. Whether Moonglow's Properties window should sort
   them so too is not checked; the choice is to confirm. (S) (the review
   of November 2026, G8)
-
-## Bulk editing
-
-- **Advanced Search, what it doesn't do** (from builders' asks on
-  Discord, October 2026; done: changing what it found, ticked or all, in
-  one step: a variable set or removed, an event's script, a field;
-  Edit Together and Edit Areas Together from its results; conditions
-  together, a class by its levels, number ranges and floats; an item
-  blueprint followed through bags in bags, and a creature blueprint
-  into the encounters that spawn it, since 2026-10-29; a spell by the
-  class that knows it, a conversation's lines kept by several
-  conditions, and the haks' and the game's blueprints searched
-  read-only, since 2026-11-02; feats, classes, item properties and
-  items held added and removed on what it found, through Edit
-  Together's list rules, since 2026-11-02:
-  [the design](lists-together-proposal.md)). A field is set only where
-  the object has it (none is added). Edit Together takes blueprints of
-  one type and objects of one kind placed in one area; items held by
-  placed objects, and conversations, open one by one. (S–M; beyond what
-  was asked of the lists' work, which left these as they were: the
-  deferred sprint, 2026-11-02)
 
 ## Palettes
 
@@ -421,23 +412,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
 
 ## Custom content data (2DAs and talk tables)
 
-- **A talk-table import far past the end, the owner's call:** an import
-  that reaches a row far past the table's end is one undo step (the
-  review's P4), with no bound on the gap: a team's range may begin
-  high, and `mg tlk-import` into a new table is a fair use. Whether an
-  import that grows the table by more than some number of empty lines
-  should be refused or asked about is asked. (S) (the review of
-  November 2026, P4)
-- **Verify and a table description's mistakes, the owner's call:** the
-  2DA editor reads a `name.2da.toml` with a mistake in it by
-  `Description::read`, keeping the rest and noting each mistake by line
-  (the review's P22); Verify, `mg 2da-check` and plugins keep
-  `Description::parse`, which stops at the first, as a check that
-  skipped a broken column would pass. `doctor.rs` could take `read` and
-  report each mistake as a `2da-described` warning, checking the other
-  columns; whether Verify should report every mistake or the first is
-  asked. (S) (the review of November 2026, P22, and what its fixers saw
-  on the way)
 - **Two of a hak's saves stay synchronous:** a hak tab's OK, its closing
   question's Save, Extract, Export as Files, Add Haks and the hak
   editor's own Save and Save As are jobs (the review's D19), but the
@@ -510,26 +484,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   it is that driver on Polaris cards, and the pink is not what Heed
   reports of his interiors (findings, "The lit check's pink on Heed's
   Vulkan"). (S) (Heed's reports, October 2026)
-- **Lights placed on the fly, the flicker** ([the proposal](lights-proposal.md)):
-  way B is built behind its option (Custom Light…, `mg_module::lights`;
-  the server reads the hak, finds the model in it and places the row:
-  `engine_custom_light.rs`), and the client answered the proposal's two
-  questions (2026-10-29, the third client batch): a `LightColor` light
-  and a model's light node light creatures and placeables as they light
-  tiles, so the Custom Light section's "Lights creatures and placeables too" starts
-  ticked; a draw takes as many lights as the client's Max Lights (32 by
-  default). Not built: a flicker (the node's color or multiplier keyed in
-  the model's `default` animation). Read for it (2026-10-30, the fourth
-  client batch, `reading_static_placeable_default_animation`): the
-  client plays a dynamic placeable's `default` (a light's color keyed
-  red, blue, red over 2 s cycled, the floor with it) and not a static
-  one's (it stayed red), so a flickering light is a dynamic placeable;
-  the area view holds a static placeable still since, and plays a
-  dynamic one's light node keys and its meshes' self-illumination keys
-  since 2026-10-30 (`point_lights_at`, `idle_keys_meshes`; the fifth
-  client batch). Left: the flicker itself in the Custom Light section (Custom Light…
-  writing the keyed `default` and a dynamic placeable). (S) (from
-  builders' reports after 1.16.2)
 - **A drag when a key changes the mode, the owner's call:** a drag under
   way is dropped, not committed, when a key changes the mode (the
   review's A12); committing it would be the other way. Asked. (S) (the
@@ -542,102 +496,52 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
 
 ## Rendering: creatures, particles, water and shaders
 
-- **A body part's name given in place of its mesh's is drawn with that
-  name's material:** the client draws the part's PLT on a mesh that names
-  something else even where an MTR of the part's own name names another
-  `texture0` (`part_textures_look`, row J: pink MTR, orange PLT drawn);
-  Moonglow draws the MTR, as the renderer reads every texture name
-  through its material. Deferred for its consequences: drawing a renamed
-  texture without its material would change every rename, the creature's
-  `ReplaceObjectTexture` ones too, whose material the client was not
-  read for; and nothing found hits it (the 24 TDoD necks given
-  `pmh0_neck028`, an MTR, name it in its own `texture0`, the same
-  picture). S. (a builder's report on 4.0, the part textures, 2026-11-10)
-- **A DDS of one luminance channel drawn alone:** the client draws it in
-  colors of no rule (`part_textures_look`, rows R to U: 60 blue, 128
-  dark red, 0 and 255 black), Moonglow gray. Awaiting a verdict: copying
-  colors of no rule, or calling such a file one the game misreads
-  (Verify could say so). In doubt before either: the rows' files were
-  written with one mip level, and the client reads past a single-level
-  standard DDS (noise; the learning of 2026-10-21 says to write all
-  levels), so the colors may be the fixture's and not the format's. Row
-  Q (the PLT over such a DDS of its name) was read with the same kind of
-  file. To be read again with all levels written before anything is
-  built on it; left filed by the owner's word, 2026-11-10. (the part
-  textures, 2026-11-10)
+- **A scene with little light draws the client's boxes 4 to 8 times
+  brighter than Moonglow's:** read with `chrome1_reflection_look`'s dark
+  light (ambient `0x080808`, no diffuse): the client's boxes of
+  `chrome1` stay several times brighter than Moonglow's, in the
+  placeables' boxes and the worn helmet's alike; the light uniforms the
+  two read (`frontLightModelProductSceneColor`, `lightAreaAmbient`) are
+  equal, so the cause is not found. Under the sun, and with none, the
+  two agree within a few of 255. Deferred as beyond what was asked (the
+  helmet fix of 2026-11-25 was the reflection's map; this is the dark
+  scene's whole brightness, and wants a reading of its own: which term
+  the client adds that Moonglow lacks). M. (the chrome1 reading,
+  2026-11-25)
 
-- **A mesh whose texture is nowhere is drawn darker than the client
-  draws it, black on top where the client's is gray:** seen beside the
-  part textures' reading (`part_textures_look`, rows l and z: a head's
-  mesh naming its own missing texture), with the Shaders switch off and
-  on alike. Read since (2026-11-13, GitHub issue 45, group `Z9@^~`): the
-  client draws such a mesh, a helmet's and a part's alike, close to a
-  white TGA of alpha 0 (row @), its object's environment map reflected
-  over all of it; Moonglow draws it so too, and draws row @ as dark as
-  its own row Z. What differs is how `chrome1` is reflected by a surface
-  that reflects wholly (the tops black in Moonglow, gray in the client),
-  which is every fully reflective texture's, not a missing one's.
-  Deferred as beyond what was asked (it would change the reflections of
-  every such texture in every view, and wants a reading of its own:
-  `chrome1` on a fully reflective box seen from several sides and
-  above, under the area's sun and without). M. (a builder's report on
-  4.0, the part textures, 2026-11-10; GitHub issue 45, 2026-11-13)
-- **A creature holding a torch** stands in the client with its arm
-  raised, the torch held up, and the torch lights the area around it;
-  Moonglow draws the arm as in any other stance and no light (its flame
-  burns, as the client's: [findings](findings.md), "A creature's parts'
-  emitters"). Seen beside the part emitters' reading
-  (`part_emitters_look`, group h). Deferred as beyond what was asked
-  (a stance and an item's light, not its emitters), and it wants a
-  reading of its own: which animation the client plays for it, and the
-  light's color and reach (the item's Light property, or the base
-  item's). M. (a builder's report on 4.0, CEP's effect tails,
-  2026-11-10)
+- **A see-through mesh's soft part and shiny water:** read with
+  `copies::reading_copy_order` (`MG_COPY_ORDER=front`): a standard
+  DXT5 of alpha 0.5 texels with `transparencyhint 1` standing in front
+  of a pool is drawn over its ground in the client, the water not
+  drawn behind it (its green, painted by a patched `fswater`, 39 of
+  255 there against 255 beside), as though the soft mesh wrote its
+  depth; and the water's copy holds the soft meshes behind it.
+  Moonglow draws a see-through mesh's soft part after the water,
+  without writing depth: in front of the pool it is laid over the
+  water (green 132), and behind it the copy lacks it (a render test
+  with the soft part drawn before the copy took it in, but then the
+  water was laid over the soft card in front, green 255). Deferred
+  for its consequences: whether the soft parts write depth decides
+  how every see-through mesh's soft texels overlap (grass, leaves,
+  decals over decals), which wants a reading of its own in the client
+  before it changes. M. (The framebuffer's copies entry, 2026-11-26)
+  That reading is made (`soft::reading_soft_depth`): the client's soft
+  texels write their depth above alpha 0.2. A change that wrote it so
+  (kept on the `soft-water` branch for after 5.4.0) matched the client
+  (cards in front of water 25.5 to 16.3 off its picture, in front of
+  particles 62.4 to 20.4) but was held out of the release for its cost,
+  timed by an in-process A/B (alternate frames, so both builds share
+  the GPU's clock level; an A/A control flat, 12.61 against 12.37):
+  TDoD's woods turned, quickest tenth 9.5 to 9.6 ms before against
+  11.4 to 12.4 after, about 2.5 ms (median about 11.5 to 17); the woods
+  overview 0.15 to 0.5 ms; the grass, water and area092 views within
+  0.05. Deferred for its consequence, a cost too high for the look.
+  Cheaper ways to try: write depth only where a soft part stands in
+  front of a mesh that reads the copy (shiny water, the particles); a
+  depth pre-pass of the soft parts; and see whether the discard with a
+  depth write loses early depth testing for the meshes drawn after.
+  (2026-11-26)
 
-- **The game's shaders, compiled (M0 of [the shaders
-  proposal](shaders-proposal.md)):** what the compiler (`mg-shader`) and
-  Verify's `shader-compile` check leave out. (from M0, 2026-10-21; Verify
-  compiles each program at six settings since 2026-10-29, and keeps what
-  compiled, `doctor::settings`)
-  - The C++ build: glslang is in every program and test binary that
-    links `mg-module` (about 40 s of C++ on a cold build, once).
-- **The game's lit shaders drawn (M1 of [the shaders
-  proposal](shaders-proposal.md)):** what `Renderer::game_shaders`
-  leaves out (the Shaders switch, on by default since M3; Moonglow
-  Viewer draws them since its 0.2.0). (from M1, 2026-10-21)
-  - The Domains of Dread's fountain is 10.6 of 255 from the client on
-    average with the Shaders switch on (the game's `fswater` with the
-    framebuffer's copies; 11.7 with Moonglow's own water; 13.7 with
-    Moonglow's own shader), with the area's fog or without. Not the
-    falling water's phase: compared at the client's own clock
-    (2026-11-02, `batch7_fountain_phase`: the debug `inc_standard`
-    showing each picture's `worldtimerTimeOfDay`, Moonglow drawn at it)
-    it is 10.57, 10.54 and 10.57, and 10.57, 10.53 and 10.56 half the
-    flow's 5-second cycle off (Moonglow's own pictures half a cycle
-    apart differ by under 1 there). What differs is the basin's water:
-    11 to 12 of 255 over it, its mean color within 2, the client showing
-    the basin's floor through the water, its pattern and all, where
-    Moonglow's surface is smooth. Not read: what the client's refraction
-    takes there (the copy's detail, what is drawn before the copy). (S–M:
-    `fswater` over a patterned floor, the client's beside Moonglow's)
-
-- **Tier A of the game's shaders (M2 of [the shaders
-  proposal](shaders-proposal.md)):** what the Shaders switch leaves out
-  or unchecked. (from M2, 2026-10-21)
-  - **The framebuffer's copies** (`texFBColor`/`texFBDepth`, [the
-    framebuffer proposal](framebuffer-proposal.md)) are made after the
-    solid meshes only (a material's `sample_framebuffer` drawn late,
-    after the shadows, since 2026-10-30). Over water (read 2026-10-30,
-    `reading_framebuffer_copy_over_water`: cards painting the copy above
-    them): a `sample_framebuffer` mesh's copy holds no water in the
-    client, as Moonglow's; a solid or `transparency 1` mesh's holds the
-    water in the client (likely the frame before's last copy: the camera
-    was still), where Moonglow gives it the solid meshes' copy (and so a
-    soft particle over water fades against what lies under it). Giving
-    those the frame before's picture: a second pair of copies (30 to 40
-    MB at the area view's size), filled from the targets as the frame
-    begins where the frame before was of the same view; a picture drawn
-    once has no frame before. (S–M)
 - **The frame budget of the game's shaders (M3 of [the shaders
   proposal](shaders-proposal.md)):** what the Shaders switch, on by
   default, leaves over the budget or unchecked. (from M3, 2026-10-21) (An area's first look: since 2026-11-02 the pipelines a module's
@@ -680,7 +584,28 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
     encoding of the pass (29% of the frame's samples), placing the draws
     in batches (16% with its look for draws met), writing the frame's
     values (12%), sorting (9%), the reach of the lights (8%); the game's
-    see-through draws still change chunk at 13,900 draws seen whole. (M)
+    see-through draws still change chunk at 13,900 draws seen whole.
+    Taken apart again on 25 November ([the frames
+    note](research/notes_frames.md), 25 November): the game's draws set
+    group 1 and the zero vertex buffer again at every draw (5,514 binds
+    each seen whole); now each is set only where another is bound, about
+    11,000 commands and 1.0 ms of encoding less, measured as both paths
+    on alternate frames of one `render_area` run; `frame_perf` at load 2
+    to 9 cannot tell 1 ms apart (draws encoded seen whole, on, 16.95
+    before and 16.1 after; turned 28.1 and 29.1; the window's frame with
+    the wheel turning seen whole, on, 17.5 before and 19.5 after, not
+    confirmed either way). Draws encoded seen whole 16.1 ms on against
+    12.8 off, turned 29.1 against 19.2 (the lowest of three). What is left is the game's programs
+    themselves: 5,500 to 7,500 pipeline changes against 3,200 off, two
+    groups set at each (the vertex program reads `texUnit0`, so group 2
+    is the material's), and the game's see-through runs by material
+    changing chunk 21,800 times against 5,900. Tried and dropped: the
+    chunk in their state (slower), a run split by chunk (inside the
+    spread). Left, as a change to how every mesh is stored for less
+    than the gap: the meshes' indices in one buffer for every chunk, so
+    that a chunk change binds a vertex buffer alone (5,300 fewer chunk
+    changes were worth 0.4 to 0.5 ms; halving the cost of 21,800 would
+    be about 1 ms at most, against 3.3 seen whole). (M)
   - A program whose uniforms can't be split falls back to Moonglow's
     shader, reported. Since 2026-11-02 a block a program names besides
     its loose uniforms (`uniform Name { … };`) is split with them; what
@@ -705,8 +630,8 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   the client's since 2026-11-02: a tile's or a static placeable's meshes
   naming the same textures take the first one's alpha and `NO_DISCARD`,
   [the findings](findings.md), "Static geometry is drawn in buckets";
-  a bucket of several models' meshes, two static placeables of one
-  texture, is not read, and Moonglow keeps each model's apart.)
+  two static placeables of one texture keep each model's apart in the
+  client too, as Moonglow does: `batch8d_bucket_models`, 2026-11-25.)
   - Moonglow's own shader in the builders' areas (TDoD's 690 DXT1
     textures with transparent texels black, its 21 materials naming maps
     without a render hint) waits on those areas' files (`tdod.mod` here
@@ -723,20 +648,13 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
     (`particleSoftness` 10 over the emitter's larger size, a `Linked`
     emitter's and a lightning bolt's too: read on 2026-10-30,
     `reading_soft_particles_of_lightning_and_linked`, and Moonglow's bolt
-    made soft); a Lighten particle's foot fades a little more than the
-    client's (6.2 of 255 away over its last rows). (S)
-  - **Particles' size:** a still emitter's square particles are drawn
-    upright, as in the client, 28 pixels a side against the client's 30
-    in `surfaces_in_the_client` (the fitted camera's error, or the size:
-    not told apart); a spinning one starts upright and turns by
-    `particleRot` radians a second, read and drawn on 2026-10-30. (S)
-  - **The switch on still costs the water view about 0.9 ms of
-    encoding** (3.6 ms against 2.7 off, at 6.5 ms a frame within the
-    budget by 0.4): about 0.75 ms the draws' own values (the material's
-    template copied, `m_mv`, `m_mvp` and `m_normal` with an inverse each
-    draw), the upload 0.09 ms, the submit 0.07 ms. `m_normal` from the
-    3×3 part, or values that the camera alone changes kept per instance
-    and multiplied in the vertex program, would cut it. (M)
+    made soft). A particle's foot fades about half a row of pixels
+    earlier in Moonglow than in the client, the same in every blend
+    (the fade painted into the color by a patched `fsparticle`: 0.5 at
+    2.1 rows from the edge against 2.65, `batch8d_soft_foot`,
+    2026-11-25; Lighten fades no more than the others, as the old
+    reading's edge made it seem). Unsettled: the depth lookup, the
+    multisampled depth's resolve, or the camera. (S)
 - **Emitters a builder does not see** (GitHub issue 8: a demon's wings,
   braziers, shafts of light, all without particles in his area): the
   wings are likely explained and fixed on 2026-11-10. Wings a creature
@@ -785,8 +703,14 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   overlap; a ribbon behind one is hidden too); its texture's soft edges
   blended as they are, writing their depth as the client's do. Two
   models' such meshes are put in order by their instances' places
-  (where each stands from the eye), the meshes of one in its order:
-  how the client orders two models' was not read. Each see-through mesh
+  (where each stands from the eye), the meshes of one in its order, as
+  the client orders two dynamic placeables' and two static ones' of
+  textures of their own (`batch8d_see_through_order`, 2026-11-25). Not
+  explained: two static placeables whose textures dynamic placeables
+  share as well are not drawn farthest first in the client (the nearer
+  drawn first, the farther hidden), by no listing order, model, texture
+  or row name tried; nor is it read whether the order is the
+  instance's origin's or its mesh's. Each see-through mesh
   of alpha 1 costs two draws. On macOS the solid part's discarded
   fragments wrote their depth (the plant's edge hid the ground again)
   until the shader stopped at each discard: seen and mended on the CI's
@@ -820,13 +744,10 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   and creatures' and lights' shadows (the Shadows button's menu, done
   2026-10-28); since 2026-10-30 also as the game's own stencil volumes
   (Shadows quality High: [the notes](research/notes_shaders.md) §G.2),
-  beside the client in `high_shadows_beside_the_client`. Left:
-  - High's first frame in an area makes its casters' volume meshes in
-    the frame: area084's opening's longest frame 22 ms with Fast, 48 to
-    51 ms with High (`frame_perf`, 2026-10-30); its frames after are
-    within the budget (a frame's GPU time 0.1 to 1 ms more than Fast's,
-    3.3 ms more in area026 seen close, 6.7 ms of 6.9). Making them
-    apart, as textures are read, goes beyond what was asked (M);
+  beside the client in `high_shadows_beside_the_client`; their volumes
+  made apart from the frames and kept by the renderer, let go of with
+  their models, since 2026-11-25 ([the frames
+  note](research/notes_frames.md)). Left:
   - every creature in a lamp's reach casts at once (eight ogres in a
     row, each its shadow: `batch6_light_shadow_casters`), as Moonglow
     casts up to 16; and a player's own light casts the shadows of the
@@ -835,14 +756,12 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
     darkens by the light's share of the light there, as the client's,
     since 2026-11-02: [the findings](findings.md), "A light's shadow
     takes the light's share".);
-  - what is drawn after the shadows receives none: the area's grass
-    (see-through tufts: in `shadows_look` with `MG_SHADOW_GRASS=1` the
-    shadowed ground darkens by 0.34 to 0.38, the client's by 0.42, its
-    grass sparser and darkened), the solid parts of a tile's see-through
-    meshes (alpha-blended leaves), shiny water drawn after the
-    framebuffer's copy; the client's volumes darken whatever was drawn
-    before its plane (M: those drawn later would read the map
-    themselves).
+  (Grass and the see-through meshes of tiles and static placeables,
+  their solid and soft parts, take the shadows as the client's since
+  2026-11-25: [the findings](findings.md), "Grass and a tile's
+  see-through meshes take the shadows"; water takes none, as the
+  client's, and a shallow pool shows the shadow on its floor through
+  the water, as the client's, since 2026-11-26.)
   (The sun's and moon's casters cast from the faces whose front faces
   the light only, as the client's, since 2026-11-02: [the
   findings](findings.md), "A face casts the sun's shadow from its front
@@ -860,29 +779,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   as the game's, since 2026-11-02.)
   (asked by the Domains of Dread module session and by a builder,
   Troubletcat)
-- **Shadow volumes kept with a mesh:** the volume buffers are kept in
-  each `GpuMesh` for the model's life (the review's R5, its fourth
-  part; the other three are done). Freeing them needs the renderer to
-  own them, a restructure of the casters' path. The measurement it
-  waited on (the review's Z2) was made on 10 November and found the
-  encoding's time elsewhere (the dense area's entry); the restructure is
-  beyond what that pass was asked. (M) (the review of November 2026, R5)
-- **Read in the client, not yet** (the review of November 2026's
-  fixes; the client run of 10 November read R18's chunks and R29's
-  tangents, not these):
-  - a body part of a two-digit phenotype, its own textures (M10: the
-    name is read as `skeleton` writes it);
-  - a creature holding an item that names no model, drawn without it
-    (M13), and the sandboxed client's CD key copy removed when its run
-    ends (F22, held by its guard's own test).
-  (S, waits on a client run) (the review of November 2026, M10, M13,
-  F22)
-- **The model viewer's ground shadow, the owner's call:** it is drawn
-  as a shadow map always (`shadow_volumes = false` before its draw),
-  since stencil volumes cast no skins: the renderer's fixer's choice in
-  the review of November 2026; following Options' Shadows quality
-  would also do. To confirm. (S) (the review of November 2026, the
-  renderer's page)
 - **The renderer's textures by name, across sources:** the window's one
   renderer keeps its textures by name; they are forgotten when the game
   data changes, a module closes, or a texture, MTR or TXI of the
@@ -896,11 +792,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   twice a frame: a real unintended consequence. Caches per source in the
   renderer would do. (M) (the review of November 2026, B15, and what its
   fixers saw on the way)
-- **PLT palettes read in two places:** mg-render reads them once
-  (`Palettes`, `Assets::texture_kept`: the review's R13); mg-ui's
-  `images.rs` keeps its own, as before, and the two loaders are not
-  made one. Left by the renderer's fixer, whose part was mg-render:
-  beyond the finding's part. (S) (the review of November 2026, R13)
 
 ## Models and textures
 
@@ -916,16 +807,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   load order without `ashlw_033`. Waits on his hak list or a blueprint.
   (His armor showing only a head and pelvis was Beamdog's HD bodies,
   drawn whole since 1.34.1.) (S–M)
-- **Zoom in the picture viewer, the owner's call:** the hak editor's
-  Preview and a read-only tab show a picture with one viewer
-  (`viewers::Picture`, M5's W6). It is fitted to its room and never
-  enlarged, with no zoom, so a 2048 by 2048 texture is never seen at
-  1:1. W6's brief asked for zoom "by the viewer's own controls", but
-  the hak viewer has none. Adding zoom (the wheel, a 1:1 toggle,
-  panning) would go beyond the viewer the owner's ruling 49 said to
-  share. Asked: whether it gets zoom, and with which controls. (S–M)
-  (the review of M5, reviewer C, W6)
-
 ## The main window and its panes
 
 - **The light theme's own colors:** it is the redesign's Light theme
@@ -971,28 +852,6 @@ galleries' pictures made for 2 ms a frame and kept while in sight.
   events). Waits: Alt alone on Windows, where the system may take Alt
   for its own menu (a Windows build). (S) (from builders' reports
   after 1.19.1)
-- **The module tree and the palettes by the keyboard** (GitHub issue
-  12, after 1.20.0, and a builder: Aurora's arrows go to the parent on
-  Left and fold the tree): after a click in a list (the module tree, a
-  palette, Module Properties' haks) the arrow keys, Page Up and Down,
-  Home and End are that list's wherever the pointer is, until it is in
-  an area's view, and a thin outline shows the pane; Right and Left
-  open and close a row and go in and out, into an area opened out too;
-  Enter opens, Escape hands the keys back; F2 and Delete are for the
-  row under the pointer, else the cursor's; both panes' filter fields
-  have Ctrl+F, Escape (clear, then leave) and Down. F6 and Shift+F6 give
-  the keys to the next pane, each pane's being what its tab in front
-  has (the middle's a talk table's lines, a 2DA's cells at its first
-  cell, the resource browser's list, else an area's; a palette's cursor
-  at its first row), the log last, which they scroll (done 2026-10-30);
-  in the Gallery Up and Down go a row of pictures at a time (done
-  2026-10-29). Not done:
-  - Down from the hak editor's, the tileset editor's and the Appearance
-    Gallery's Find fields goes nowhere: their lists have no keys of
-    their own, nor have the tileset's palette and the Prefabs list.
-    Keys for four lists (a cursor, its outline, Enter's action, the
-    rows' order for Up and Down in each), about a day: more than the
-    wave's S. (M)
 - **A long dropdown that grew to the window's edge, not seen growing
   here:** the open list of a dropdown with a Filter field (Area
   Properties › Audio › Ambient Sound, Day) widened over 5 to 10 seconds
@@ -1027,18 +886,6 @@ where the crates keep theirs, and a client test of what its checks say of
 the game. This is what that review left, and after it what the
 contribution itself states as not done or not checked.
 
-- **A picture cache of its own** (`crates/mg-ui/src/nui_view/skin.rs`):
-  `skin::Assets` keeps its textures beside `images::Loader`
-  (`crates/mg-ui/src/images.rs`). Both find a picture through the game's
-  resource manager with the module being edited in its place, below its
-  haks (`ResMan::get_over` and `texture_over`, since 2026-10-29); their
-  orders of types differ on purpose (a window's pictures JPG, TGA, PNG,
-  BMP, then DDS, as the client looks for a NUI picture; the loader's DDS,
-  then TGA, as for a texture). What is left: the loader keeps a picture by
-  name, not read again when the module's bytes of it change, where a
-  window's are (a portrait added to the module shows once the game data is
-  reloaded); and JPEG and BMP are still read with the `image` crate
-  (nothing else here reads them). (S)
 - **Left by The Domains of Dread's NUI Creator asks (October 2026)**
   (AccessKit; the asks are the module project's
   probe, `tdod-modulework/docs/systems/nui-creator-probe.md`; done on
@@ -1080,19 +927,25 @@ contribution itself states as not done or not checked.
   - the list scrolls by pixels at the same rate, where the client moves
     one in whole rows: snapping to rows was left out.
   (S) (the review of November 2026, N9)
-- **The NUI Creator's lesser copies:** the Design page copies the window
-  and its settings once a frame (the review's N13); not done: `check`'s
-  own copy a frame, Interact's two whole comparisons of its session,
-  and a cache of a variant's context document, suspected in the review
-  and not measured. Charts and polylines are drawn by what their pixels
-  show (N16); Options' and Tabs' entries, named only in the entry's
-  confidence line, are unchanged, bounded by the file's size. A chart of
-  a million samples (`nui_perf`, `a_chart_of_a_million_samples`, 10
-  November) still takes 28.5 ms a frame: each frame copies the bound
-  array out of the document and walks each series for its least and
-  most value, beyond N16's points and shapes. (S, beyond what the
-  timing run was asked; the Design page of 300 controls has no view:
-  the timing entry) (the review of November 2026, N13, N16)
+- **The NUI Creator's per-frame walks, what is left** (measured
+  2026-11-25 in release, `nui_perf`; `check`'s copy, 0.3 µs on an idle
+  frame, and Interact's two comparisons, 47 µs at 304 controls, need
+  nothing):
+  - **A variant's context document** is built anew each frame while the
+    variant is edited: 277 µs at 304 controls (86 at 96). A cache would
+    compare the variant, the settings and the window (90 to 100 µs), and
+    the canvas takes the document owned, so a hit would also clone it
+    (168 µs): it saves nothing unless the canvas borrows the cached
+    document, and every frame that changes the window (typing) would
+    pay the cache's copies on top. Not done for that unintended
+    consequence; the saving is at most 180 µs a frame.
+  - **A long chart's walk:** a series of a million samples is walked each
+    frame, 1.3 ms for a line (the fingerprint that keeps its points) or
+    for columns (their least and most value). The window is edited in
+    place, so there is no cheaper sign that a value changed; a revision
+    kept by every writer of the window and its binds would be one. Not
+    done: beyond the frame budget's need (the idle frame is 2.0 ms).
+  (S) (the review of November 2026, N13, N16)
 - **A font of a sliver of a line, not reproduced:** a font whose line is
   a sliver of its em is refused and the skin's numbers are held to a
   range (the review's N17), but the gigabyte glyph itself was not
@@ -1221,27 +1074,6 @@ contribution itself states as not done or not checked.
     models, or the module and the haks it lists). The log now says,
     for each model left out, whether it was found and why it can't be
     read. (S, waits on the builder's hak)
-- **A tileset whose count lies, the owner's call:** `mg-set`'s
-  `add_tile` trusts `Count`: on a junk `Count=1869573190` it writes
-  `[TILE1869573190]` (one section, no hang). What to do with a file
-  whose count lies is asked. (S) (what the fixers of the review of
-  November 2026 saw on the way)
-- **A tileset kept in the module, changed, not redrawn in open areas:**
-  the areas and the Tiles palette draw a tileset from the game data
-  (`GameData`, the install, haks, override and development folders),
-  which a tileset changed outside in one of those is read again into
-  (M5's W5) with every area view reloaded; a `.set` kept inside the
-  module (or put into it) changes only the game data's module layer,
-  in place (`update_module_layer`, which forgets the tables for a 2DA,
-  the Appearance marks for a model and the drawn textures, not the
-  tilesets read nor the areas drawn from them), so an open area keeps
-  drawing the tileset as it was until it is opened again. Redrawing
-  them means dropping the game data's tileset and every area and
-  palette made from it on a module change too, which reloads every
-  open area for any `.set` change of the module's: a change to how the
-  module layer and the views meet, beyond what the answer asked (the
-  editor's own file, at any path, is read again).
-  (M) (the review of M5's W5)
 
 ## The install, starting and crashes
 
@@ -1498,67 +1330,37 @@ File › Project. What is left:
 
 Each waits on its reporter: with no word by 2026-11-12 (a month from
 the owner's ruling of 2026-10-12) it is dropped, and said so in the
-log.
-
-- **xtul's mirror at full size in the game:** the client draws a
-  dynamic placeable with Scale 0.46 at 0.46 (`visual_transforms_look`),
-  upright and turned on its stand by X Rotation -50.8; at full size and
-  unturned only when it is static. Whether his mirror is static in the
-  module the game ran (a build step that makes placeables static, or
-  Static ticked after the transform), or the full size was by eye,
-  would settle it. (S) (xtul's report, October 2026)
-
-- **The rectangle by two clicks on a builder's Linux:** 1.25.1 made the
-  right Alt place it, which was not his trouble; the next release has Alt
-  pressed and let go before the click, on the reading that his window
-  manager keeps a click with Alt held (the rectangle went when he
-  clicked and came back when Alt was pressed again). Not seen on his
-  system: his word that it places would settle it. (a builder's report,
-  October 2026)
-- **Creature Properties' overlapping elements:** reported, not
-  reproduced: every page of every kind is walked whole, top to bottom on
-  the window's one scroll, at four window sizes at 100% interface size
-  (`blueprint_editor_pages_draw_nothing_over_anything_else`, since M4's
-  U9) and none draws over another. A screenshot, or the page and the
-  interface size, would find it. (S) (a senior builder's review, October
-  2026)
-- **A drag on a number field moving objects in the area behind:**
-  reported, not reproduced
-  (`a_drag_in_a_window_over_the_area_moves_nothing_there`; with the
-  Properties panel beside the area since M4's U6,
-  `a_drag_on_a_number_field_in_the_panel_moves_nothing_in_the_area`). (needs the
-  steps) (a second builder's review, October 2026)
-- **"It kept randomly exiting"** on a persistent world's module (ten
-  times before it stayed open), reported without a log. One cause was
-  found and fixed: the compiler walks a script by recursion, and a very
-  long `else if` chain or expression overflowed the stack of the thread
-  it ran on, which ends the program at once and leaves no crash report
-  (a 60,000-link chain did it on Linux; Windows' main thread has an
-  eighth of that stack). Compiles run on a stack of their own now.
-  Whether that was the reporter's crash isn't known: asked for the debug
-  log (Options › General) and what was being done. (needs the log)
-  (from builders' reports after 1.14.1)
-- **A hak's 2DA not seen until a restart** (a builder: a creature
-  showed "appearance.2da has no row 8241", from a hak above CEP's whose
-  table has more rows; gone after restarting Moonglow): not reproduced.
-  Haks and folders that change on disk are read again every few seconds
-  and their tables forgotten, which a test holds for the override
-  folder. Suspected and not shown: `reload_resources` and `sync_haks`
-  give up without a word while anything else holds the game data (a
-  job), and try again later; on Windows a hak Moonglow has open cannot
-  be replaced by another program at all, so a hak tool may have failed
-  to write it. If it comes back: the log around it, and whether Tools ›
-  Reload Resources cures it. While
-  something else holds the game data, the look is put off and the
-  debug log says so ("the game data is held"), which would show this.
-  (S–M) (from builders' reports after 1.19.1)
-- **"Area transitions can't be selected visually":** not understood;
-  asked.
+log. None waits now.
 
 ## Settled: as it is, by decision or by design
 
 Nothing is left to do on these; they are kept so that a report of one
 is not taken for a new gap.
+
+- **An include's own `main`: Moonglow's entry point kept, and warned
+  of** (the owner's word, 2026-11-26, "Compile: 1 (keep, warn)"; closing
+  the builder's "41 changed" after Aurora's Build): a script that
+  includes a file with a `void main()` of its own compiles, in Aurora
+  8193.37, to the include's `main` (an `int StartingConditional()`
+  script, or one that is only the `#include`; an include's
+  `StartingConditional` likewise for a script with none), which in the
+  game always fails as a condition (`engine_include_entry`). Moonglow
+  compiles the script's own, or nothing for a script with none, and
+  each such script is warned of in Compile All's log and `mg compile`
+  (`mg_script`'s `included_entry`; `aurora_scripts::codegen_compiles_as_aurora_builds_it`
+  holds the warned scripts to the ones Aurora builds otherwise).
+  ([Scripts](manual/07-scripts.md), [findings](findings.md))
+
+- **TGA textures compressed as read, PLT colored copies kept as RGBA8**
+  (closing the performance audit's "TGA and PLT textures are
+  uncompressed", 2026-11-25; kept off by the owner's word, 2026-11-25,
+  shown the crops and the memory it would save): a PLT's layers meet in sharp edges between
+  unrelated colors inside a 4×4 block, which BC blurs (up to 72 of 255
+  in a picture of dyed armor, the trim and rivets dulled at 4×); a copy
+  is made for each object's colors. The cost: an area of many creatures
+  keeps its PLTs' memory (moonseabattle 156.7 MiB of textures, 45.2
+  with them compressed). Compressing them without the loss would need a
+  BC7 encoder. ([the frames note](research/notes_frames.md))
 
 - **The previews' shadows: the model viewer's alone** (the owner's
   word, 2026-11-02): the model viewer's model casts the sun's shadow on
@@ -1993,7 +1795,10 @@ is not taken for a new gap.
   colour) is drawn as it is at that moment. A part's light nodes are taken
   in the part's rest pose. The model viewer's **Lights** shows the base
   model's light nodes (animated), the appearance's light and, since
-  2026-11-10, its parts' (a tail's effect's) as they stand. (S) (from Troubletcat's and Heed's reports, October 2026) (Settled in the triage of 2026-10-28.)
+  2026-11-10, its parts' (a tail's effect's) as they stand. Since
+  2026-10-30 the area view plays a dynamic placeable's base model's
+  light keys (`point_lights_at`), which Custom Light's flicker
+  (2026-11-25) shows by. (S) (from Troubletcat's and Heed's reports, October 2026) (Settled in the triage of 2026-10-28.)
 - **Moonglow draws the rooms the player can't see:** in an interior the
   client draws only the tiles the player's tile sees (the tileset's
   visibility); the area view draws every tile, as Aurora does. Comparing
@@ -2193,6 +1998,22 @@ is not taken for a new gap.
   one goes whole), so a plugin's strokes keep groups whole whatever the
   builder's option. (Settled 2026-10-29, when the window's freed strokes
   were checked in the engine.)
+- **A mesh reading the framebuffer's copy without `sample_framebuffer`
+  gets this frame's copy, not the frame before's picture:** in the
+  client a solid or `transparency 1` mesh whose program reads
+  `texFBColor` reads the frame before's finished picture (its additive
+  meshes in it: `reading_copy_order`, 2026-11-26), where Moonglow gives
+  it the copy the water reads, made after the see-through meshes' solid
+  parts. Not built: no program the game or The Domains of Dread draws
+  reads it so (shiny water and `sample_framebuffer` meshes read this
+  frame's copy, particles a depth copy without the water, as Moonglow's
+  do), and it would take a second pair of copies the size of the view
+  (40 MB at 3440×1440, 6 MB at 1024×768: a color and an `R32Float`
+  depth texture of 4 bytes a pixel each) for every view, a
+  copy a frame, and still nothing for a picture drawn once (a thumbnail,
+  a preview), which has no frame before. (Settled with the deferred
+  entries "The framebuffer's copies" and The Domains of Dread's
+  fountain, 2026-11-26; left unbuilt: the owner's word, 2026-11-26.)
 - **What stays with Moonglow's own shader with the Shaders switch on:**
   the sky's fade, unlit markers, shiny water without the targets'
   framebuffer copies (thumbnails, previews), textures that only ripple
@@ -2528,3 +2349,66 @@ is not taken for a new gap.
   the conflict, and the pane's wins until one of them is changed: the
   builder's binding is theirs to change. (Settled by the owner,
   2026-10-30.)
+- **JPEG and BMP pictures of a NUI window are read with the `image`
+  crate:** nothing else in Moonglow reads them, and the client takes
+  them for a NUI picture alone (JPG first, BMP after PNG); the NUI preview's
+  pictures (`skin::Assets`) and the UI's (`images::Loader`) keep their
+  own orders on purpose, and both read a picture the module changes
+  again at once (since 2026-11-25). (By design.)
+- **Advanced Search: conversations edited together** (the last of
+  "Advanced Search, what it doesn't do", from builders' asks on Discord,
+  October 2026; closed 2026-11-25). Its other parts are built: a field
+  set is added where it is missing with **Add where missing** checked
+  (off by default, since the engine reads a missing field as its
+  default; only where the object's kind has the field in the game's
+  files, `mg_schema`, of the type given there); objects of one kind
+  found in several areas open in one Edit Together, one undo step
+  across the areas; and the items placed objects hold or stores sell
+  open together as well. Conversations still open one at a time, by
+  design: a conversation is one tree in its own editor, with no form of
+  fields that several could share, and what a builder changes on many
+  (a line's script or a field found on it) Change the N checked
+  already sets on each line found, in one step. An item inside a bag
+  held is not among the held items edited together, also by design:
+  Properties open on the items a placed object holds itself, the bag
+  among them. (By design.)
+- **NWNT and a typed line break: refused** (the owner's word,
+  2026-11-25): a nasher NWNT project refuses to save a file whose text
+  holds a typed `\n` or `\r` (`C:\new`) and names the field, as it
+  refuses a label with a dot, since NWNT would read it back as a line
+  break. Saving it with a note in the log was the other choice; a file
+  that comes back changed was not wanted. Labels with `[`, `]` or a
+  trailing space are kept (Moonglow's reader reads them back). (the
+  review of November 2026, F5)
+- **A resource name past ASCII in a module folder: the rule kept**
+  (the owner's word, 2026-11-25): a byte above 0x7F goes through a
+  folder as the character of its number and is read back as that byte,
+  so file names are the same on every system and valid in a
+  repository. A loose file another tool named in UTF-8
+  (`pièce01.utc`) is read as byte 0xE8, not as the game on Linux reads
+  it from `override/`; such files are rare. (the review of November
+  2026, F7)
+- **Bulk saves are not flushed file by file** (the owner's word,
+  2026-11-25): a module folder's save, a project's save and NWSync's
+  data files are written to a temporary name and renamed
+  (`write_replacing_one_of_many`), without a flush. A flush costs about
+  1 ms a file (3,000 files 0.07 s without, 2.95 s with); the rename
+  already leaves the old file or the new one, and only a power cut
+  during the save is at risk. (the review of November 2026, P17)
+- **Verify's hak cache and a hak rebuilt alike: kept** (the owner's
+  word, 2026-11-25): what Verify keeps of a hak is named by its folder,
+  its entries, its name, time and size; a hak rebuilt with the same
+  time, size and layout, only its data changed, is taken for the old
+  one. A rebuild changes the time, and hashing every hak's data on every
+  run was not wanted. (the review of November 2026, V14)
+- **A talk-table import far past the end: no limit** (the owner's word,
+  2026-11-25): an import that reaches a row far past the table's end is
+  one undo step, with no bound on the gap; a team's range may begin
+  high, and one undo removes the empty rows. (the review of November
+  2026, P4)
+- **The model viewer's ground shadow: a shadow map always** (the
+  owner's word, 2026-11-25): drawn as a shadow map whatever Options'
+  Shadows quality says (`shadow_volumes = false` before its draw),
+  since stencil volumes cast no skins and a creature's body would cast
+  no shadow in the viewer. (the review of November 2026, the renderer's
+  page)

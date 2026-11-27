@@ -2120,7 +2120,10 @@ fn compile_all_compiles_only_what_changed() {
     // that have no debug file are compiled again for one, once.
     h.state_mut().settings.debug_info = true;
     let debug = compile(&mut h);
-    assert!(debug.starts_with("Compiled 2 scripts: 0 failed, 2 changed"), "{debug}");
+    assert!(
+        debug.starts_with("Compiled 2 scripts: 0 failed, 0 changed, 2 debug files changed"),
+        "{debug}"
+    );
     let has = |h: &Harness<'_, Moonglow>, name: &str| {
         let key = ResKey::parse(name, ResType::NDB).unwrap();
         h.state().ws.as_ref().unwrap().module.contains(&key)
@@ -2128,6 +2131,82 @@ fn compile_all_compiles_only_what_changed() {
     assert!(has(&h, "uses_n") && has(&h, "alone") && !has(&h, "inc_n"));
     let again = compile(&mut h);
     assert!(again.starts_with("Compiled 0 scripts"), "{again}");
+}
+
+/// Compile All's line has the details under a fold: each script compiled,
+/// why, and whether its bytes changed (changed ones first); the fold is
+/// closed until its button is clicked; Copy Log has them either way.
+#[test]
+fn compile_all_says_what_it_compiled_and_why_under_a_fold() {
+    let Some((mut h, _)) = area_ui_harness("compile-why") else { return };
+    let nss = |n: &str| ResKey::parse(n, ResType::NSS).unwrap();
+    let set = |h: &mut Harness<'_, Moonglow>, key: ResKey, data: Option<&[u8]>| {
+        let edit = mg_edit::Edit::SetResource { key, data: data.map(<[u8]>::to_vec) };
+        h.state_mut().actions.push(mg_ui::Action::Apply(mg_edit::Command::new("Set", vec![edit])));
+        h.run_steps(2);
+    };
+    set(&mut h, nss("cg_cond"), Some(b"void main() { int a = 1; }\n"));
+    set(&mut h, nss("cg_same"), Some(b"void main() { int b = 2; }\n"));
+    set(&mut h, nss("cg_bad"), Some(b"void main() { Nope(); }\n"));
+    let compile = |h: &mut Harness<'_, Moonglow>| -> (String, Vec<String>) {
+        let before = h.state().log.entries.len();
+        h.state_mut().actions.push(mg_ui::Action::CompileScripts);
+        h.run_steps(3);
+        let log = &h.state().log;
+        let line =
+            (before..log.entries.len()).rfind(|&i| log.entries[i].1.starts_with("Compiled "));
+        let line = line.expect("Compile All's line");
+        (log.entries[line].1.clone(), log.details.get(&line).cloned().unwrap_or_default())
+    };
+    let (first, details) = compile(&mut h);
+    assert!(first.contains("1 failed"), "{first}");
+    assert!(
+        details
+            .iter()
+            .any(|d| d.starts_with("cg_cond: it had no compiled script; compiled, a new")),
+        "{details:#?}"
+    );
+    assert!(
+        details.iter().any(|d| d.starts_with("cg_bad: ") && d.contains("failed: ")),
+        "{details:#?}"
+    );
+    // Another tool's compiled script in place of Moonglow's.
+    let ncs = ResKey::parse("cg_cond", ResType::NCS).unwrap();
+    set(&mut h, ncs, Some(b"NCS from another tool"));
+    let (line, details) = compile(&mut h);
+    assert!(line.starts_with("Compiled 2 scripts: 1 failed, 1 changed"), "{line}");
+    assert_eq!(
+        details.iter().find(|d| d.starts_with("cg_cond")).map(String::as_str),
+        Some(
+            "cg_cond: its compiled script wasn't Moonglow's (another tool made it); compiled \
+             again, the bytes differ"
+        ),
+        "{details:#?}"
+    );
+    // The changed ones are first.
+    assert!(details[0].starts_with("cg_cond"), "{details:#?}");
+    // Nothing remembered, the same bytes: compiled again, nothing changed.
+    h.state_mut().forget_compiled();
+    let (line, details) = compile(&mut h);
+    let same = details.iter().find(|d| d.starts_with("cg_same")).expect("cg_same");
+    assert_eq!(
+        same, "cg_same: Moonglow hadn't compiled it before; compiled again, the same bytes",
+        "{line}"
+    );
+    // The fold: closed, then open (the details shown), then closed.
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("compiled again, the same bytes").is_none());
+    let fold = |h: &mut Harness<'_, Moonglow>| {
+        h.query_all_by_label("Details").last().expect("a Details button").click();
+        h.run_steps(3);
+    };
+    fold(&mut h);
+    h.get_by_label_contains("cg_same: Moonglow hadn't compiled it before");
+    fold(&mut h);
+    assert!(h.query_by_label_contains("cg_same: Moonglow hadn't").is_none());
+    // Copy Log has the details, folded or not.
+    let text = h.state().log.text();
+    assert!(text.contains("\n    cg_same: Moonglow hadn't compiled it before"), "{text}");
 }
 
 /// A script compiled on its own (its editor's Compile, or a save that
@@ -3284,6 +3363,36 @@ fn a_script_closed_with_save_keeps_its_bookmarks_and_history() {
     settle(&mut h);
     assert!(h.query_by_label("Unsaved Changes").is_none(), "the kept buffer is not unsaved");
     assert!(h.state().dock.find_tab(&tab).is_none(), "closed");
+}
+
+/// A clean script closed by its header's Cancel keeps its editor's state
+/// for the session, as its × does (the owner's ruling of 2026-11-25):
+/// opened again, its bookmark and its history are there.
+#[test]
+fn a_clean_script_closed_with_the_header_s_cancel_keeps_its_bookmarks_and_history() {
+    let (mut h, _path, key) = hello_window("ui-script-cancel-clean");
+    let tab = Tab::Script(key);
+    type_at_top(&mut h, key, "// one\n");
+    // The script's own Save (Ctrl+S with its keys): nothing unsaved.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    h.run_steps(3);
+    h.state_mut().script_tools.jump = Some((key, 0));
+    h.run_steps(3);
+    h.key_press(egui::Key::F5);
+    h.run_steps(3);
+    assert_eq!(h.state().script_bookmarks(key), [0], "bookmarked");
+    h.get_by_label(mg_ui::SCRIPT_HEADER).get_by_label("Cancel").click();
+    settle(&mut h);
+    assert!(h.query_by_label("Unsaved Changes").is_none(), "nothing asked");
+    assert!(h.state().dock.find_tab(&tab).is_none(), "Cancel: the tab closed");
+    assert_eq!(h.state().script_bookmarks(key), [0], "its bookmark kept while closed");
+    h.state_mut().actions.push(mg_ui::Action::OpenTab(tab.clone()));
+    settle(&mut h);
+    assert!(h.state().script_text(key).unwrap().starts_with("// one\n"));
+    assert_eq!(h.state().script_bookmarks(key), [0], "its bookmark kept");
+    h.state_mut().script_tools.jump = Some((key, 0));
+    h.run_steps(3);
+    assert!(edit_undo_enabled(&h, false), "its history kept: Undo on");
 }
 
 /// A script's tab closed with nothing unsaved asks nothing, and its

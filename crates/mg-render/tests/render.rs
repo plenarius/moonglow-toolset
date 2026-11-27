@@ -25,6 +25,14 @@ fn gpu() -> Option<Gpu> {
     base.as_ref().map(|(d, q)| Gpu::new(d.clone(), q.clone()))
 }
 
+/// The samples a pixel the 3D views can be drawn with on the test's
+/// device (Options › Area › Anti-aliasing): one, two and four where the
+/// adapter takes them for every target.
+fn sample_counts(gpu: &Gpu) -> Vec<u32> {
+    let adapter = mg_render::headless_adapter().expect("the device's adapter");
+    gpu.sample_counts(&adapter, wgpu::TextureFormat::Rgba8Unorm)
+}
+
 struct Unfail;
 impl Drop for Unfail {
     fn drop(&mut self) {
@@ -990,6 +998,8 @@ fn a_texture_s_default_map_is_the_area_s_unless_the_object_names_one() {
     assets.solid("mirror_default", [128, 128, 128, 0]);
     assets.txis.insert("mirror_default".into(), txi("envmaptexture default\n"));
     assets.solid("plain_clear", [128, 128, 128, 0]);
+    assets.solid("mirror_named", [128, 128, 128, 0]);
+    assets.txis.insert("mirror_named".into(), txi("envmaptexture area_env\n"));
     let camera = Camera {
         eye: Vec3::new(0.0, -0.8, 4.0),
         target: Vec3::ZERO,
@@ -1044,6 +1054,13 @@ fn a_texture_s_default_map_is_the_area_s_unless_the_object_names_one() {
     assert!(blue(named), "{named:?}");
     assert!(red(none), "{none:?}");
     assert!(red(creature), "{creature:?}");
+    // A map the texture names: the placeable's `default` keeps its own
+    // `chrome1` over it (the client, read with a TXI naming a gradient),
+    // where another object's reflects the named one.
+    let named_over_default = shot("mirror_named", Some("chrome1"), true);
+    let named_over_object = shot("mirror_named", Some("chrome1"), false);
+    assert!(blue(named_over_default), "{named_over_default:?}");
+    assert!(red(named_over_object), "{named_over_object:?}");
     // Two placeables of one model, one whose `Reflection` is `default`
     // and one naming `chrome1`: each its own (the surfaces kept for a
     // model left the flag out, and both took the first drawn's).
@@ -1243,6 +1260,40 @@ fn a_solid_draw_leaves_the_picture_s_alpha() {
         assert!(sky[2] > 200 && sky[1] < 60, "{samples} samples: the sky {sky:?}");
         let see_through = image.data.as_chunks::<4>().0.iter().filter(|p| p[3] != 255).count();
         assert_eq!(see_through, 0, "{samples} samples: pixels whose alpha is not the clear's");
+    }
+}
+
+/// Anti-aliasing's counts: one always, four on every backend but OpenGL,
+/// two where the adapter takes it for each target (with its own format
+/// features, which the device asks for: `OPTIONAL_FEATURES`).
+#[test]
+fn the_sample_counts_offered_are_the_adapter_s() {
+    let Some(gpu) = gpu() else { return };
+    let counts = sample_counts(&gpu);
+    let _ = std::io::Write::write_fmt(
+        &mut std::io::stdout(),
+        format_args!("sample counts: {counts:?}\n"),
+    );
+    assert_eq!(counts.first(), Some(&1));
+    let backend = gpu.device.adapter_info().backend;
+    assert_eq!(counts.contains(&4), backend != wgpu::Backend::Gl, "{backend:?}: {counts:?}");
+    let adapter = mg_render::headless_adapter().unwrap();
+    let two = [
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Depth32Float,
+        wgpu::TextureFormat::R8Unorm,
+    ]
+    .iter()
+    .all(|f| adapter.get_texture_format_features(*f).flags.sample_count_supported(2));
+    let specific =
+        gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+    assert_eq!(
+        specific,
+        adapter.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
+        "asked for"
+    );
+    if !two || !specific || backend == wgpu::Backend::Gl {
+        assert!(!counts.contains(&2), "{counts:?}");
     }
 }
 
@@ -5030,6 +5081,94 @@ fn the_game_s_programs_draw_particles_in_their_blends() {
     }
 }
 
+/// The zeros a program reads for the inputs a mesh lacks are bound once a
+/// pass, not at every pipeline, and again after a skinned mesh's bones and
+/// weights took their slot: three see-through quads over one another, the
+/// middle one skinned (its skin at the slot the others' zeros are at), the
+/// nearest drawn last, look as they do with the middle one not skinned.
+/// (Read from the skin, the nearest quad's second zero input would be the
+/// skin's weights, red.)
+#[test]
+fn the_zeros_are_bound_again_after_a_skin_took_their_slot() {
+    let Some(gpu) = gpu() else { return };
+    let mut assets = TestAssets::default();
+    let vs = r#"
+#define SHADER_TYPE 1
+uniform mat4 m_mv;
+uniform mat4 m_proj;
+attribute vec4 vPos;
+attribute vec2 vTcIn;
+// (Inputs Moonglow has none of: the zeros, 16 bytes apart.)
+attribute vec4 vColor;
+attribute vec4 vStaticLightDir;
+varying vec2 vUv;
+varying vec3 vZero;
+void main ()
+{
+    vUv = vTcIn;
+    vZero = vColor.rgb + vStaticLightDir.rgb;
+    gl_Position = m_proj * (m_mv * vPos);
+}
+"#;
+    let fs = r#"
+#define SHADER_TYPE 2
+uniform sampler2D texUnit0;
+uniform vec4 materialFrontDiffuse;
+varying vec2 vUv;
+varying vec3 vZero;
+void main ()
+{
+    vec4 t = texture2D(texUnit0, vUv);
+    gl_FragColor = vec4(t.rgb * materialFrontDiffuse.rgb + vZero, t.a);
+}
+"#;
+    assets.shaders.insert("vslit".into(), vs.into());
+    assets.shaders.insert("fslit".into(), fs.into());
+    let data = [255, 255, 255, 128].repeat(16);
+    assets
+        .textures
+        .insert("veil".into(), mg_image::Rgba { width: 4, height: 4, data }.into_texture(true));
+    let veiled = |mut model: Model, rgb: [f32; 3]| {
+        for node in &mut model.nodes {
+            if let NodeKind::Mesh(m) = &mut node.kind {
+                m.textures[0] = Some("veil".into());
+                m.diffuse = rgb;
+            }
+        }
+        Arc::new(GpuModel::new(&gpu, Arc::new(model)))
+    };
+    let blue = veiled(quad(), [0.0, 0.0, 1.0]);
+    let at = |z: f32| Mat4::from_translation(Vec3::new(0.0, 0.0, z));
+    let camera = Camera {
+        eye: Vec3::new(0.0, -0.01, 8.0),
+        target: Vec3::ZERO,
+        fov_y: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let mut seen = Vec::new();
+    for middle in [veiled(skinned_quad(0.0), [0.0, 1.0, 0.0]), veiled(quad(), [0.0, 1.0, 0.0])] {
+        let scene = Scene {
+            instances: vec![
+                Instance::new(blue.clone(), at(0.0)),
+                Instance::new(middle, at(0.5)),
+                Instance::new(blue.clone(), at(1.0)),
+            ],
+            background: [0.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 1);
+        r.game_shaders = true;
+        let image = r.render_image(&gpu, &assets, &scene, &camera, 64, 64);
+        assert_eq!(r.game_shader_failures(), &[]);
+        assert_eq!(r.drawn.game, 6, "{:?}", r.drawn);
+        seen.push(image.pixel(32, 32));
+    }
+    assert_eq!(seen[0], seen[1], "the middle quad skinned or not");
+    let [red, green, blue, _] = seen[0];
+    assert!(red < 10 && green > 20 && blue > 100, "blue over green over blue: {seen:?}");
+}
+
 /// See-through meshes the game's programs draw are instances of one draw
 /// where they don't meet on the screen, as Moonglow's own are (M5: a field
 /// of fires and grass was a draw for each part of each mesh), each with its
@@ -5172,7 +5311,7 @@ void main ()
         ..Default::default()
     };
     let dir = mg_testkit::scratch_dir("render-framebuffer");
-    for samples in [1, 4] {
+    for samples in sample_counts(&gpu) {
         let mut plain = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, samples);
         plain.game_shaders = true;
         let behind = plain.render_image(&gpu, &assets, &scene(false), &camera, 64, 64);
@@ -5250,6 +5389,173 @@ void main ()
         );
         assert_eq!(r.drawn.game, 2, "{:?}", r.drawn);
     }
+}
+
+/// The water's copy holds the see-through meshes behind it, as the
+/// client's does (`reading_copy_order` in `mg-corpus-tests`' `client_render`:
+/// a card of alpha texels, a standard DXT5, `transparencyhint 1` and an
+/// MTR's `transparency 1` through a pool all show in the copy `fswater`
+/// reads; The Domains of Dread's fountain, a standard DXT5 and so drawn
+/// see-through, showed its basin's floor through the water only so): a
+/// wall of a texture with a transparent texel (see-through, drawn in two
+/// parts) behind an authored `fswater` painting the copy at its own pixel
+/// is found there, not the background, with 4x MSAA and without. And a
+/// see-through mesh that reads the copy itself (shiny water with
+/// `transparencyhint`) is drawn after it, as the solid water is.
+#[test]
+fn the_water_s_copy_holds_the_see_through_meshes_behind_it() {
+    let Some(gpu) = gpu() else { return };
+    let mut assets = clip_space_assets();
+    let txi = |text: &str| mg_image::txi::Txi::parse(text.as_bytes());
+    // (Red, one texel of 64 transparent: see-through, its solid part red.)
+    let mut data = [255u8, 0, 0, 255].repeat(64);
+    data[3] = 0;
+    assets
+        .textures
+        .insert("glass".into(), mg_image::Rgba { width: 8, height: 8, data }.into_texture(true));
+    assets.opaque("pool", [0, 0, 255]);
+    assets.txis.insert("pool".into(), txi("bumpmaptexture shinywater\n"));
+    assets.shaders.insert(
+        "vswater".into(),
+        "#define SHADER_TYPE 1\nuniform mat4 m_mv;\nuniform mat4 m_proj;\nattribute vec4 vPos;\n\
+         void main ()\n{\n    gl_Position = m_proj * (m_mv * vPos);\n}\n"
+            .into(),
+    );
+    assets.shaders.insert(
+        "fswater".into(),
+        "#define SHADER_TYPE 2\nuniform vec3 pixelParams;\nuniform sampler2D texFBColor;\n\
+         void main ()\n{\n    gl_FragColor = vec4(texture2D(texFBColor, gl_FragCoord.xy * \
+         pixelParams.xy).rgb, 1.0);\n}\n"
+            .into(),
+    );
+    let camera = Camera {
+        eye: Vec3::new(0.0, -10.0, 1.0),
+        target: Vec3::new(0.0, 0.0, 1.0),
+        fov_y: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let wall = standing_quad(&gpu, "glass", Vec3::new(0.0, 0.0, 1.0), 2.0);
+    let water = standing_quad(&gpu, "pool", Vec3::new(0.0, -5.0, 1.0), 0.6);
+    // (The same with `transparencyhint 1`, as ttr01's water tiles.)
+    let hinted = {
+        let mut model = quad();
+        if let NodeKind::Mesh(m) = &mut model.nodes[1].kind {
+            m.textures[0] = Some("pool".into());
+            m.transparency_hint = 1;
+        }
+        let model = Arc::new(GpuModel::new(&gpu, Arc::new(model)));
+        let t = Mat4::from_translation(Vec3::new(0.0, -5.0, 1.0))
+            * Mat4::from_rotation_x(90f32.to_radians())
+            * Mat4::from_scale(Vec3::splat(0.6));
+        Instance::new(model, t)
+    };
+    let dir = mg_testkit::scratch_dir("render-water-copy-see-through");
+    for samples in sample_counts(&gpu) {
+        for (name, water) in [("solid", water.clone()), ("hinted", hinted.clone())] {
+            let scene = |with_water: bool| Scene {
+                instances: std::iter::once(wall.clone())
+                    .chain(with_water.then(|| water.clone()))
+                    .collect(),
+                background: [0.0, 0.0, 0.0],
+                ..Default::default()
+            };
+            let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, samples);
+            r.game_shaders = true;
+            let behind = r.render_image(&gpu, &assets, &scene(false), &camera, 64, 64);
+            r.game_water = false;
+            let owned = r.render_image(&gpu, &assets, &scene(true), &camera, 64, 64);
+            r.game_water = true;
+            let img = r.render_image(&gpu, &assets, &scene(true), &camera, 64, 64);
+            save(&img, &dir.join(format!("water_{name}_{samples}x.png")));
+            assert_eq!(r.game_shader_failures(), &[], "{name}");
+            let pool: Vec<(u32, u32)> = (0..64)
+                .flat_map(|y| (0..64).map(move |x| (x, y)))
+                .filter(|&(x, y)| owned.pixel(x, y) != behind.pixel(x, y))
+                .collect();
+            let red = pool.iter().filter(|&&(x, y)| behind.pixel(x, y)[0] > 200).count();
+            assert!(red > 100, "{name}: {red} of {} water pixels before the red wall", pool.len());
+            let wrong = pool
+                .iter()
+                .filter(|&&(x, y)| {
+                    let (a, b) = (img.pixel(x, y), behind.pixel(x, y));
+                    (0..3).any(|i| a[i].abs_diff(b[i]) > 8)
+                })
+                .count();
+            assert!(wrong <= 4, "{name}, {samples}x: {wrong} of {} water pixels", pool.len());
+        }
+    }
+}
+
+/// Shiny water whose texture is a DDS with the rippling procedure: the
+/// game's `fswater` reads its picture whole (its alpha the water's
+/// clarity), where Moonglow's own water (the Shaders switch off, or the
+/// game's water off) draws it in the procedure's flat gray, as it did
+/// before `fswater` was given the picture: the same pixels as a texture
+/// that is that gray.
+#[test]
+fn moonglow_s_own_water_draws_a_lost_ripple_in_its_gray() {
+    let Some(gpu) = gpu() else { return };
+    let mut assets = clip_space_assets();
+    let txi = |text: &str| mg_image::txi::Txi::parse(text.as_bytes());
+    let water = "bumpmaptexture shinywater\nproceduretype arturo\ndistort 1\n";
+    // (A blue DDS, and the procedure's gray as a texture of its own.)
+    let blue = mg_image::Rgba { width: 8, height: 8, data: [0, 0, 255, 200].repeat(64) };
+    let dds = mg_image::encode::compress(&blue, mg_image::Format::Bc3, true, false);
+    assets.textures.insert("pool".into(), dds);
+    assets.txis.insert("pool".into(), txi(water));
+    let g = 72u8;
+    let gray = mg_image::Rgba { width: 4, height: 4, data: [g, g, g, 255].repeat(16) };
+    assets.textures.insert("grayp".into(), gray.into_texture(false));
+    assets.txis.insert("grayp".into(), txi(water));
+    // (`fswater` paints its texture's picture.)
+    assets.shaders.insert(
+        "vswater".into(),
+        "#define SHADER_TYPE 1\nuniform mat4 m_mv;\nuniform mat4 m_proj;\nattribute vec4 vPos;\n\
+         void main ()\n{\n    gl_Position = m_proj * (m_mv * vPos);\n}\n"
+            .into(),
+    );
+    assets.shaders.insert(
+        "fswater".into(),
+        "#define SHADER_TYPE 2\nuniform sampler2D texUnit0;\n\
+         void main ()\n{\n    gl_FragColor = vec4(texture2D(texUnit0, vec2(0.5)).rgb, 1.0);\n}\n"
+            .into(),
+    );
+    let camera = Camera {
+        eye: Vec3::new(0.0, -10.0, 1.0),
+        target: Vec3::new(0.0, 0.0, 1.0),
+        fov_y: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let scene = |texture: &str| Scene {
+        instances: vec![standing_quad(&gpu, texture, Vec3::new(0.0, 0.0, 1.0), 3.0)],
+        background: [0.0, 0.0, 0.0],
+        ..Default::default()
+    };
+    let dir = mg_testkit::scratch_dir("render-water-lost-ripple");
+    let draw = |shaders: bool, game_water: bool, texture: &str| {
+        let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, 1);
+        r.game_shaders = shaders;
+        r.game_water = game_water;
+        let img = r.render_image(&gpu, &assets, &scene(texture), &camera, 64, 64);
+        assert_eq!(r.game_shader_failures(), &[], "{texture}");
+        let name = format!("{texture}_{}_{}.png", u8::from(shaders), u8::from(game_water));
+        save(&img, &dir.join(name));
+        img
+    };
+    for (shaders, game_water) in [(false, true), (true, false)] {
+        let (pool, gray) = (draw(shaders, game_water, "pool"), draw(shaders, game_water, "grayp"));
+        let differ = (0..64)
+            .flat_map(|y| (0..64).map(move |x| (x, y)))
+            .filter(|&(x, y)| (0..3).any(|i| pool.pixel(x, y)[i].abs_diff(gray.pixel(x, y)[i]) > 2))
+            .count();
+        assert_eq!(differ, 0, "Shaders {shaders}, game water {game_water}: drawn not as the gray");
+    }
+    // The game's `fswater` reads the picture: blue in the middle.
+    let game = draw(true, true, "pool");
+    let p = game.pixel(32, 32);
+    assert!(p[2] > 150 && p[0] < 40, "fswater's picture: {p:?}");
 }
 
 /// Soft particles (`docs/framebuffer-proposal.md`, step 4): a particle
@@ -5576,6 +5882,147 @@ fn shadows_darken_what_receives_them_by_the_opacity() {
             assert!(at(&whole, under) <= 1.0, "{context}: {}", at(&whole, under));
             assert!((at(&half, beside) - at(&bare, beside)).abs() <= 1.0, "{context}: beside");
             assert!((at(&elsewhere, under) - lit).abs() <= 1.0, "{context}: not received");
+        }
+    }
+}
+
+/// Grass and a see-through receiver (a tile's leaves, its decals) are
+/// darkened by the sun's shadows as the client darkens them: their solid
+/// part, drawn before the shadows are laid, and their soft part, drawn
+/// after them and darkened by their mask, alike by the opacity. Under the
+/// plate of [`shadows_darken_what_receives_them_by_the_opacity`] lie a
+/// black ground that receives, a strip of solid texels (alpha 250) and a
+/// strip of soft ones (alpha 128), each reaching from the shadow into the
+/// sun (the plate south of the middle, so that no mirror of the picture
+/// keeps them in the shadow); for grass and for a receiver, Fast and High, Moonglow's shader
+/// and the game's programs (authored: they write the texture's alpha).
+/// Before, the strips were as bright in the shadow as in the sun.
+#[test]
+fn grass_and_see_through_receivers_are_darkened_in_the_shadow() {
+    let Some(gpu) = gpu() else { return };
+    let dir = mg_testkit::output_dir("render");
+    let mut assets = TestAssets::default();
+    let solid = |assets: &mut TestAssets, name: &str, rgba: [u8; 4], alpha: bool| {
+        let t = mg_image::Rgba { width: 4, height: 4, data: rgba.repeat(16) }.into_texture(alpha);
+        assets.textures.insert(name.into(), t);
+    };
+    solid(&mut assets, "black", [0, 0, 0, 255], false);
+    solid(&mut assets, "firm", [200, 200, 200, 250], true);
+    solid(&mut assets, "soft", [200, 200, 200, 128], true);
+    // (The stock pairs, writing the texture's alpha: the grass's and a
+    // mesh's.)
+    let vs = r#"
+#define SHADER_TYPE 1
+uniform mat4 m_mv;
+uniform mat4 m_proj;
+attribute vec4 vPos;
+attribute vec2 vTcIn;
+varying vec2 vUv;
+void main ()
+{
+    vUv = vTcIn;
+    gl_Position = m_proj * (m_mv * vPos);
+}
+"#;
+    let fs = r#"
+#define SHADER_TYPE 2
+uniform sampler2D texUnit0;
+varying vec2 vUv;
+void main ()
+{
+    gl_FragColor = texture2D(texUnit0, vUv);
+}
+"#;
+    for (v, f) in [("vslit", "fslit"), ("vsgrass", "fsgrass")] {
+        assets.shaders.insert(v.into(), vs.into());
+        assets.shaders.insert(f.into(), fs.into());
+    }
+    let model = |bitmap: &str| {
+        let mut m = quad();
+        let NodeKind::Mesh(mesh) = &mut m.nodes[1].kind else { unreachable!() };
+        mesh.uvs[0] = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        mesh.source_uv = vec![0, 1, 2, 3];
+        mesh.textures[0] = Some(bitmap.into());
+        Arc::new(GpuModel::new(&gpu, Arc::new(m)))
+    };
+    let (ground, firm, soft) = (model("black"), model("firm"), model("soft"));
+    let plate = Arc::new(GpuModel::new(&gpu, Arc::new(shadow_plate())));
+    // A strip 8 m by 1 m along x, 5 cm over the ground, its middle at `y`.
+    let strip = |y: f32| {
+        Mat4::from_translation(Vec3::new(0.0, y, 0.05)) * Mat4::from_scale(Vec3::new(4.0, 0.5, 1.0))
+    };
+    let scene = |grass: bool, shadows: Option<f32>| {
+        let receiver = |model: &Arc<GpuModel>, y: f32| Instance {
+            grass,
+            receives_shadows: !grass,
+            ..Instance::new(model.clone(), strip(y))
+        };
+        Scene {
+            instances: vec![
+                Instance {
+                    receives_shadows: true,
+                    ..Instance::new(ground.clone(), Mat4::from_scale(Vec3::splat(5.0)))
+                },
+                receiver(&firm, -1.9),
+                receiver(&soft, -0.6),
+                Instance::new(
+                    plate.clone(),
+                    Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.25, 1.25, 1.0),
+                        glam::Quat::IDENTITY,
+                        Vec3::new(0.0, -1.25, 1.0),
+                    ),
+                ),
+            ],
+            area: AreaLight { ambient: Vec3::splat(1.0), diffuse: Vec3::ZERO, direction: Vec3::Z },
+            shadows: shadows.map(|opacity| mg_render::SunShadows { opacity, fade_limit: 45.0 }),
+            ..Default::default()
+        }
+    };
+    let camera = Camera {
+        eye: Vec3::new(0.0, -0.01, 12.0),
+        target: Vec3::ZERO,
+        fov_y: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    // (About 6.3 pixels a meter: the plate's shadow from the middle row
+    // down 16 rows, 8 columns each way; the strips 4 and 12 rows below the
+    // middle, both in it, the rows that mirror them in the sun: a mask
+    // read with its rows from the bottom would leave them lit.)
+    let grey = |p: [u8; 4]| (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0;
+    let (firm_px, soft_px) = (44, 36);
+    let (shade_x, sun_x) = (32, 52);
+    for grass in [false, true] {
+        // (Each count Anti-aliasing offers: with one, no resolve.)
+        let counts = sample_counts(&gpu);
+        let runs = counts.iter().flat_map(|&n| [(n, false), (n, true)]);
+        for (samples, volumes) in runs {
+            for shaders in [false, true] {
+                let mut r = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, samples);
+                assert_eq!(r.sample_count(), samples);
+                (r.game_shaders, r.shadow_volumes) = (shaders, volumes);
+                let bare = r.render_image(&gpu, &assets, &scene(grass, None), &camera, 64, 64);
+                let half = r.render_image(&gpu, &assets, &scene(grass, Some(0.5)), &camera, 64, 64);
+                assert_eq!(r.game_shader_failures(), &[]);
+                assert_eq!(r.drawn.game > 0, shaders, "{:?}", r.drawn);
+                let context = format!(
+                    "grass {grass}, {samples} samples, volumes {volumes}, shaders {shaders}"
+                );
+                let name = format!("see_through_shadows_{grass}_{samples}_{volumes}_{shaders}.png");
+                save(&half, &dir.join(name));
+                for (what, y) in [("solid", firm_px), ("soft", soft_px)] {
+                    let lit = grey(bare.pixel(shade_x, y));
+                    let (shaded, sunny) =
+                        (grey(half.pixel(shade_x, y)), grey(half.pixel(sun_x, y)));
+                    assert!(lit > 40.0, "{context}: the {what} strip is drawn: {lit}");
+                    assert!((sunny - grey(bare.pixel(sun_x, y))).abs() <= 1.0, "{context}: {what}");
+                    assert!(
+                        (shaded - lit * 0.5).abs() <= 3.0,
+                        "{context}: the {what} strip in the shadow: {shaded} of {lit} ({sunny} in the sun)"
+                    );
+                }
+            }
         }
     }
 }
@@ -6118,7 +6565,7 @@ fn a_creature_s_shadow_falls_away_from_its_light() {
         save(&cast, &mg_testkit::output_dir("render").join(name));
         // From 4 m up and 3 m west, the plate (a metre across, 1 m up)
         // throws its shadow from 0.33 m to 1.67 m east of its middle; at
-        // 6.3 pixels a metre, the pixel 3 east of the middle is in it, the
+        // 6.3 pixels a meter, the pixel 3 east of the middle is in it, the
         // one 3 west lit.
         let (east, west) = ((35, 32), (29, 32));
         let lit = grey(off.pixel(east.0, east.1));
@@ -6666,6 +7113,117 @@ fn high_shadows_darken_exactly_the_volume_s_footprint() {
             wrong.len(),
             &wrong[..wrong.len().min(12)]
         );
+    }
+}
+
+/// High's stencil volumes made apart (`Renderer::volumes_apart`, as the
+/// area view has them): a frame never makes a mesh's volume itself. While
+/// the making is held, every frame draws the cube without its shadow, its
+/// caster counted as waiting, and no volume is kept; let go, the frames
+/// after show the shadow as a frame that makes them draws it, to the bit.
+/// The renderer keeps the volumes (not the meshes): they are let go of
+/// with their model, whichever way they were made.
+#[test]
+fn high_shadows_volumes_are_made_apart_and_let_go_with_their_model() {
+    let Some(gpu) = gpu() else { return };
+    let ground = Arc::new(GpuModel::new(&gpu, Arc::new(quad())));
+    let cube = Arc::new(GpuModel::new(&gpu, Arc::new(cube())));
+    let scene = move |opacity: Option<f32>| Scene {
+        instances: vec![
+            Instance {
+                receives_shadows: true,
+                ..Instance::new(ground.clone(), Mat4::from_scale(Vec3::splat(8.0)))
+            },
+            Instance {
+                receives_shadows: true,
+                ..Instance::new(cube.clone(), Mat4::from_translation(Vec3::new(-0.5, -0.5, 1.0)))
+            },
+        ],
+        area: AreaLight {
+            ambient: Vec3::splat(0.2),
+            diffuse: Vec3::splat(0.6),
+            direction: Vec3::new(0.8, 0.6, 1.0).normalize(),
+        },
+        shadows: opacity.map(|opacity| mg_render::SunShadows { opacity, fade_limit: 45.0 }),
+        ..Default::default()
+    };
+    let camera = Camera {
+        eye: Vec3::new(0.0, -0.01, 12.0),
+        target: Vec3::ZERO,
+        fov_y: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let (w, h) = (96u32, 96u32);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let samples = gpu.samples(4);
+    let bare = Renderer::new(&gpu, format, samples).render_image(
+        &gpu,
+        &NoAssets,
+        &scene(None),
+        &camera,
+        w,
+        h,
+    );
+    let shadowed = scene(Some(0.5));
+    // In the frame (a picture drawn once): the volumes made by it.
+    let mut once = Renderer::new(&gpu, format, samples);
+    once.shadow_volumes = true;
+    let made_in_frame = once.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+    assert_eq!(once.drawn.volumes_pending, 0);
+    let kept = once.shadow_volumes_kept();
+    assert!(kept >= 1, "the cube's volume kept: {kept}");
+    assert_ne!(made_in_frame.data, bare.data, "the cube's shadow drawn");
+    // Apart, held: no frame makes one.
+    let mut r = Renderer::new(&gpu, format, samples);
+    r.shadow_volumes = true;
+    r.volumes_apart = true;
+    r.hold_volumes(true);
+    for frame in 0..3 {
+        let picture = r.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+        assert!(r.drawn.volumes_pending >= 1, "frame {frame}: {:?}", r.drawn);
+        assert_eq!(r.shadow_volumes_kept(), 0, "frame {frame}: none made by the frame");
+        assert_eq!(picture.data, bare.data, "frame {frame}: drawn without the shadow");
+    }
+    // Asked apart and still held, then needed by a frame drawn once (apart
+    // off): that frame makes them itself, and the late ones are dropped.
+    let mut late = Renderer::new(&gpu, format, samples);
+    late.shadow_volumes = true;
+    late.volumes_apart = true;
+    late.hold_volumes(true);
+    late.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+    assert!(late.drawn.volumes_pending >= 1);
+    late.volumes_apart = false;
+    let picture = late.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+    assert_eq!(late.drawn.volumes_pending, 0);
+    assert_eq!(picture.data, made_in_frame.data, "made in the frame though asked apart");
+    late.hold_volumes(false);
+    late.volumes_apart = true;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..3 {
+        let picture = late.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+        assert_eq!((late.drawn.volumes_pending, late.shadow_volumes_kept()), (0, kept));
+        assert_eq!(picture.data, made_in_frame.data, "the late ones dropped");
+    }
+    drop(late);
+    // Let go: shown in a frame after they are made.
+    r.hold_volumes(false);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let picture = loop {
+        let picture = r.render_image(&gpu, &NoAssets, &shadowed, &camera, w, h);
+        if r.drawn.volumes_pending == 0 {
+            break picture;
+        }
+        assert!(std::time::Instant::now() < deadline, "the volumes never came");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert_eq!(r.shadow_volumes_kept(), kept);
+    assert_eq!(picture.data, made_in_frame.data, "as a frame that makes them draws it");
+    // The models gone: their volumes let go of at the next frame.
+    drop((shadowed, scene));
+    for renderer in [&mut r, &mut once] {
+        renderer.render_image(&gpu, &NoAssets, &Scene::default(), &camera, w, h);
+        assert_eq!(renderer.shadow_volumes_kept(), 0, "let go with their model");
     }
 }
 

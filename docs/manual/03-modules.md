@@ -3,7 +3,7 @@ type: Manual Page
 title: Modules
 description: Modules - opening and saving, where things are used and renaming, find and replace, advanced search, nasher projects, merging in git (mg merge-gff as the merge driver), the project file (moonglow.toml), your builder code, described variables (variables.toml), claimed and protected areas (the claims table), the project's commands (File › Project, update and submit), recovering unsaved work, Module Properties, haks and talk tables, the hak editor, the 2DA editor, import and export.
 tags: [manual, modules, haks, nasher]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:49:31Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T21:15:27Z }
 ---
 
 # Modules
@@ -75,7 +75,7 @@ a directory), nasher projects (see below) and the game's campaign files
   finds it on Windows (`Mymodule/` beside `mymodule.mod` on Linux), and
   is saved as that `.mod`. The welcome page's Recent Modules end a
   folder's name in `/` and name the folder each is in (`mymodule/ in
-  modules`, `mymodule.mod in modules`); the whole path is on hover, as
+  modules`, `mymodule.mod in modules`) and when it was opened last; the whole path is on hover, as
   in the File menu. `mg` opens the `.mod` it is given, as the server
   does, and says that the folder beside it is left as it is.
 - **File › Save** (Ctrl+S) writes the module where it came from, as an
@@ -349,7 +349,12 @@ Each one found in the module is checked; uncheck those to leave out (**Check All
   or **Set a field** (by label, its value typed as the field reads it:
   the field found where it was found, as a class's level, else the
   object's own; an appearance's field is offered after a search of
-  appearances), **Add a feat** and **Remove a feat**, **Add a class**
+  appearances; with **Add where missing** checked, also added to each
+  object without it whose kind of object has that field in the game's
+  files, of the type they give it: a placed chest's Useable, not an
+  area's. The game reads a field missing as its default, so it is off
+  unless checked, and an object without the field is then left and
+  said), **Add a feat** and **Remove a feat**, **Add a class**
   (at a level) and **Remove a class**, **Add an item property** and
   **Remove an item property** (its type, subtype, value and parameter
   chosen as a condition's; removed where an item's matches the parts
@@ -363,9 +368,17 @@ Each one found in the module is checked; uncheck those to leave out (**Check All
   object without that event or field, a door asked for a feat, a
   creature with the feat already) is said, and the search runs again.
 - **Edit the N checked together** (it unfolds, a button for each group)
-  opens blueprints of one type in one tab, and objects of one kind
-  placed in one area in one tab, as the palette's and the area's Edit
-  Together do; **Choose N Areas…** (**Choose 1 Area…** for one) opens
+  opens blueprints of one type in one tab, as the palette's Edit
+  Together does, and objects of one kind placed in the areas in one tab,
+  as the area's does: in one area or several (**Edit 12 creatures in 5
+  areas Together**), a field set there set on each in its own area, in
+  one step that Undo and the window's Cancel take back. The items placed
+  objects hold (in an inventory or equipped) and stores sell open
+  together the same way (**Edit 3 held items in 2 areas Together**),
+  apart from the item blueprints and the items lying in an area, whose
+  pages are not theirs (an item inside a bag held is not among them).
+  Conversations open one at a time: Change sets a script or a field on
+  each line found. **Choose N Areas…** (**Choose 1 Area…** for one) opens
   the Edit Areas Together section of the Right Dock with the areas of what is checked (areas found, or
   those the objects found are placed in) checked.
 
@@ -1427,6 +1440,8 @@ Choosing one:
    made outside, and closes the module's haks, so that the command may
    write over any of them (Windows refuses to replace a file another
    program has open). Moonglow keeps no other file of the project open.
+   Where the game data is still in use, the haks stay open, and the log
+   says so.
    A command with `writes = false` leaves the haks open, so the open
    areas aren't drawn again after it.
 4. **Runs it** in the project's folder, by the system's shell (`sh -c` on
@@ -1535,6 +1550,23 @@ blueprints appear in the area viewer, the palettes and the editors. Haks
 are looked for in the user folder's `hak`, then the game's `data/hk`. A
 change to the list (adding, removing, reordering, an undo) takes effect at
 once.
+
+**While the game data is still in use.** The haks and the module itself
+are layers of the game data, which Moonglow changes when a module is
+opened or closed, after edits, before a build or a check, when the hak
+list or the custom talk table changes, and on **Tools › Reload
+Resources**. Where something still reads the game data at that moment
+(an area still being read, a job that is running), Moonglow waits a few
+seconds at most. If it is still in use after that, the change is kept
+and made as soon as the game data is free. The log says what waits ("The
+game data is still in use (read on another thread, or by a job): the
+module's haks and resources will be updated once it is free"), the
+Status Bar says *Waiting for the game data to be free…* until then, and
+the log says "The game data is free again: … updated" once the change is
+made. A module closed and another opened meanwhile gets its own haks,
+in their order, and none of the last module's: its areas are drawn again
+with them. A [project command](#the-projects-commands) that would close
+the haks before it runs leaves them open instead, and the log says so.
 
 **A language the game has no letters for.** A hak can have an
 `encoding.2da`: a table of the Unicode character each of the 256 bytes of
@@ -2028,8 +2060,10 @@ folder's files, subfolders included, to look over and save.
   Click to select, Ctrl+click to add to the selection, Shift+click to
   select from the one clicked last to this one; right-click for
   **View**, **Edit Table** (a 2DA), **Rename…**, **Extract…** and
-  **Remove**. With the table clicked (or reached with F6), Up, Down,
-  Page Up, Page Down, Home and End choose a resource and Enter views it;
+  **Remove**. With the table clicked (or reached with F6, or with Down
+  from **Find**, which chooses its first row), Up, Down,
+  Page Up, Page Down, Home and End choose a resource and Enter views it,
+  the table outlined while it has the keys;
   the selection stays with its resources through a sort, Find, an add and
   a remove. The Status Bar shows the hak's count and size, how many are
   selected and, with the pointer over the editor, its clicks.
@@ -2479,9 +2513,10 @@ In the 2DA editor, a described table says so under its buttons, and:
 - a column or a rule the description gets wrong (a `kind` mistyped, a
   list without values) is said under the buttons by its line (`line 12:
   column Damage: "flag" is no kind…`) and left out, and the other
-  columns are described all the same. Verify Module, `mg 2da-check` and
-  a plugin take no such description: they say the first mistake, by its
-  line, and check nothing by it until it is mended.
+  columns are described all the same. Verify Module and `mg 2da-check`
+  read it the same way: each mistake is said by its line (`2da-described`
+  warns once for each), and the columns that read well are checked all
+  the same. A plugin's `mg.twoda.describe` stops at the first mistake.
 
 Where the description is looked for:
 
@@ -2719,14 +2754,25 @@ plugin reads a description with `mg.twoda.describe`
 ## Areas
 
 **Wizards › Area Wizard…** makes an area from a name, a tileset and a
-size. It opens with the first tileset chosen (Aurora chooses none). It
-is one page: **Name**, **Tileset**, **Size** (**Tiny**, **Small**,
-**Medium** and **Large**, 2, 4, 8 and 16 tiles each way, or the rows and
-columns typed under them, 2 to 32 each), the check boxes **Open Area
-Properties** and **Open area in the Area Viewer**, and at its foot
-**Create** (the main button, which Enter presses once a name and a
-tileset are given) and **Cancel**. Its ResRef is made from the name,
-after [your builder code](#your-builder-code) where you have one (the
-wizard then shows it under the name). **Edit › Resize Area…** and
+size, in three steps as Aurora's does, listed at the left (the list
+drops out where the window is narrow) with the page's name over each:
+
+1. **Name and Tileset**: the **Name**, the **Tileset** list (it opens
+   with the first tileset chosen, where Aurora chooses none) and, where
+   the project hides tilesets, **Show hidden tilesets**. **Next >** is
+   on once there is a name and a tileset. A double click on a tileset
+   goes on to the next step, as **Next >** does.
+2. **Size**: **Tiny**, **Small**, **Medium** and **Large** (2, 4, 8 and
+   16 tiles each way), or the rows and columns typed under them, 2 to 32
+   each.
+3. **Finish**: a line saying what will be made, and the check boxes
+   **Open Area Properties** and **Open area in the Area Viewer**.
+
+The foot has **< Back** (what was entered stays), **Next >**, **Finish**
+and **Cancel**. **Finish** is on at the last step only, where it is the
+main button; before it, **Next >** is, and Enter presses the main
+button. Escape cancels. The wizard always opens on its first step. The
+ResRef is made from the name, after [your builder code](#your-builder-code)
+where you have one (the first step then shows it under the name). **Edit › Resize Area…** and
 **Rotate Area…** change the area shown last, as in Aurora. See
 [Areas](04-areas.md).

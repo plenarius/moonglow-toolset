@@ -91,6 +91,51 @@ fn a_second_compile_passes_over_what_is_unchanged() {
 /// where `mg compile` (and the window) do: the next compile passes over
 /// it. A project is one to them whether named by its folder or by its
 /// `nasher.cfg`.
+/// `--json` says, for each script compiled, why it was and whether its
+/// compiled script changed.
+#[test]
+fn json_says_why_each_script_was_compiled() {
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("mg-compile-why");
+    std::fs::create_dir_all(dir.join("user")).unwrap();
+    let chess = dir.join("chess.mod");
+    std::fs::copy(root.join("data/mod/Neverwinter Chess.mod"), &chess).unwrap();
+    let why = |v: &Value, script: &str| -> (String, bool) {
+        let e = v["compiled_scripts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["script"] == script)
+            .unwrap_or_else(|| panic!("{script} in {v}"));
+        (e["why"].as_str().unwrap().to_string(), e["changed"].as_bool().unwrap())
+    };
+    // Nothing remembered: each has its compiled script from the module, which is
+    // not what Moonglow made.
+    let first = compile(&root, &dir, &chess, &[]);
+    let list = first["compiled_scripts"].as_array().unwrap();
+    assert_eq!(list.len() as u64, first["scripts"].as_u64().unwrap(), "{first}");
+    assert!(list.iter().all(|e| e["why"].is_string() && e["ok"] == true), "{first}");
+    assert!(
+        list.iter().all(|e| e["why"] == "not-compiled-here" || e["why"] == "no-compiled-script")
+    );
+    // An edit that leaves the compiled script as it was: the source changed,
+    // the bytes did not.
+    let mut m = mg_module::Module::open(&chess).unwrap();
+    let key = *(m.keys_of(ResType::NSS))
+        .find(|k| m.contains(&ResKey::new(k.resref, ResType::NCS)))
+        .expect("a script with a compiled one");
+    let mut source = m.get(&key).unwrap().to_vec();
+    source.extend_from_slice(b"\n// changed\n");
+    m.set(key, source);
+    m.save().unwrap();
+    let third = compile(&root, &dir, &chess, &[]);
+    assert_eq!(
+        why(&third, &key.resref.to_string()),
+        ("source-changed".to_string(), false),
+        "{third}"
+    );
+}
+
 #[test]
 fn uncompiled_and_build_remember_what_they_compiled() {
     let root = mg_testkit::corpus!();
@@ -181,6 +226,48 @@ fn x2_inc_cutscene_s_includers_compile_with_one_warning() {
     assert!(out.status.success(), "{said}");
     assert_eq!(said.matches("WARNING: CutCreateObjectCopy").count(), 1, "{said}");
     assert!(said.contains("(in 2 scripts)"), "{said}");
+}
+
+/// An include's `main` that Aurora's Build compiles in place of the
+/// script's own (the owner's ruling of 2026-11-26: Moonglow keeps the
+/// script's, and says so): a warning for each such script, on standard
+/// error and in the JSON.
+#[test]
+fn an_includes_main_is_warned_of() {
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("mg-compile-include-main");
+    std::fs::create_dir_all(dir.join("user")).unwrap();
+    let chess = dir.join("chess.mod");
+    std::fs::copy(root.join("data/mod/Neverwinter Chess.mod"), &chess).unwrap();
+    let mut m = mg_module::Module::open(&chess).unwrap();
+    for (name, text) in [
+        ("mg_inc_lib", "void Say() { PrintString(\"x\"); }\nvoid main() { Say(); }\n"),
+        ("mg_cond", "#include \"mg_inc_lib\"\nint StartingConditional() { return TRUE; }\n"),
+        ("mg_only", "#include \"mg_inc_lib\"\n"),
+    ] {
+        m.set(ResKey::parse(name, ResType::NSS).unwrap(), text.as_bytes().to_vec());
+    }
+    m.save().unwrap();
+    let json = compile(&root, &dir, &chess, &["--all"]);
+    assert_eq!(json["failed"], 0, "{json}");
+    let warnings: Vec<&str> = (json["warnings"].as_array().unwrap().iter())
+        .map(|w| w["message"].as_str().unwrap())
+        .filter(|w| w.starts_with("mg_inc_lib.nss(2): WARNING"))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{json}");
+    assert!(warnings.iter().any(|w| w.contains("compiles as mg_cond in place of its")));
+    assert!(warnings.iter().any(|w| w.contains("Aurora compiles mg_inc_lib's main as mg_only")));
+
+    let out = crate::mg_on(&root, Some(&dir.join("user")))
+        .args(["compile", "--all"])
+        .arg(&chess)
+        .env("MOONGLOW_DATA_DIR", dir.join("data"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(said.matches("WARNING: mg_inc_lib has a main").count(), 1, "{said}");
+    assert_eq!(said.matches("WARNING: mg_only has no main").count(), 1, "{said}");
 }
 
 fn is_json(p: &Path) -> bool {

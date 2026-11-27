@@ -100,6 +100,15 @@ To hear what the client plays (which music and sound files it takes),
 `client_audio.rs` runs it with `MG_CLIENT_AUDIO_OUT` set, which has
 `run-client.sh` give it OpenAL Soft's `wave` backend: what it plays is
 written to a WAV file in the scratch folder, still with no audio device.
+Every run that puts a window on the off-screen display (the client, Aurora,
+a restart of the display) holds the machine's display lock first
+(`docs/locks.md`; `tools/locks.sh`, which the scripts source): by hand,
+`tools/locks.sh hold display -- CMD...` around anything you drive, and
+a holder exports `MOONGLOW_LOCKS_HELD=display` so what it starts does not
+wait for it. A wait is on stderr (`MOONGLOW_LOCK_WAIT=SECONDS`, 0 refuses).
+Take the lock first, then start or check the display inside the hold
+(`headless.sh start` there gives `DISPLAY`): never read `DISPLAY` before
+the hold, since the holder before you may restart the display.
 Reading the client's own code (`nm`, `objdump` on the unstripped
 `nwmain-linux`) is a last resort, by the owner's word: only once its
 pictures, patched includes, scripts, shims and runs made to tell the
@@ -155,10 +164,16 @@ installed game; `crates/mg-corpus-tests/examples/observed_schema.rs`).
   labels, odd entries) and typed layers edit the raw tree in place, so an
   untouched file round-trips.
 - **Tests that open a GPU device call `mg_testkit::gpu::hold()` first**, so a
-  test binary has one device open at a time (`MG_TEST_GPUS` sets more):
-  a test suite with dozens at once coincided with a kernel panic on the
-  development machine, and four at once crashed in the Vulkan library in
-  about 1 run in 20. A test that changes what
+  test binary has one device open at a time (`MG_TEST_GPUS` sets more),
+  and the machine too: each test also takes one of that many slot files
+  (`docs/locks.md`), so test runs at once keep to the same few. A test that
+  runs the client or uses the display takes the display lock first
+  (`mg_testkit::display::hold()`; the client tests'
+  `common::gpu_after_display()` is both in order): display, then GPU, never
+  the reverse (it panics otherwise). The cap is there because a test suite
+  with dozens at once coincided with a kernel panic on the development
+  machine, and four at once crashed in the Vulkan library in about 1 run in
+  20. A test that changes what
   every render does (`mg_render::guard::fail_on`) takes the GPU alone
   (`gpu::alone()`), and process-wide state a window reads is the window's
   own, or other tests' windows take it.
@@ -202,3 +217,5 @@ installed game; `crates/mg-corpus-tests/examples/observed_schema.rs`).
   (`docs/framebuffer-proposal.md`; the shaders proposal's M5 had kept it
   Moonglow's). Every view and preview draws as the area view does, and
   both paths are validated against client screenshots.
+
+Sessions working by a charter follow `~/Projects/moonglow-toolset/.claude/pipelines/` (untracked, private).

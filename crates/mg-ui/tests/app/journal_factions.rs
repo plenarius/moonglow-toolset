@@ -379,17 +379,40 @@ fn no_redo_is_offered_while_journal_text_is_pending() {
     assert!(!redo_off(&h) || h.state().ws.as_ref().unwrap().can_redo().is_none(), "on again");
 }
 
-/// The journal written whole (a module-wide Find and Replace or a rename
-/// writes it) while an entry's Text is typed in: its entry is found again
-/// by its category's Tag and its ID, and what is typed set on it, not on
-/// the entry now at its place (Entry001 removed before it; the review's
-/// finding 10). Where the ID is not unique (a pasted copy keeps it), what
-/// is typed is dropped: no entry changed.
+/// The journal written whole by a plugin's command (a job) while an
+/// entry's Text is typed in: what is typed is set as the job begins, on
+/// the entry typed into, so the plugin reads it and its write keeps it
+/// there (Entry001 removed before it; the review's finding 10). The
+/// selection follows the entry by its category's Tag and its ID; where
+/// the ID is not unique (a pasted copy keeps it) the selection goes, and
+/// the typing, set before, stays on its entry. (Set only as the job's
+/// window took the keyboard, it was replaced by the plugin's write: CI's
+/// run 45640613492.)
 #[test]
 fn typed_text_follows_its_entry_through_a_whole_write() {
+    let dir = mg_testkit::scratch_dir("ui-u22-fix-whole-plugins");
+    let plugin = dir.join("drop");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let cfg = "[plugin]\nid = \"test.drop-entry\"\nname = \"Drop Entry\"\nversion = \"1\"\n\
+               api = \"0.1\"\nlicense = \"MIT\"\n\n[command]\nid = \"drop\"\n\
+               title = \"Drop the First Entry\"\n";
+    std::fs::write(plugin.join("plugin.cfg"), cfg).unwrap();
+    let luau = "local mg = require(\"@moonglow\")\n\
+                mg.command(\"drop\", function(ctx)\n\
+                \x20   local doc = ctx.module:raw(\"module.jrl\")\n\
+                \x20   local n = 0 for i = 1, 30000000 do n = n + i end\n\
+                \x20   table.remove(doc.Categories.value[1].EntryList.value, 1)\n\
+                \x20   ctx.edit:write_gff(\"module.jrl\", doc)\n\
+                end)\n";
+    std::fs::write(plugin.join("main.luau"), luau).unwrap();
     for (case, paste) in [("found", false), ("dropped", true)] {
         let mut h =
             opened(Mode::Tabs, &format!("ui-u22-fix-whole-{case}"), 1600.0, Tab::Journal, 0);
+        h.state_mut().plugin_dir = Some(dir.clone());
+        h.state_mut().load_plugins();
+        h.state_mut().enable_plugin("test.drop-entry", true);
+        h.state_mut().background_jobs = true;
+        settle(&mut h);
         // Quest A: Entry001, Entry002 and a third after them (Add), or a
         // copy of Entry002 (Copy, Paste: its ID kept).
         choose_second_entry(&mut h);
@@ -407,34 +430,23 @@ fn typed_text_follows_its_entry_through_a_whole_write() {
         settle(&mut h);
         let before = all_texts(&mut h);
         type_into_text(&mut h, "Entry002", " typed");
-        // (Written while the Text keeps the keyboard, its typing pending.)
-        let mut doc = h.state_mut().ws.as_mut().unwrap().doc(&jrl()).unwrap().clone();
-        let cats = doc.root.list_mut("Categories").unwrap();
-        cats[0].list_mut("EntryList").unwrap().remove(0);
-        let set = mg_edit::Edit::SetResource { key: jrl(), data: Some(doc.to_bytes().unwrap()) };
-        let depth = undo_depth(&h);
-        h.state_mut()
-            .actions
-            .push(mg_ui::Action::Apply(mg_edit::Command::new("Written", vec![set])));
-        until(&mut h, "the write applied", |h| undo_depth(h) > depth);
-        if paste {
-            assert_eq!(h.state().journal_view.selected, None, "{case}: not to be told");
-        } else {
-            let followed = Some(Node::Entry(0, 0));
-            assert_eq!(h.state().journal_view.selected, followed, "{case}: followed");
-            assert_eq!(focused_text(&h).as_deref(), Some("Entry002 typed"), "{case}: typed in");
-        }
-        h.get_by_label(JOURNAL_HEADER).get_by_label("Collapse All").click();
+        // (Run while the Text keeps the keyboard: a command run by its key
+        // or menu leaves the field first, a plugin's event does not. The
+        // plugin takes a while, so that its window takes the keyboard from
+        // the Text while it runs.)
+        h.state_mut().run_plugin_command("test.drop-entry", "drop");
+        until(&mut h, "the plugin done", |h| !h.state().busy());
         settle(&mut h);
         let mut want = before.clone();
         want[0].remove(0);
-        if paste {
-            assert_eq!(all_texts(&mut h), want, "{case}: no entry changed");
-            continue;
-        }
-        // (Set as the field is left, on the entry it followed.)
+        // (Set as the job began, on the entry typed into.)
         want[0][0] = "Entry002 typed".into();
         assert_eq!(all_texts(&mut h), want, "{case}: on Entry002 alone");
+        let selected = h.state().journal_view.selected;
+        match paste {
+            true => assert_eq!(selected, None, "{case}: not to be told"),
+            false => assert_eq!(selected, Some(Node::Entry(0, 0)), "{case}: followed"),
+        }
     }
 }
 

@@ -441,7 +441,7 @@ pub(crate) fn tab_selection(tab: &crate::Tab) -> Vec<mg_plugin::Selected> {
         Tab::Blueprint(key) => vec![Selected::Blueprint(*key)],
         Tab::Blueprints(keys) => keys.iter().map(|k| Selected::Blueprint(*k)).collect(),
         Tab::Instance { area, path } => object(*area, path).into_iter().collect(),
-        Tab::Instances { area, paths } => paths.iter().filter_map(|p| object(*area, p)).collect(),
+        Tab::Instances { objects } => objects.iter().filter_map(|(a, p)| object(*a, p)).collect(),
         Tab::Area(area) | Tab::AreaProperties(area) => vec![Selected::Area(*area)],
         Tab::AreasProperties(areas) => areas.iter().map(|a| Selected::Area(*a)).collect(),
         // (A NUI designer's source group: its design's window, M4's U19
@@ -1694,10 +1694,10 @@ impl Moonglow {
         match self.front_tab() {
             Some(Tab::Blueprints(keys)) => keys.into_iter().map(Selected::Blueprint).collect(),
             Some(Tab::AreasProperties(areas)) => areas.into_iter().map(Selected::Area).collect(),
-            Some(Tab::Instances { area, paths }) => (paths.iter())
-                .filter_map(|p| match p.0.as_slice() {
+            Some(Tab::Instances { objects }) => (objects.iter())
+                .filter_map(|(area, p)| match p.0.as_slice() {
                     [mg_edit::Step::Item(list, index)] => Some(Selected::Object {
-                        area,
+                        area: *area,
                         kind: mg_area::ObjectKind::from_list(list)?,
                         index: *index,
                     }),
@@ -1846,10 +1846,9 @@ impl Moonglow {
     /// Runs the next thing a plugin does on an event, if no job is
     /// running: as a job, like a command.
     pub(crate) fn next_plugin_event(&mut self) {
-        // (A field typed in sets its text first, or the job writes over it; nor while a
-        // command is held for the Protected Area window: the events wait their turn.)
-        let waits = self.plugin_after_text.is_some() || self.typing_in_a_field();
-        if self.busy() || self.ws.is_none() || waits || self.held_for_protected() {
+        // (Nor while a command is held for the Protected Area window: the
+        // events wait their turn.)
+        if self.busy() || self.ws.is_none() || self.held_for_protected() {
             return;
         }
         // What the last event's job was allowed is kept for the next run.
@@ -2139,49 +2138,6 @@ impl Moonglow {
         anywhere: bool,
         run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
     ) {
-        if self.plugin_after_text.is_some() {
-            self.log.warn(format!("{name}: {title}: waiting for another job to start"));
-            return;
-        }
-        // A field typed in sets its text before the snapshot, or the job's write undoes it.
-        if self.job.is_none() && granted.is_none() && !console && self.leave_keys_for_a_job() {
-            let pass = self.egui_ctx.as_ref().map_or(0, egui::Context::cumulative_pass_nr);
-            let start: StartLater = Box::new(move |app: &mut Moonglow| {
-                app.run_plugin_now(name, title, console, granted, plugin, anywhere, run)
-            });
-            self.plugin_after_text = Some((pass, start));
-            return;
-        }
-        self.run_plugin_now(name, title, console, granted, plugin, anywhere, run);
-    }
-
-    /// Whether a text field typed in has the keyboard (not a script's editor).
-    fn typing_in_a_field(&self) -> bool {
-        let Some(ctx) = &self.egui_ctx else { return false };
-        let focused = ctx.memory(egui::Memory::focused);
-        focused.is_some() && self.text_typed == focused && !crate::script_view::has_keys(self, ctx)
-    }
-
-    /// Takes the keyboard from the widget that has it: whether one had it.
-    fn leave_keys_for_a_job(&mut self) -> bool {
-        let Some(ctx) = &self.egui_ctx else { return false };
-        let Some(id) = ctx.memory(egui::Memory::focused) else { return false };
-        ctx.memory_mut(|m| m.surrender_focus(id));
-        ctx.request_repaint();
-        true
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn run_plugin_now(
-        &mut self,
-        name: String,
-        title: String,
-        console: bool,
-        granted: Option<Granted>,
-        plugin: Option<Plugin>,
-        anywhere: bool,
-        run: impl FnOnce(Input, Rc<dyn Host>) -> Result<Outcome, PluginError> + Send + 'static,
-    ) {
         let heading = title.trim_end_matches('…').trim_end_matches("...").trim().to_string();
         // (Another job's question let go of first was never shown again:
         // its job waited until it was called off.)
@@ -2208,6 +2164,7 @@ impl Moonglow {
             format!("{name}: {heading}"),
             !anywhere,
             false,
+            true,
             move |job| {
                 let host = Rc::new(JobHost {
                     progress: job.progress.clone(),
@@ -3932,9 +3889,6 @@ pub(crate) fn remove_window(app: &mut Moonglow, ctx: &egui::Context) {
         app.plugins.remove = None;
     }
 }
-
-/// A plugin's job held back until a text field has set its text.
-pub(crate) type StartLater = Box<dyn FnOnce(&mut Moonglow)>;
 
 #[cfg(test)]
 mod tests {
