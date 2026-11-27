@@ -83,6 +83,7 @@ pub enum Id {
     CompileModels,
     BuildModule,
     PublishNwsync,
+    NwsyncContent,
     Verify,
     /// The module saved to a copy and read back (`mg roundtrip`).
     RoundTrip,
@@ -302,6 +303,7 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::CompileModels),
             Do(Id::BuildModule),
             Do(Id::PublishNwsync),
+            Do(Id::NwsyncContent),
             Do(Id::Verify),
             Do(Id::RoundTrip),
             Do(Id::TestModule),
@@ -584,6 +586,11 @@ impl Id {
                 "publish-nwsync",
                 "Publish to NWSync…",
                 "The module's haks and talk table, for players' games to download",
+            ),
+            Id::NwsyncContent => (
+                "nwsync-content",
+                "NWSync Content…",
+                "The module's haks read from its NWSync server, and the download of what is missing",
             ),
             Id::Verify => ("verify", "Verify Module", ""),
             Id::RoundTrip => (
@@ -905,6 +912,7 @@ impl Id {
             | Id::CompileModels
             | Id::BuildModule
             | Id::PublishNwsync
+            | Id::NwsyncContent
             | Id::Verify
             | Id::RoundTrip
             | Id::GoToStart
@@ -1089,6 +1097,7 @@ impl Id {
                 return;
             }
             Id::PublishNwsync => return crate::nwsync_view::open(app),
+            Id::NwsyncContent => return crate::nwsync_content_view::open(app),
             Id::AreaStatistics => {
                 app.area_stats = shown_area(app);
                 if app.area_stats.is_some() {
@@ -1201,7 +1210,7 @@ pub(crate) fn ui_scale(app: &Moonglow) -> u16 {
 /// Where the context keeps [`Moonglow::largest_ui_scale`] (for Options'
 /// Interface size row).
 pub(crate) fn largest_ui_scale_id() -> egui::Id {
-    egui::Id::new("largest-ui-scale")
+    egui::Id::unique("largest-ui-scale")
 }
 
 /// Why an interface size is not offered (View › Interface Size, Options).
@@ -1633,6 +1642,10 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     // (Read before the menus are drawn: a row chosen is chosen this frame.)
     let pressed = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     if was_open.is_some() && !ctx.egui_wants_keyboard_input() {
+        // (The arrow keys are the menus' here, not egui's own menu keys,
+        // which since 0.37 move the keyboard's focus from row to row and
+        // would take Enter for the row they had come to.)
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         if pressed(Key::ArrowDown) {
             if keys.path.is_empty() {
                 keys.path = vec![keys.first(0)];
@@ -1686,7 +1699,7 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     // (egui's menu bar takes the width it is given: given the menus' own,
     // as they took it in the last frame, the Top Bar's buttons follow
     // them. When that changes, the frame is drawn again.)
-    let width_id = ui.id().with("menu-bar-width");
+    let width_id = ui.scope_id().with("menu-bar-width");
     let start = ui.cursor().min.x;
     let width = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(ui.available_width());
     let size = egui::vec2(width.min(ui.available_width()), ui.available_height());
@@ -1694,7 +1707,7 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     ui.allocate_ui_with_layout(size, layout, |ui| {
         type MenuJobs = (u32, egui::FontFamily, std::sync::Arc<[egui::WidgetText]>);
         let font = egui::TextStyle::Button.resolve(ui.style());
-        let jobs_id = ui.id().with("menu-bar-jobs");
+        let jobs_id = ui.scope_id().with("menu-bar-jobs");
         let font_key = (font.size.to_bits(), font.family.clone());
         let jobs = ui
             .data(|d| d.get_temp::<MenuJobs>(jobs_id))
@@ -2151,8 +2164,8 @@ impl CommandRow {
 }
 
 /// The id of a tick's room in a menu row ([`tick_atoms`]).
-fn tick_id() -> egui::Id {
-    egui::Id::new("menu-tick")
+fn tick_id() -> egui::IdSalt {
+    egui::IdSalt::new("menu-tick")
 }
 
 /// A menu row's words after a tick's room (an icon's, 16 px).
@@ -2197,7 +2210,7 @@ fn paint_tick(
     name: &str,
 ) {
     let enabled = r.enabled();
-    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, name));
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, name));
     if let Some(room) = room.filter(|_| on && ui.is_rect_visible(r.rect)) {
         let color = ui.style().interact_selectable(r, lit).text_color();
         Icon::Check.paint(ui.painter(), room, color);
@@ -2504,6 +2517,7 @@ mod tests {
         let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
         app.settings.ui_scale = scale;
         let mut h = egui_kittest::Harness::builder()
+            .with_context_setup(mg_uikit::FieldLabels::install)
             .with_size(egui::vec2(1280.0, 720.0))
             .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
         h.run();
@@ -2608,6 +2622,7 @@ mod tests {
     fn first_frames(scale: Option<u16>, zoom: f32) -> Vec<(f32, u16, Vec<egui::Vec2>)> {
         let app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
         let mut h = egui_kittest::Harness::builder()
+            .with_context_setup(mg_uikit::FieldLabels::install)
             .with_size(egui::vec2(1280.0, 720.0))
             .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
         // (The harness drew frames as it was made, at 100%: this run

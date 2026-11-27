@@ -224,7 +224,7 @@ pub(crate) fn failed_foot(app: &Moonglow, ui: &mut egui::Ui, tab: &Tab) {
         return;
     }
     let text = failed_text(why);
-    egui::Panel::bottom(egui::Id::new(("side-failed", tab)))
+    egui::Panel::bottom(egui::Id::unique(("side-failed", tab)))
         .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 4)))
         .show_separator_line(false)
         .show(ui, |ui| {
@@ -530,15 +530,22 @@ impl Moonglow {
     }
 
     /// The module's Save: every side editor's document with unsaved changes
-    /// that is saved with it.
-    pub(crate) fn save_side_docs(&mut self) {
+    /// that is saved with it, but for the haks, which are written as jobs
+    /// once the module is ([`Moonglow::save_haks`]): those, by id. (A hak
+    /// that a table of its own was saved into is among them.)
+    pub(crate) fn save_side_docs(&mut self) -> Vec<u32> {
         let tabs: Vec<Tab> = (self.side_docs())
             .filter(|d| d.has_unsaved() && d.saved_with_module(self))
             .map(|d| d.tab())
+            .filter(|tab| !matches!(tab, Tab::Hak(_)))
             .collect();
         for tab in tabs {
             self.save_side(&tab);
         }
+        (self.haks.iter())
+            .filter(|d| SideDoc::has_unsaved(*d) && SideDoc::saved_with_module(*d, self))
+            .map(|d| d.id)
+            .collect()
     }
 
     /// A side editor's tab asked to close: with unsaved changes, it waits
@@ -739,7 +746,7 @@ pub(crate) fn closing_window(app: &mut Moonglow, ctx: &egui::Context) {
     }
     let mut answer = None;
     let footed = widgets::modal(ctx, "Unsaved Changes")
-        .id(egui::Id::new("side-doc-closing"))
+        .id(egui::Id::unique("side-doc-closing"))
         .show_foot(ctx, |ui| {
             ui.label(format!("Save changes to {title}?"));
             for note in &notes {

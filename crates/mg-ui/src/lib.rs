@@ -78,6 +78,7 @@ pub mod nui_render {
         Area, Element, Error, Layout, Look, Options, Picture, Window, layout, render,
     };
 }
+pub mod nwsync_content_view;
 pub mod nwsync_view;
 mod options;
 mod outliner;
@@ -133,6 +134,30 @@ mod tree;
 pub mod updates;
 pub mod viewers;
 pub use browser::RESOURCE_HEADER;
+
+/// The id egui keeps the window's panel `salt` by (its `PanelState`,
+/// its edge's handle under `"__resize"`): since egui 0.37 a panel's id is
+/// its salt under the `Ui` it is shown in (the window's root `Ui`, a test
+/// harness's own, or a dock's for a panel inside it), as the shell noted
+/// where it last drew it; under the root `Ui` before. (0.36 kept it by
+/// the salt alone, `Id::unique(salt)`: where an earlier version left a
+/// dock's size.)
+pub fn panel_id(ctx: &egui::Context, salt: &str) -> egui::Id {
+    let noted = ctx.data(|d| d.get_temp::<egui::Id>(panel_key(salt)));
+    noted.unwrap_or_else(|| ctx.viewport_id().root_ui_id().with(salt))
+}
+
+/// Notes that the panel `salt` is shown in `ui` (for [`panel_id`]), and
+/// gives its id.
+pub(crate) fn note_panel(ui: &egui::Ui, salt: &str) -> egui::Id {
+    let id = ui.scope_id().with(salt);
+    ui.ctx().data_mut(|d| d.insert_temp(panel_key(salt), id));
+    id
+}
+
+fn panel_key(salt: &str) -> egui::Id {
+    egui::Id::unique("mg-ui-panel").with(salt)
+}
 pub use outliner::OUTLINER;
 pub use script_panels::{BOOKMARKED_LINES, COMPILER_MESSAGES, FOUND_AS_YOU_TYPE};
 pub use script_reference::{SCRIPT_HELP, SCRIPT_REFERENCE};
@@ -414,6 +439,11 @@ pub enum Action {
         plugin: String,
         id: String,
     },
+    /// A creature's feats sorted by name, as Aurora's creature Properties
+    /// window writes them at its OK (`mg_edit::lists::feats_by_name`): its
+    /// document and its path there. Run after what the window asked for
+    /// in the frame its OK was pressed in, as its own step of Undo.
+    SortFeats(ResKey, mg_edit::GffPath),
     /// Makes the fix offered beside this line of the log (a finding of
     /// Verify Module's), as one undoable command.
     ApplyFix(usize),
@@ -972,6 +1002,9 @@ pub struct Moonglow {
     pub attach: Option<module_props::AttachDraft>,
     /// Build › Publish to NWSync.
     pub publish: Option<nwsync_view::Publish>,
+    /// Build › NWSync Content, and the module's NWSync content as it was
+    /// put into the game data.
+    pub nwsync_content: nwsync_content_view::NwSyncContent,
     /// Tilesets open in the tileset editor.
     pub tilesets: Vec<tileset_view::TilesetDoc>,
     pub(crate) next_tileset: u32,
@@ -989,6 +1022,11 @@ pub struct Moonglow {
     /// Why a side editor's document could not be saved, the last time it
     /// was tried: said in its closing question and under its editor.
     pub(crate) side_failed: Option<(Tab, String)>,
+    /// What waits for the module's Save's haks to be written (their jobs,
+    /// one after another), while they are: the plugins told of the save,
+    /// and what the save was for (Test Module, Exit, another module...).
+    /// Each is given whether every hak was saved ([`Moonglow::when_saved`]).
+    pub(crate) saved_waits: Option<Vec<hak_view::AfterSave>>,
     /// The actions of the batch `run_actions` runs that have not run yet.
     pub(crate) batch_rest: Vec<Action>,
     /// The side editor (or the talk table's) under the pointer, as drawn
@@ -1871,6 +1909,7 @@ impl Moonglow {
             suggested_hak: None,
             attach: None,
             publish: None,
+            nwsync_content: Default::default(),
             tilesets: Vec::new(),
             next_tileset: 0,
             tileset_ask: None,
@@ -1878,6 +1917,7 @@ impl Moonglow {
             side_closing: Default::default(),
             side_then: None,
             side_failed: None,
+            saved_waits: None,
             batch_rest: Vec::new(),
             undo_under_pointer: None,
             undo_keys: None,
@@ -2778,6 +2818,7 @@ impl Moonglow {
         module_props::attach_window(self, ui.ctx());
         talk_typed::window(self, ui.ctx());
         nwsync_view::window(self, ui.ctx());
+        nwsync_content_view::window(self, ui.ctx());
         levelup_view::window(self, ui.ctx());
         creature_wizard::window(self, ui.ctx());
         plugins::replace_window(self, ui.ctx());
@@ -3648,6 +3689,17 @@ impl Moonglow {
         self.nui_views.get(key).map_or((0, 0), nui_view::kept)
     }
 
+    /// How many times NUI window `key`'s canvas put the variant it edits
+    /// together in its window, and walked a long chart's series (none in a
+    /// frame that changes nothing). For the tests.
+    #[doc(hidden)]
+    pub fn nui_walks(&self, key: &ResKey) -> (usize, usize) {
+        self.nui_views.get(key).map_or((0, 0), |s| {
+            let w = nui_view::walks(s);
+            (w.contexts, w.series)
+        })
+    }
+
     /// Where NUI window `key`'s designer keeps its working copy's words (the
     /// window's, its root's, each variant's): the same from frame to frame
     /// while nothing copies them. For the tests (M4's U18 review).
@@ -3704,7 +3756,8 @@ impl Moonglow {
     /// is opened.
     pub(crate) fn reset_layout(&mut self, ctx: &egui::Context) {
         for id in ["tree", "log", shell::RIGHT_DOCK_ID, shell::MODULE_PANEL_ID] {
-            ctx.data_mut(|d| d.remove::<egui::containers::panel::PanelState>(egui::Id::new(id)));
+            let id = panel_id(ctx, id);
+            ctx.data_mut(|d| d.remove::<egui::containers::panel::PanelState>(id));
         }
         self.settings.hide_tree = false;
         self.settings.hide_log = Settings::new_installation().hide_log;
@@ -4338,7 +4391,7 @@ impl Moonglow {
             let left = own.iter().map(|b| b.1.right()).fold(leaf.rect.left(), f32::max) + 2.0;
             let bar = egui::Rect::from_x_y_ranges(left.min(end_left)..=end_left, row);
             let response = bar.is_positive().then(|| {
-                let id = egui::Id::new(("window-bar", path.surface.0, path.node.0));
+                let id = egui::Id::unique(("window-bar", path.surface.0, path.node.0));
                 let builder = egui::UiBuilder::new().layer_id(layer).max_rect(bar);
                 ui.scope_builder(builder, |ui| {
                     // (Not cut to the editor area: a window's bar lies over
@@ -4932,17 +4985,32 @@ impl Moonglow {
             self.game.as_ref().map_or(0, |g| Arc::strong_count(g) - 1),
             if self.install.is_some() { "known" } else { "none" },
         ));
+        // (The last module's NWSync content forgotten, a Sync of it called
+        // off, whether the layers are made now or once the game data is
+        // free: `layer_open_module` replaces only what was mounted.)
+        self.nwsync_content.module_closed();
         // (Something still reading the game data: the haks are layered
         // once it is free, and the log says so meanwhile.)
         if self.game_free_for(|w| w.layers = true)
             && let (Some(game), Some(gi)) = (exclusive(&mut self.game), &self.install)
         {
-            let (missing, wrong) = m.stack_onto(&mut game.resman, gi);
+            let mg_module::Stacked { missing, wrong, nwsync } = m.stack(&mut game.resman, gi);
             for h in missing {
                 self.log.warn(text::capitalized(&gi.hak_not_found(&h)));
             }
             if let Some(e) = wrong {
                 self.log.error(format!("Could not open the module's haks: {e}"));
+            }
+            // (The NWSync server the project names: its content over the
+            // haks, from what is here; Build › NWSync Content downloads.)
+            if let Some(n) = nwsync {
+                if let Some(line) = n.summary() {
+                    self.log.info(line);
+                }
+                for w in n.warnings() {
+                    self.log.warn(format!("NWSync content: {w}"));
+                }
+                self.nwsync_content.mounted = Some(n);
             }
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
@@ -5183,6 +5251,95 @@ impl Moonglow {
             self.actions.push(then);
         } else {
             self.side_then = Some(then);
+        }
+    }
+
+    /// What [`Action::SaveThen`] does once the module is saved and its
+    /// haks written (`logged`: the log's length as it began): with the
+    /// module's save failed, its question again, saying why; with nothing
+    /// unsaved, `next`; with only an editor beside it unsaved (a hak whose
+    /// write failed, was canceled, or the module's Save does not write),
+    /// that editor's question, then `next`.
+    fn saved_then(&mut self, next: Action, logged: usize) {
+        let module_unsaved = self.has_unsaved_work() && !self.only_side_unsaved();
+        // (The module's save failed, said in the log: its question
+        // again, saying why, rather than nothing and the Exit
+        // dropped. Not where nothing failed: Save As's dialog
+        // canceled.)
+        let failed = (self.log.entries[logged.min(self.log.entries.len())..].iter())
+            .rev()
+            .find(|(level, _)| *level == Level::Error)
+            .map(|(_, m)| m.clone());
+        if module_unsaved && let Some(why) = failed {
+            self.module_failed = Some(why);
+            self.confirm_discard = Some(next);
+        } else if !self.has_unsaved_work() {
+            self.run_now(next);
+        } else if self.only_side_unsaved() {
+            // (Saved, but for an editor beside it that the module's
+            // Save does not save, a new hak say, or a hak that could not
+            // be written: its question (why, for that one), then what
+            // was asked for.)
+            self.ask_side_docs(next);
+        }
+    }
+
+    /// Runs `then` once the module's Save's haks are written (given
+    /// whether every one was saved): at once where none is being written.
+    pub(crate) fn when_saved(&mut self, then: impl FnOnce(&mut Moonglow, bool) + 'static) {
+        match &mut self.saved_waits {
+            Some(waits) => waits.push(Box::new(then)),
+            None => then(self, true),
+        }
+    }
+
+    /// Whether a hak is being written (the module's Save's, or the hak
+    /// editor's own), said in the log if so: no save starts meanwhile, nor
+    /// what would follow it (which would read the file half-written).
+    fn refuse_save_under_hak(&mut self) -> bool {
+        let writing = self.job.as_ref().filter(|j| j.title == hak_view::SAVE_JOB);
+        let Some(title) = writing
+            .map(|j| j.title.clone())
+            .or_else(|| self.saved_waits.as_ref().map(|_| hak_view::SAVE_JOB.to_string()))
+        else {
+            return false;
+        };
+        self.log
+            .warn(format!("{title} is still running: wait for it to finish, or cancel it, first"));
+        true
+    }
+
+    /// The module's Save's haks (`haks`, each with unsaved changes and saved
+    /// with it), written one after another as jobs, and then what waits for
+    /// them ([`Moonglow::when_saved`]): the plugins told of the save first
+    /// (`module_saved`). Written inside the frame, a hak of gigabytes stood
+    /// the window still.
+    fn save_haks(&mut self, haks: Vec<u32>, module_saved: bool) {
+        if !haks.is_empty() && self.saved_waits.is_none() {
+            self.saved_waits = Some(Vec::new());
+        }
+        if module_saved {
+            self.when_saved(|app, _| app.plugins_module_saved());
+        }
+        self.save_next_hak(haks.into(), true);
+    }
+
+    /// The next of the module's Save's haks written ([`Moonglow::save_haks`]),
+    /// or, with none left, what waited for them, told whether all were
+    /// saved (`all`, so far). One that fails or is canceled does not stop the
+    /// others.
+    fn save_next_hak(&mut self, mut haks: std::collections::VecDeque<u32>, all: bool) {
+        match haks.pop_front() {
+            Some(id) => hak_view::save_and(
+                self,
+                id,
+                Box::new(move |app, saved| app.save_next_hak(haks, all && saved)),
+            ),
+            None => {
+                for then in self.saved_waits.take().unwrap_or_default() {
+                    then(self, all);
+                }
+            }
         }
     }
 
@@ -5433,10 +5590,11 @@ impl Moonglow {
         // (Another module's haks may have other tilesets of these names.)
         self.palette.forget_game_data();
         self.search_kept = Default::default();
+        self.nwsync_content.module_closed();
         if self.game_free_for(|w| w.layers = true)
             && let Some(game) = exclusive(&mut self.game)
         {
-            remove_layers(&mut game.resman, |l| l.priority == priority::MODULE || is_hak_layer(l));
+            remove_layers(&mut game.resman, is_module_layer);
             game.invalidate();
             text::set_game_codepage(Some(game.codepage()));
         }
@@ -5685,6 +5843,11 @@ impl Moonglow {
             }
             Action::NewArea(spec) => self.new_area(&spec),
             Action::SaveThen(next) => {
+                // (Not while a hak is being written: what follows would run
+                // on the file half-written.)
+                if self.refuse_save_under_hak() {
+                    return;
+                }
                 // (Areas not this builder's: asked first.)
                 if claims::hold_save(self, Action::SaveThen(next.clone())) {
                     return;
@@ -5700,26 +5863,9 @@ impl Moonglow {
                 self.module_failed = None;
                 let logged = self.log.entries.len();
                 self.save(None);
-                let module_unsaved = self.has_unsaved_work() && !self.only_side_unsaved();
-                // (The module's save failed, said in the log: its question
-                // again, saying why, rather than nothing and the Exit
-                // dropped. Not where nothing failed: Save As's dialog
-                // canceled.)
-                let failed = (self.log.entries[logged.min(self.log.entries.len())..].iter())
-                    .rev()
-                    .find(|(level, _)| *level == Level::Error)
-                    .map(|(_, m)| m.clone());
-                if module_unsaved && let Some(why) = failed {
-                    self.module_failed = Some(why);
-                    self.confirm_discard = Some(*next);
-                } else if !self.has_unsaved_work() {
-                    self.run_now(*next);
-                } else if self.only_side_unsaved() {
-                    // (Saved, but for an editor beside it that the module's
-                    // Save does not save, a new hak say: its question, then
-                    // what was asked for.)
-                    self.ask_side_docs(*next);
-                }
+                // (Once its haks are written, as jobs: what follows reads
+                // them, and looks at what is unsaved then.)
+                self.when_saved(move |app, _| app.saved_then(*next, logged));
             }
             // (The module's Don't Save: an editor beside it with unsaved
             // changes is asked of by its name first, not dropped with the
@@ -5903,7 +6049,8 @@ impl Moonglow {
             }
             Action::ApplyOptions(draft) => self.apply_options(*draft),
             Action::Save => {
-                if !claims::hold_save(self, Action::Save)
+                if !self.refuse_save_under_hak()
+                    && !claims::hold_save(self, Action::Save)
                     && !plugin_events::hold_save(self, Action::Save)
                     && !bake_view::hold_save(self, Action::Save)
                 {
@@ -5943,7 +6090,9 @@ impl Moonglow {
             }
             Action::SaveAt(loc) => {
                 // (What the plugins say of what it writes, as for Save.)
-                if !plugin_events::hold_save(self, Action::SaveAt(loc.clone())) {
+                if !self.refuse_save_under_hak()
+                    && !plugin_events::hold_save(self, Action::SaveAt(loc.clone()))
+                {
                     self.save(Some(loc));
                 }
             }
@@ -6022,6 +6171,7 @@ impl Moonglow {
             Action::ApplyTyped(cmd) => talk_typed::apply(self, cmd),
             Action::ApplyTypedWith(cmd, answers) => talk_typed::apply_with(self, cmd, answers),
             Action::ApplyMade(cmd, made) => plugin_events::apply_made(self, cmd, &made),
+            Action::SortFeats(key, path) => blueprint::sort_feats(self, key, &path),
             Action::ApplyFix(line) => self.apply_fix(line),
             Action::ApplyFixesOf(check) => self.apply_fixes_of(&check),
             Action::NewNui(name) => nui_view::create(self, &name),
@@ -6360,8 +6510,7 @@ impl Moonglow {
             }
             let in_layers = |hak: bool| {
                 game.resman.layers().iter().any(|l| {
-                    let is_hak = l.priority == mg_resman::priority::HAK
-                        || l.priority == mg_resman::priority::HAK_USER;
+                    let is_hak = mg_resman::priority::is_hak(l.priority);
                     let below = l.priority < mg_resman::priority::MODULE;
                     (if hak { is_hak } else { below }) && l.container.contains(key)
                 })
@@ -6473,6 +6622,9 @@ impl Moonglow {
     }
 
     fn save(&mut self, to: Option<ModuleLocation>) {
+        if self.refuse_save_under_hak() {
+            return;
+        }
         // A module never saved is asked a place first: Save As comes back
         // here with it, and a save called off there does nothing.
         if to.is_none() && self.ws.as_ref().is_some_and(|ws| ws.module.location.is_none()) {
@@ -6544,12 +6696,13 @@ impl Moonglow {
             return;
         }
         // (Tables first: one of a hak's is saved into the hak, which is
-        // then written; one of the module's is a step saved below.)
-        self.save_side_docs();
+        // then written; one of the module's is a step saved below. The
+        // haks are written last, as jobs: `save_haks`.)
+        let haks = self.save_side_docs();
         // (The recovery copy of where it is saved from: named by that
         // place, which Save As leaves.)
         let copy_before = self.recovery_archive();
-        let Some(ws) = &mut self.ws else { return };
+        let Some(ws) = &mut self.ws else { return self.save_haks(haks, false) };
         // The custom palettes, as Aurora keeps them: the entries of the
         // blueprints added, changed or deleted since the module was opened
         // or saved are brought up to date, and nothing else is touched
@@ -6586,6 +6739,7 @@ impl Moonglow {
             Some(loc) => ws.save_as(&loc).map_err(|e| e.to_string()),
             None => ws.save().map_err(|e| e.to_string()),
         };
+        let module_saved = result.is_ok();
         match result {
             Ok(()) => {
                 let path = self.module_path().unwrap_or_default();
@@ -6600,7 +6754,6 @@ impl Moonglow {
                 }
                 self.keep_locks();
                 self.write_mod_beside_folder();
-                self.plugins_module_saved();
             }
             Err(e) => {
                 self.log.error(format!("Save failed: {e}"));
@@ -6614,6 +6767,11 @@ impl Moonglow {
         }
         self.take_project_warnings();
         self.refresh_module_layer();
+        // (The haks last, as jobs, the module written: a hak's that fails
+        // or is canceled leaves the module saved. The plugins are told of
+        // the save once they are written, and what the save was for goes
+        // on then: `when_saved`.)
+        self.save_haks(haks, module_saved);
     }
 
     /// The file that keeps the locks of the open project, if it is one.
@@ -7139,7 +7297,22 @@ impl Moonglow {
         }
         if !stale.is_empty() {
             self.save(None);
+            // (The game reads the haks written with it: started once they
+            // are, as jobs, and not where one could not be.)
+            self.when_saved(move |app, saved| match saved {
+                true => app.test_saved_module(choose),
+                false => app.log.error(
+                    "Test Module: the game was not started, as a hak could not be saved (see above)",
+                ),
+            });
+            return;
         }
+        self.test_saved_module(choose);
+    }
+
+    /// Test Module once the module is saved: the game started on it (a
+    /// nasher project packed first).
+    fn test_saved_module(&mut self, choose: bool) {
         if let Some(ws) = &self.ws {
             let left = nui_view::stale_windows(&ws.module);
             if !left.is_empty() {
@@ -7185,7 +7358,7 @@ impl Moonglow {
                 return;
             }
             self.log.info(format!("Installed {}", dest.display()));
-            self.launch_test(&client, user, &name, choose);
+            self.test_with_content(&client, user, &name, choose);
             return;
         }
         let Some(path) = self.module_path() else {
@@ -7205,7 +7378,7 @@ impl Moonglow {
         {
             return;
         }
-        self.launch_test(&client, user, &name, choose);
+        self.test_with_content(&client, user, &name, choose);
     }
 
     /// Test From Here: the module as it is now, not saved, written to the
@@ -7242,7 +7415,7 @@ impl Moonglow {
                     at[1],
                     dest.display()
                 ));
-                self.launch_test(&client, &user, test_module::FROM_HERE, choose);
+                self.test_with_content(&client, &user, test_module::FROM_HERE, choose);
             }
             Err(e) => self.log.error(format!("Test From Here: {e}")),
         }
@@ -7618,6 +7791,69 @@ impl Moonglow {
         self.reload_changed_content();
         self.reload_changed_files();
         ui.ctx().request_repaint_after(every);
+    }
+
+    /// Starts the game for a test ([`Moonglow::launch_test`]). For a
+    /// module whose project names an NWSync server, the game can't read
+    /// that content on a module of its own: the haks the server hands out
+    /// are written from it first (a job: the first time, gigabytes; then
+    /// only a hak a newer manifest changed), and the game is given a user
+    /// directory of Moonglow's that is the player's own but for its hak
+    /// and talk table folders ([`test_module::content_user_dir`]).
+    fn test_with_content(
+        &mut self,
+        client: &std::path::Path,
+        user: &std::path::Path,
+        name: &str,
+        choose: bool,
+    ) {
+        let uses =
+            (self.ws.as_ref()).is_some_and(|ws| ws.module.project_file.nwsync_settings().is_some());
+        let Some(install) = self.install.clone().filter(|_| uses) else {
+            self.launch_test(client, user, name, choose);
+            return;
+        };
+        let Some(dir) =
+            mg_module::build::cache_dir().map(|d| d.join(test_module::CONTENT_USER_DIR))
+        else {
+            self.log.error("Test Module: no cache folder to write the module's NWSync haks into");
+            return;
+        };
+        let (client, real, name) = (client.to_path_buf(), user.to_path_buf(), name.to_string());
+        self.start_job(
+            test_module::WRITE_TITLE,
+            move |ctx| -> Result<(std::path::PathBuf, String), String> {
+                let progress = |p: mg_nwsync::haks::Progress| {
+                    ctx.progress.step((p.bytes >> 20) as usize, (p.of_bytes >> 20) as usize);
+                    ctx.progress.say(format!(
+                        "writing haks: {} of {}, {} of {} MB",
+                        p.haks,
+                        p.of_haks,
+                        p.bytes >> 20,
+                        p.of_bytes >> 20
+                    ));
+                };
+                let stop = || ctx.progress.cancelled();
+                let o = mg_module::nwsync_content::WriteOptions {
+                    progress: &progress,
+                    stop: &stop,
+                    ..Default::default()
+                };
+                let said = test_module::with_content(&ctx.module, &install, &real, &dir, &o)?;
+                Ok((dir, said))
+            },
+            move |app, made| match made {
+                Ok((dir, said)) => {
+                    // (What was written, then each file on disk used over
+                    // the manifest: an entry each.)
+                    for line in said.lines() {
+                        app.log.info(format!("Test Module: {line}"));
+                    }
+                    app.launch_test(&client, &dir, &name, choose);
+                }
+                Err(e) => app.log.error(format!("Test Module: the module's NWSync content: {e}")),
+            },
+        );
     }
 
     fn launch_test(
@@ -8232,6 +8468,11 @@ impl Moonglow {
         if waits.layers || waits.changed {
             self.game_data_changed();
         }
+        // (The browser's and the views' load order is another: a Sync's
+        // newer manifest, another module's haks.)
+        if waits.layers {
+            self.load_order_changed();
+        }
         self.log.info(format!("The game data is free again: {} updated", waits.said()));
     }
 
@@ -8241,19 +8482,34 @@ impl Moonglow {
     /// must be free.
     fn layer_open_module(&mut self) {
         let Some(game) = exclusive(&mut self.game) else { return };
-        remove_layers(&mut game.resman, |l| l.priority == priority::MODULE || is_hak_layer(l));
+        remove_layers(&mut game.resman, is_module_layer);
+        // (What was mounted replaced, nothing else of the NWSync window:
+        // this is reached after edits and before jobs that read the game,
+        // and a Sync under way goes on. Closing or opening a module
+        // forgets the rest, `NwSyncContent::module_closed`.)
+        self.nwsync_content.mounted = None;
         let mut layered = Vec::new();
         match (&mut self.ws, &self.install) {
             (Some(ws), Some(gi)) => {
                 // (Module Properties' hak list as it is now, unsaved
                 // changes included.)
                 let _ = ws.flush();
-                let (missing, wrong) = ws.module.stack_onto(&mut game.resman, gi);
+                let mg_module::Stacked { missing, wrong, nwsync } =
+                    ws.module.stack(&mut game.resman, gi);
                 for h in missing {
                     self.log.warn(text::capitalized(&gi.hak_not_found(&h)));
                 }
                 if let Some(e) = wrong {
                     self.log.error(format!("Could not open the module's haks: {e}"));
+                }
+                if let Some(n) = nwsync {
+                    if let Some(line) = n.summary() {
+                        self.log.info(line);
+                    }
+                    for w in n.warnings() {
+                        self.log.warn(format!("NWSync content: {w}"));
+                    }
+                    self.nwsync_content.mounted = Some(n);
                 }
                 layered = ws.module.haks().unwrap_or_default();
             }
@@ -8278,6 +8534,12 @@ impl Moonglow {
     #[doc(hidden)]
     pub fn game_changes_waiting(&self) -> bool {
         self.game_waits.any()
+    }
+
+    /// How many times the load order has changed (for the tests).
+    #[doc(hidden)]
+    pub fn load_orders(&self) -> u64 {
+        self.load_order
     }
 
     /// Whether something other than the window reads the game data (a job,
@@ -8357,6 +8619,13 @@ fn kept_by_kind<'a, T>(kept: &'a [(String, T)], tab: &Tab) -> Option<&'a (String
 /// `ResMan::add_haks` labels them).
 fn is_hak_layer(layer: &mg_resman::Layer) -> bool {
     layer.label.starts_with("hak:")
+}
+
+/// A layer the open module put in: its own, its haks', its NWSync content's.
+fn is_module_layer(layer: &mg_resman::Layer) -> bool {
+    layer.priority == priority::MODULE
+        || is_hak_layer(layer)
+        || mg_module::nwsync_content::is_nwsync_layer(layer)
 }
 
 /// Takes the layers `gone` says out of the load order.

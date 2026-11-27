@@ -2,6 +2,10 @@
 //! tab open in the whole application, read through the accessibility tree
 //! and the module. No game install is needed but for Build and Images.
 
+// (Moonglow's cache folder the tests' own, set before `main`.)
+#[path = "support/own_cache.rs"]
+mod own_cache;
+
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use mg_core::ResType;
@@ -405,6 +409,72 @@ fn picture_fields_take_a_file_from_disk() {
     assert!(!h.state().log.entries.iter().any(|(_, line)| line.contains("c40e2b2-1610-41b takes")));
 }
 
+/// Frames until the window is at rest with no work under way (a job, as
+/// a click asks for), at most a minute: as `settle` in the UI tests,
+/// waited for by what it looks for, not by a count of frames (a job that
+/// started, or ended, a few frames late on a busy machine had the last
+/// `run` see it still repainting).
+fn jobs_done(h: &mut Harness<'_, Moonglow>) {
+    let started = std::time::Instant::now();
+    loop {
+        let ran = h.try_run();
+        let under_way = h.state().under_way();
+        if ran.is_ok() && under_way.is_none() {
+            return;
+        }
+        if started.elapsed().as_secs() >= 60 {
+            match (ran, under_way) {
+                (Err(e), _) => panic!("the UI keeps repainting: {e}"),
+                (Ok(_), what) => panic!("the window's work never ended: {}", what.unwrap()),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// A picture the module had, moved into a new hak, then the window's
+/// Cancel: the module has it back (the hak written stays on disk, as a
+/// file saved is). The job ends on a thread of its own, as in the
+/// application: outside the window's frame, so the move is noted for it
+/// by the job's end.
+#[test]
+fn cancel_puts_back_the_pictures_moved_into_a_hak() {
+    let dir = mg_testkit::scratch_dir("nui-images-cancel");
+    let user = dir.join("user");
+    std::fs::create_dir_all(user.join("hak")).unwrap();
+    let mut tga = vec![0u8; 18];
+    (tga[2], tga[12], tga[14], tga[16]) = (2, 1, 1, 24);
+    tga.extend([255u8; 3]);
+    let hak = user.join("hak").join("nui_moved.hak");
+    let dialogs = NoDialogs { save: vec![hak.clone()], ..Default::default() };
+    let install = mg_resman::GameInstall::new(mg_testkit::corpus!(), Some(user), "en");
+    let mut app = game_app(install, dialogs);
+    let mut module = mg_module::Module::new();
+    module.set_info(&mg_gff::Gff::new(*b"IFO ")).unwrap();
+    let key = ResKey::parse("my_bg", ResType::TGA).unwrap();
+    module.set(key, tga);
+    app.ws = Some(mg_edit::Workspace::new(module));
+    app.run(Action::NewNui("pictures".into()));
+    let mut h = creator(app, [1100, 900]);
+    h.run();
+    page(&mut h, "Images");
+    let jui = ResKey::parse("pictures", ResType::JUI).unwrap();
+    let mut doc: Value =
+        serde_json::from_slice(h.state().ws.as_ref().unwrap().module.get(&jui).unwrap()).unwrap();
+    doc["root"]["children"] = json!([{"type":"image","value":"my_bg","height":40.0}]);
+    h.state_mut().ws.as_mut().unwrap().module.set(jui, serde_json::to_vec(&doc).unwrap());
+    h.run();
+    let has = |h: &Harness<'_, Moonglow>| h.state().ws.as_ref().unwrap().module.contains(&key);
+    h.state_mut().background_jobs = true;
+    h.get_by_label("Move Module Images into a New Hak").click();
+    jobs_done(&mut h);
+    assert!(!has(&h), "moved out of the module");
+    assert!(mg_module::hak_edit::Hak::open(&hak).unwrap().items().iter().any(|i| i.key == key));
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(has(&h), "Cancel puts the picture back in the module");
+}
+
 /// Images page: a picture from disk into the module, used as the
 /// window's background, then moved into a new hak the module lists. The
 /// user folder is a scratch one.
@@ -455,8 +525,20 @@ fn images_from_disk_go_into_the_module_and_a_hak() {
         (back["image"].clone(), back["image_aspect"].clone(), back["order"].clone()),
         (json!("my_bg"), json!(5), json!(-1))
     );
+    // The hak is written as a job (on a thread of its own, as the
+    // application runs them): what is said of it, and the module's change,
+    // come once it is written, not as it is asked for.
+    h.state_mut().background_jobs = true;
     h.get_by_label("Move Module Images into a New Hak").click();
-    h.run();
+    h.step();
+    assert!(h.state().busy(), "written off the window's thread");
+    let said = |h: &Harness<'_, Moonglow>| {
+        h.state().log.entries.iter().any(|(_, line)| line.contains("Added 1 picture to"))
+    };
+    assert!(!said(&h), "not said before it is written");
+    assert!(h.state().ws.as_ref().unwrap().module.contains(&key), "the module keeps it till then");
+    jobs_done(&mut h);
+    assert!(said(&h), "{:?}", h.state().log.entries);
     let ws = h.state_mut().ws.as_mut().unwrap();
     assert!(!ws.module.contains(&key), "the picture left the module");
     ws.flush().unwrap();
@@ -478,7 +560,7 @@ fn images_from_disk_go_into_the_module_and_a_hak() {
     h.get_by_label("nui_images.hak").click();
     h.run();
     h.get_by_label("Add Images to nui_images.hak…").click();
-    h.run();
+    jobs_done(&mut h);
     let written = mg_module::hak_edit::Hak::open(&hak).unwrap();
     let icon = ResKey::parse("my_icon", ResType::TGA).unwrap();
     assert!(written.items().iter().any(|i| i.key == icon));
@@ -496,7 +578,7 @@ fn images_from_disk_go_into_the_module_and_a_hak() {
     h.state_mut().dialogs =
         Box::new(NoDialogs { open_many: vec![vec![third.clone()]], ..Default::default() });
     h.get_by_label("Add Images to nui_images.hak…").click();
-    h.run();
+    jobs_done(&mut h);
     let has = |h: &Harness<'_, Moonglow>, k: ResKey| {
         h.state().haks[0].hak.items().iter().any(|i| i.key == k)
     };
@@ -513,7 +595,7 @@ fn images_from_disk_go_into_the_module_and_a_hak() {
     h.state_mut().dialogs =
         Box::new(NoDialogs { open_many: vec![vec![fourth]], ..Default::default() });
     h.get_by_label("Add Images to nui_images.hak…").click();
-    h.run();
+    jobs_done(&mut h);
     assert!(has(&h, ResKey::parse("my_glow", ResType::TGA).unwrap()));
     assert!(h.state().haks[0].hak.is_dirty());
     assert_eq!(h.state().haks[0].hak.undo_label(), Some("Add pictures"));
@@ -539,8 +621,9 @@ fn edit_code_opens_the_event_script_at_the_handler_s_section() {
     assert!(text.contains("// mg:begin click mg_close"));
     assert!(h.state().dock.find_tab(&Tab::Script(script_key)).is_some());
     let at = mg_nui::handler_offset(&text, "click mg_close").unwrap();
-    let state = egui::text_edit::TextEditState::load(&h.ctx, egui::Id::new(("script", script_key)))
-        .expect("script editor state");
+    let state =
+        egui::text_edit::TextEditState::load(&h.ctx, egui::Id::unique(("script", script_key)))
+            .expect("script editor state");
     let r = state.cursor.char_range().expect("script cursor range");
     assert_eq!(usize::from(r.primary.index), at, "cursor jumped to handler offset {at}");
     assert!(h.state().script_tools.jump.is_none(), "jump consumed by script editor");

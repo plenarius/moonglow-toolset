@@ -6,18 +6,23 @@
 //! Set `MOONGLOW_REQUIRE_CORPUS=1` (as CI runners with the game do) to turn a
 //! missing corpus into a failure instead.
 
+pub mod clocks;
 pub mod display;
 pub mod engine;
 pub mod erf;
 #[cfg(feature = "hlsl")]
 pub mod hlsl;
 pub mod joined;
+// (Linux: flock(1), which the script and the page's examples use, is
+// util-linux's; macOS has none by default. The display's are Linux's too.)
+#[cfg(all(test, target_os = "linux"))]
+mod quiet_tests;
 pub mod signing;
 
 /// The GPU hold and the places tests take turns at: their own crate,
 /// [`mg_testkit_gpu`], for a client that wants them without the rest of
 /// the test kit; one crate, so one set of places by either path.
-pub use mg_testkit_gpu::{gpu, places};
+pub use mg_testkit_gpu::{gpu, places, quiet};
 
 use std::collections::BTreeMap;
 use std::env;
@@ -29,6 +34,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// else each Steam library, then GOG's). This kept a shorter list of its
 /// own, and tests skipped on an install the toolset found.
 pub fn nwn_root() -> Option<PathBuf> {
+    // (A corpus test is an ordinary heavy run: it shares the machine's
+    // quiet lock for the rest of the process, docs/locks.md.)
+    quiet::share();
     mg_resman::GameInstall::find_root()
 }
 

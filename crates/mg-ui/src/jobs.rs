@@ -135,7 +135,7 @@ pub(crate) fn wake(ctx: &egui::Context, at_once: bool) {
 }
 
 /// What a thread that panicked said.
-fn panic_text(panic: &Made) -> String {
+pub(crate) fn panic_text(panic: &Made) -> String {
     mg_render::guard::panic_message(&**panic).unwrap_or_else(|| "it stopped unexpectedly".into())
 }
 
@@ -217,6 +217,9 @@ impl Moonglow {
         if self.references.reading() {
             return Some("the references being read");
         }
+        if self.nwsync_content.running() {
+            return Some("NWSync content being looked at or downloaded");
+        }
         if self.updates.checking() {
             return Some("an update check");
         }
@@ -293,6 +296,19 @@ impl Moonglow {
         finish: impl FnOnce(&mut Moonglow, T) + 'static,
     ) {
         self.start_job_on(title.into(), false, true, false, work, finish);
+    }
+
+    /// [`start_job_to_its_end`](Self::start_job_to_its_end) for work on
+    /// the open module (Add Haks' copy, which the module is then told of):
+    /// let go, as [`start_job`](Self::start_job)'s is, where the module is
+    /// closed or another opened before it ends.
+    pub(crate) fn start_module_job_to_its_end<T: Send + 'static>(
+        &mut self,
+        title: impl Into<String>,
+        work: impl FnOnce(&Context) -> T + Send + 'static,
+        finish: impl FnOnce(&mut Moonglow, T) + 'static,
+    ) {
+        self.start_job_on(title.into(), true, true, true, work, finish);
     }
 
     fn start_job_on<T: Send + 'static>(
@@ -373,9 +389,13 @@ impl Moonglow {
         }
     }
 
-    /// The job under way as the Status Bar shows it.
+    /// The job under way as the Status Bar shows it; while none runs, a
+    /// Sync of NWSync content under way (no job, as it lets the window be
+    /// worked in: [`crate::nwsync_content_view`]).
     pub(crate) fn job_shown(&self) -> Option<JobShown> {
-        let job = self.job.as_ref()?;
+        let Some(job) = self.job.as_ref() else {
+            return self.nwsync_content.shown();
+        };
         let p = &job.progress;
         let (done, total) = (p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed));
         let steps = (total > 0).then_some((done.min(total), total));
@@ -497,7 +517,7 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     let (title, progress, started) = (job.title.clone(), job.progress.clone(), job.started);
     let plugin = job.plugin.clone();
     let command = crate::project_commands::running(app);
-    let mut modal = crate::widgets::modal_window(ctx, egui::Id::new("job"));
+    let mut modal = crate::widgets::modal_window(ctx, egui::Id::unique("job"));
     if plugin.is_some() {
         modal = modal.backdrop_color(egui::Color32::TRANSPARENT);
     }
