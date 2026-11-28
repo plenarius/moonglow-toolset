@@ -378,6 +378,10 @@ enum Cmd {
         /// project named no NWSync server ([nwsync] source).
         #[arg(long)]
         no_nwsync: bool,
+        /// Give the server no link to your development folder (the found
+        /// user folder's, or --user-dir's).
+        #[arg(long)]
+        no_development: bool,
         /// The port (default: a free one).
         #[arg(long)]
         port: Option<u16>,
@@ -396,6 +400,8 @@ enum Cmd {
         /// A library loaded into the server (LD_PRELOAD; Linux).
         #[arg(long)]
         preload: Option<PathBuf>,
+        #[command(flatten)]
+        nwnx: serve::NwnxArgs,
         /// Mark the log lines containing this text (an event of their own
         /// with --json); may be given more than once.
         #[arg(long)]
@@ -458,12 +464,18 @@ enum Cmd {
         /// project named no NWSync server ([nwsync] source).
         #[arg(long)]
         no_nwsync: bool,
+        /// Give the server no link to your development folder (the found
+        /// user folder's, or --user-dir's).
+        #[arg(long)]
+        no_development: bool,
         /// A file of NAME=value lines for the server's environment.
         #[arg(long)]
         env: Vec<PathBuf>,
         /// A library loaded into the server (LD_PRELOAD; Linux).
         #[arg(long)]
         preload: Option<PathBuf>,
+        #[command(flatten)]
+        nwnx: serve::NwnxArgs,
         /// More arguments for nwserver, after `--`.
         #[arg(last = true)]
         server_args: Vec<String>,
@@ -692,10 +704,21 @@ enum Cmd {
     /// 2DA, an area, module.ifo).
     #[command(group(
         clap::ArgGroup::new("serving")
-            .args(["dir", "port", "player_password", "dm_password", "admin_password", "env",
-                "preload", "server_args"])
+            .args(["dir", "port", "player_password", "dm_password", "admin_password",
+                "server_args"])
             .multiple(true)
             .requires("serve")
+    ))]
+    // (The server's environment and NWNX: the served module's, or the
+    // tests' server's.)
+    #[command(group(
+        clap::ArgGroup::new("a_server").args(["serve", "test"]).multiple(true)
+    ))]
+    #[command(group(
+        clap::ArgGroup::new("environment")
+            .args(["env", "preload", "nwnx", "no_nwnx"])
+            .multiple(true)
+            .requires("a_server")
     ))]
     Watch {
         project: PathBuf,
@@ -704,7 +727,7 @@ enum Cmd {
         #[arg(long)]
         target: Option<String>,
         /// The development folder to write into (default with --serve:
-        /// the server's own).
+        /// the server's own, which then is not a link to yours).
         #[arg(long)]
         dev_dir: Option<PathBuf>,
         /// Run the module's tests (`test_*` scripts, as `mg test` does,
@@ -730,6 +753,10 @@ enum Cmd {
         /// though the project named no NWSync server ([nwsync] source).
         #[arg(long)]
         no_nwsync: bool,
+        /// With --serve or --test: give the server no link to your
+        /// development folder.
+        #[arg(long)]
+        no_development: bool,
         /// With --serve: the server's user directory (default: a scratch
         /// one).
         #[arg(long)]
@@ -741,13 +768,16 @@ enum Cmd {
         // kept when the server is started again.)
         #[command(flatten)]
         passwords: serve::Passwords,
-        /// With --serve: a file of NAME=value lines for the server's
-        /// environment.
+        /// With --serve or --test: a file of NAME=value lines for the
+        /// server's environment.
         #[arg(long)]
         env: Vec<PathBuf>,
-        /// With --serve: a library loaded into the server (LD_PRELOAD).
+        /// With --serve or --test: a library loaded into the server
+        /// (LD_PRELOAD).
         #[arg(long)]
         preload: Option<PathBuf>,
+        #[command(flatten)]
+        nwnx: serve::NwnxArgs,
         /// With --serve: more arguments for nwserver, after `--`.
         #[arg(last = true)]
         server_args: Vec<String>,
@@ -1304,6 +1334,13 @@ enum Cmd {
         /// 22 (smallest); 3, the default, is `nwn_nwsync_write`'s.
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(i32).range(1..=22))]
         level: i32,
+        /// Write the manifest's origins file too (manifests/<sha1>.origin,
+        /// as nwn_nwsync_write --write-origins): each hak and file a
+        /// resource came from, by its file's name, with the resources it
+        /// gave, so that a reader knows which of a module's haks the
+        /// manifest holds.
+        #[arg(long)]
+        write_origins: bool,
         /// Then send the repository to the web server: run this command
         /// (default: the project's [nwsync] upload) in the repository's
         /// folder once for each part, the data, then the manifests, then
@@ -2139,12 +2176,24 @@ pub(crate) fn open_module(path: &Path) -> std::result::Result<Module, mg_module:
             path.display(),
             folder.display()
         );
-        let mut said = OPENED.lock().unwrap_or_else(|e| e.into_inner());
-        if !said.contains(&note) {
-            said.push(note);
-        }
+        said_of_opened(note);
     }
     Ok(m)
+}
+
+/// A note of a module opened, said once with the output however often
+/// it is opened ([`OPENED`]).
+pub(crate) fn said_of_opened(note: String) {
+    let mut said = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+    if !said.contains(&note) {
+        said.push(note);
+    }
+}
+
+/// Whether [`said_of_opened`] has this note (the tests').
+#[cfg(test)]
+pub(crate) fn opened_notes() -> Vec<String> {
+    OPENED.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// A file's extension, lower case.
@@ -2400,13 +2449,17 @@ pub(crate) fn install(cli: &Cli) -> Result<GameInstall> {
     Ok(gi)
 }
 
+/// The user directory `mg` was given (`--user-dir`) or finds, without
+/// the game too; none with `--no-user-dir`.
+fn user_folder(cli: &Cli) -> Option<PathBuf> {
+    (cli.user_dir.clone()).or_else(GameInstall::detect_user_dir).filter(|_| !cli.no_user_dir)
+}
+
 /// The codepage the game client reads text in, as the user directory's
 /// `settings.tml` sets it ([`client_codepage`]); the user directory as
 /// `mg` finds it, without the game too.
 fn user_codepage(cli: &Cli) -> Option<Codepage> {
-    (cli.user_dir.clone())
-        .or_else(GameInstall::detect_user_dir)
-        .filter(|_| !cli.no_user_dir)
+    user_folder(cli)
         .and_then(|u| std::fs::read_to_string(u.join("settings.tml")).ok())
         .and_then(|t| client_codepage(&t))
 }
@@ -2590,6 +2643,9 @@ fn remember(out: &mut Output, module: &Path, now: &mg_module::build::Remembered)
 
 fn run(cli: &Cli) -> Result<Output> {
     use serde_json::json;
+    if matches!(cli.cmd, Cmd::Plugin { .. }) {
+        let _ = plugins::USER_DIR.set(user_folder(cli));
+    }
     let out = match &cli.cmd {
         Cmd::Ls { archive, sha256 } => {
             // (Mapped, not read: a hak is gigabytes, and its names are in
@@ -3133,12 +3189,14 @@ fn run(cli: &Cli) -> Result<Output> {
             dir,
             real_user_dir,
             no_nwsync,
+            no_development,
             port,
             public,
             name,
             passwords,
             env,
             preload,
+            nwnx,
             marker,
             until,
             timeout,
@@ -3163,6 +3221,9 @@ fn run(cli: &Cli) -> Result<Output> {
                 project: None,
                 progress: !cli.json,
                 no_nwsync: *no_nwsync,
+                development: serve::Development::players_unless(*no_development),
+                nwnx: nwnx.choice(),
+                live: false,
             };
             let started = std::time::Instant::now();
             let bold = !cli.json && io::stdout().is_terminal();
@@ -3193,7 +3254,7 @@ fn run(cli: &Cli) -> Result<Output> {
             })?;
             let failed = match end {
                 serve::End::Stopped => late && until.is_some() && !reached,
-                serve::End::NotLoaded => true,
+                serve::End::NotLoaded | serve::End::Nwnx => true,
                 serve::End::Exited(code) => code != Some(0) || until.is_some(),
             };
             let said = match end {
@@ -3215,8 +3276,10 @@ fn run(cli: &Cli) -> Result<Output> {
             include,
             dir,
             no_nwsync,
+            no_development,
             env,
             preload,
+            nwnx,
             server_args,
         } => {
             if *include {
@@ -3240,6 +3303,8 @@ fn run(cli: &Cli) -> Result<Output> {
                     args: server_args.clone(),
                     progress: !cli.json,
                     no_nwsync: *no_nwsync,
+                    development: serve::Development::players_unless(*no_development),
+                    nwnx: nwnx.choice(),
                     ..Default::default()
                 },
             };
@@ -4322,11 +4387,13 @@ fn cmd_watch(cli: &Cli) -> Result<Output> {
         ndb,
         serve,
         no_nwsync,
+        no_development,
         dir,
         port,
         passwords,
         env,
         preload,
+        nwnx,
         server_args,
     } = &cli.cmd
     else {
@@ -4351,6 +4418,14 @@ fn cmd_watch(cli: &Cli) -> Result<Output> {
         (None, Some(server)) => server.join("development"),
         (None, None) => bail!("where to? --dev-dir FOLDER, or --serve"),
     };
+    // (The server's own development folder written into: a link `mg
+    // serve` left there to the player's goes first, never written
+    // through, and the server is given no other.)
+    let absolute = std::path::absolute(&dev_dir).unwrap_or_else(|_| dev_dir.clone());
+    let watched = server_dir.as_ref().is_some_and(|s| absolute == s.join("development"));
+    if let (true, Some(server)) = (watched, &server_dir) {
+        serve::unlink_development(server)?;
+    }
     std::fs::create_dir_all(&dev_dir).with_context(|| path_text(&dev_dir))?;
     let served = server_dir.as_ref().map(|d| d.join("modules").join(format!("{name}.mod")));
     let build_to = served.clone().or(r#mod.clone());
@@ -4400,9 +4475,15 @@ fn cmd_watch(cli: &Cli) -> Result<Output> {
             own_driver: false,
             settle: 0.0,
             timeout: 120.0,
+            // (The tests' server as `mg test`'s: the project's NWNX, the
+            // --env files and the preload too.)
             serve: serve::Config {
                 name: "Moonglow test run".into(),
+                env: env.clone(),
+                preload: preload.clone(),
                 no_nwsync: *no_nwsync,
+                development: serve::Development::players_unless(*no_development),
+                nwnx: nwnx.choice(),
                 ..Default::default()
             },
         };
@@ -4472,6 +4553,12 @@ fn cmd_watch(cli: &Cli) -> Result<Output> {
         project: Some(project.clone()),
         progress: !cli.json,
         no_nwsync: *no_nwsync,
+        nwnx: nwnx.choice(),
+        live: true,
+        development: match watched {
+            true => serve::Development::Watched,
+            false => serve::Development::players_unless(*no_development),
+        },
         ..Default::default()
     };
     let mut wrong: Option<anyhow::Error> = None;
@@ -5259,6 +5346,7 @@ fn cmd_nwsync(cli: &Cli) -> Result<Output> {
         force,
         dry_run,
         level,
+        write_origins,
         upload,
     } = &cli.cmd
     else {
@@ -5322,6 +5410,7 @@ fn cmd_nwsync(cli: &Cli) -> Result<Output> {
         force: *force,
         dry_run: *dry_run,
         level: *level,
+        origins: *write_origins,
     };
     let w = mg_module::nwsync::write(repository, &contents, &o, &mut |_, _| {})
         .map_err(anyhow::Error::msg)?;
@@ -5341,6 +5430,8 @@ fn cmd_nwsync(cli: &Cli) -> Result<Output> {
         "bytes": w.bytes,
         "on_disk_bytes": w.on_disk,
         "new_files": w.new_files,
+        "origins": w.origins.map(|_| format!("manifests/{}.origin", w.sha1)),
+        "origin_containers": w.origins,
         "dry_run": *dry_run,
         "uploaded": uploaded,
     });
@@ -5354,6 +5445,14 @@ fn cmd_nwsync(cli: &Cli) -> Result<Output> {
         w.new_files,
         if *dry_run { "; nothing written" } else { "" }
     ));
+    if let Some(n) = w.origins {
+        out.note(format!(
+            "origins: {n} {} named in manifests/{}.origin{}",
+            if n == 1 { "container" } else { "containers" },
+            w.sha1,
+            if *dry_run { " (not written: a dry run)" } else { "" }
+        ));
+    }
     if uploaded.is_empty() {
         out.note(format!(
             "serve {} on a web server, and start nwserver with -nwsyncurl <its address>",

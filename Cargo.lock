@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "mg"
-version = "5.4.0"
+version = "5.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2768,6 +2768,7 @@ dependencies = [
  "mg-rules",
  "mg-schema",
  "mg-script",
+ "mg-serve",
  "mg-set",
  "mg-shader",
  "mg-ssf",
@@ -2855,6 +2856,7 @@ dependencies = [
 name = "mg-module"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "fastrand",
  "indexmap",
  "mg-2da",
@@ -2908,6 +2910,7 @@ dependencies = [
 name = "mg-nwsync"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "flate2",
  "mg-core",
  "mg-erf",
@@ -3041,7 +3044,9 @@ dependencies = [
 name = "mg-serve"
 version = "0.0.0"
 dependencies = [
+ "mg-core",
  "mg-testkit",
+ "rustix 1.1.5",
 ]
 
 [[package]]
@@ -3143,6 +3148,7 @@ dependencies = [
  "mg-rules",
  "mg-schema",
  "mg-script",
+ "mg-serve",
  "mg-set",
  "mg-ssf",
  "mg-testkit",
@@ -3271,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "moonglow"
-version = "5.4.0"
+version = "5.5.0"
 dependencies = [
  "eframe",
  "egui",

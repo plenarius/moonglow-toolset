@@ -122,6 +122,7 @@ pub mod tag_clash;
 pub mod talk_typed;
 pub mod talk_view;
 pub mod terrain_mode;
+mod test_command;
 pub mod test_module;
 mod text;
 pub mod tile_select;
@@ -1005,6 +1006,11 @@ pub struct Moonglow {
     /// Build › NWSync Content, and the module's NWSync content as it was
     /// put into the game data.
     pub nwsync_content: nwsync_content_view::NwSyncContent,
+    /// Test Module on a local server with NWNX, under way
+    /// ([`test_module::LocalRun`]), and what the status bar says of it.
+    pub(crate) local_run: Option<(test_module::LocalRun, String)>,
+    /// The Log said once that NWNX runs on Linux servers only.
+    pub(crate) nwnx_linux_said: bool,
     /// Tilesets open in the tileset editor.
     pub tilesets: Vec<tileset_view::TilesetDoc>,
     pub(crate) next_tileset: u32,
@@ -1617,6 +1623,8 @@ pub struct Moonglow {
     /// The project's commands (File › Project): the one asked about, its
     /// output.
     pub(crate) project_commands: project_commands::CommandsState,
+    /// Options › Test Module's command, running ([`test_command`]).
+    pub(crate) test_command: Option<test_command::Running>,
     /// The window's close button was pressed with nothing unsaved: asked
     /// whether to close.
     pub closing: bool,
@@ -1910,6 +1918,8 @@ impl Moonglow {
             attach: None,
             publish: None,
             nwsync_content: Default::default(),
+            local_run: None,
+            nwnx_linux_said: false,
             tilesets: Vec::new(),
             next_tileset: 0,
             tileset_ask: None,
@@ -2118,6 +2128,7 @@ impl Moonglow {
             module_folder: None,
             claims: Default::default(),
             project_commands: Default::default(),
+            test_command: None,
             closing: false,
             render_info: None,
             graphics_choice: None,
@@ -2296,6 +2307,7 @@ impl Moonglow {
             talk.game = self.game.as_deref().map(GameData::codepage);
         }
         self.trace_frame(ui);
+        self.poll_local_run(&ui.ctx().clone());
         // (Pressed by the window it was for, in the frame it was asked.)
         self.escape_cancel = None;
         // (A docked tab's Escape, seen as the last frame drew the editor
@@ -2806,6 +2818,7 @@ impl Moonglow {
         claims::windows(self, ui.ctx());
         plugin_events::window(self, ui.ctx());
         project_commands::window(self, ui.ctx());
+        test_command::tick(self, ui.ctx());
         outside::window(self, ui.ctx());
         script_nav::rename_window(self, ui.ctx());
         prefabs::save_window(self, ui.ctx());
@@ -6024,6 +6037,13 @@ impl Moonglow {
                 let mut draft = OptionsDraft::from_settings(&self.settings);
                 // (Looked for once: it reads Steam's library files.)
                 draft.detected = GameInstall::detect();
+                // (Test Module's quick start: the open project's character.)
+                draft.test_project = self.test_project_key();
+                draft.test_character = (draft.test_project.as_ref())
+                    .and_then(|k| self.settings.test_characters.get(k).cloned());
+                if let Some(user) = self.install.as_ref().and_then(|i| i.user_dir.clone()) {
+                    draft.local_characters = test_module::local_characters(&user);
+                }
                 // The plugins' commands take keys like the rest.
                 let commands = self.plugin_commands_cached();
                 plugins::register_keys(&mut draft.keymap, &commands);
@@ -6459,6 +6479,10 @@ impl Moonglow {
                 self.run_now(Action::Quit);
             }
             Action::Quit => {
+                // (Test Module's local server and the game joined to it
+                // stopped, and waited for: nothing of the test's is left
+                // running.)
+                self.stop_local_run_and_wait();
                 // (What a plugin held for the Protected Area window wrote
                 // into haks is taken back, as its Cancel would.)
                 self.cancel_pending_protected();
@@ -7272,6 +7296,13 @@ impl Moonglow {
     /// Whether the game started for the last test is still running, said
     /// in the log if so: no other test starts meanwhile.
     fn game_still_running(&mut self) -> bool {
+        if self.local_run_under_way() {
+            self.log.warn(
+                "Test Module: the local server of the last test is still running: close the game \
+                 (or Build › Stop Test Server), then test again",
+            );
+            return true;
+        }
         let running = test_module::game_running();
         if running {
             self.log.warn(
@@ -7322,6 +7353,19 @@ impl Moonglow {
                     left.join(", ")
                 ));
             }
+        }
+        // (Options › Test Module: a command of the builder's own, on the
+        // module where it is saved, a nasher project's packed.)
+        if self.settings.test_starts == settings::TestStarts::Command {
+            let path = match self.ws.as_ref().is_some_and(|ws| ws.module.project.is_some()) {
+                true => self.pack_target(),
+                false => self.module_path(),
+            };
+            match path {
+                Some(path) => self.test_by_command(&path),
+                None => self.log.error("Test Module: save the module first"),
+            }
+            return;
         }
         let Some(install) = self.install.clone() else {
             self.log.error("Test Module needs the game");
@@ -7415,7 +7459,11 @@ impl Moonglow {
                     at[1],
                     dest.display()
                 ));
-                self.test_with_content(&client, &user, test_module::FROM_HERE, choose);
+                if self.settings.test_starts == settings::TestStarts::Command {
+                    self.test_by_command(&dest);
+                } else {
+                    self.test_with_content(&client, &user, test_module::FROM_HERE, choose);
+                }
             }
             Err(e) => self.log.error(format!("Test From Here: {e}")),
         }
@@ -7793,6 +7841,47 @@ impl Moonglow {
         ui.ctx().request_repaint_after(every);
     }
 
+    /// Options › Test Module's command run on the module at `path` (its
+    /// file or folder, named by its stem), and the game joining its server
+    /// where Then start the game is on ([`test_command`]).
+    fn test_by_command(&mut self, path: &std::path::Path) {
+        let line = self.settings.test_command.trim().to_string();
+        if line.is_empty() {
+            self.log.error("Test Module: Options › Test Module has no command to run");
+            return;
+        }
+        let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let join = if self.settings.test_joins {
+            let install = self.install.as_ref();
+            let client = install.and_then(|i| test_module::client_binary(i.root.as_path()));
+            let user = install.and_then(|i| i.user_dir.clone());
+            let (Some(client), Some(user)) = (client, user) else {
+                self.log.error(
+                    "Test Module: no game client, or no user folder (Options › Folders), to \
+                     join the server with",
+                );
+                return;
+            };
+            if !self.other_game_allows(&name) {
+                return;
+            }
+            let address = match self.settings.test_address.trim() {
+                "" => test_module::DEFAULT_ADDRESS.to_string(),
+                typed => typed.to_string(),
+            };
+            Some(test_command::Join {
+                client,
+                user,
+                address,
+                password: self.settings.test_password.clone(),
+                steam: self.settings.test_through_steam(),
+            })
+        } else {
+            None
+        };
+        test_command::start(self, &line, path, &name, join);
+    }
+
     /// Starts the game for a test ([`Moonglow::launch_test`]). For a
     /// module whose project names an NWSync server, the game can't read
     /// that content on a module of its own: the haks the server hands out
@@ -7863,9 +7952,16 @@ impl Moonglow {
         name: &str,
         choose: bool,
     ) {
+        // (A command of Options › Test Module still running from the last
+        // test: stopped first, as the next test of its own would.)
+        test_command::stop_last(self);
         // (Through Steam where Moonglow reads the Workshop too: the test
         // and the views show the same content.)
         let steam = self.settings.test_through_steam();
+        // (A project that uses NWNX: served by a local server with it.)
+        if self.test_on_local_server(client, user, name, steam) {
+            return;
+        }
         match test_module::command(client, user, name, choose, steam).spawn() {
             Ok(game) => {
                 test_module::let_game_run(game);
@@ -7877,6 +7973,183 @@ impl Moonglow {
                 self.minimize_requested = self.settings.minimize_on_test;
             }
             Err(e) => self.log.error(format!("Test Module: {}: {e}", client.display())),
+        }
+    }
+
+    /// Test Module for a project whose `[nwnx]` uses NWNX, on Linux: the
+    /// module served by a private server with NWNX in a folder of
+    /// Moonglow's ([`test_module::LocalRun`]), and the game joining it at
+    /// the character list once the module is loaded. Whether it was taken
+    /// this way (or stopped by an error, said in the Log); `false`: the
+    /// game tests the module itself, as without NWNX.
+    fn test_on_local_server(
+        &mut self,
+        client: &std::path::Path,
+        user: &std::path::Path,
+        name: &str,
+        steam: bool,
+    ) -> bool {
+        use mg_module::nwnx;
+        let Some(ws) = self.ws.as_ref() else { return false };
+        let project = &ws.module.project_file;
+        if project.nwnx.use_nwnx != Some(true) {
+            return false;
+        }
+        let resolved = nwnx::resolve(
+            project,
+            &nwnx::Options { module: Some(&ws.module), live: true, ..Default::default() },
+        );
+        let root = ws.module.location.as_ref().and_then(|l| {
+            mg_module::project_file::ProjectFile::root_of(l).map(std::path::Path::to_path_buf)
+        });
+        for n in &resolved.notes {
+            let text = format!("Test Module: {}", text::capitalized(&n.text));
+            match n.level {
+                nwnx::Level::Error => self.log.error(text),
+                nwnx::Level::Warning if n.text == nwnx::LINUX_ONLY => {
+                    if !std::mem::replace(&mut self.nwnx_linux_said, true) {
+                        self.log.warn(text);
+                    }
+                }
+                nwnx::Level::Warning => self.log.warn(text),
+                nwnx::Level::Info => self.log.info(text),
+            }
+        }
+        if resolved.failed() {
+            self.log.error("Test Module: the game was not started (NWNX, see above)");
+            return true;
+        }
+        let Some(nwnx) = resolved.nwnx else { return false };
+        let Some(install) = self.install.clone() else { return false };
+        let Some(server) = mg_serve::server_binary(install.root.as_path()) else {
+            self.log.error(format!("Test Module: {}", mg_serve::no_server(install.root.as_path())));
+            return true;
+        };
+        let modules = install.user_folder("modules").unwrap_or_else(|| user.join("modules"));
+        let module = [modules.join(format!("{name}.mod")), modules.join(name)]
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| modules.join(format!("{name}.mod")));
+        let Some(dir) = test_module::local::server_dir(name) else {
+            self.log.error("Test Module: no cache folder for the local server");
+            return true;
+        };
+        let prepare = test_module::local::prepare_module(install, module, root, dir.clone());
+        let join = self.quick_start_join();
+        let mut plan = test_module::LocalPlan::new(server, dir, prepare, join);
+        plan.nwnx = Some(nwnx);
+        plan.cdkey = Some(user.join("cdkey.ini")).filter(|p| p.is_file());
+        let game = test_module::join_command(client, user, &plan.address(), &plan.password, steam);
+        self.log.info(format!(
+            "Test Module: {name} on a local server with NWNX ({}), the game joining it",
+            plan.address()
+        ));
+        let run = test_module::LocalRun::start(plan, game);
+        self.local_run = Some((run, "Preparing the local server".into()));
+        true
+    }
+
+    /// The open project's key in `Settings::test_characters`: its folder
+    /// (where its `moonglow.toml` is), else the module's own path.
+    fn test_project_key(&self) -> Option<std::path::PathBuf> {
+        let location = self.ws.as_ref()?.module.location.as_ref()?;
+        Some(
+            mg_module::project_file::ProjectFile::root_of(location)
+                .unwrap_or_else(|| location.path())
+                .to_path_buf(),
+        )
+    }
+
+    /// How the game joins Test Module's local server
+    /// ([`test_module::quick_start_join`]), said in the Log.
+    fn quick_start_join(&mut self) -> test_module::Join {
+        let key = self.test_project_key();
+        let chosen = key.and_then(|k| self.settings.test_characters.get(&k).cloned());
+        let (join, said) =
+            test_module::quick_start_join(self.settings.test_quick_start, chosen.as_deref());
+        match said {
+            Some((Level::Warning, text)) => self.log.warn(text),
+            Some((_, text)) => self.log.info(text),
+            None => {}
+        }
+        join
+    }
+
+    /// Whether Test Module's local server runs (its run not over).
+    pub fn local_run_under_way(&self) -> bool {
+        self.local_run.as_ref().is_some_and(|(run, _)| !run.ended())
+    }
+
+    /// Build › Stop Test Server: Test Module's local server told to stop
+    /// (and the game joined to it); the run says in the Log when it has.
+    /// (Only this safety stop: Test Module's own controls are elsewhere.)
+    pub fn stop_local_run(&mut self) {
+        let Some((run, status)) = self.local_run.as_mut().filter(|(r, _)| !r.ended()) else {
+            return;
+        };
+        run.stop();
+        *status = "Stopping the local server".into();
+        self.log.info("Test Module: stopping the local server");
+    }
+
+    /// As Moonglow closes: the local run stopped and waited for (at most
+    /// [`test_module::local::STOP_WAIT`]), what it said put in the Log.
+    fn stop_local_run_and_wait(&mut self) {
+        let Some((run, _)) = self.local_run.as_mut() else { return };
+        if !run.stop_and_wait(test_module::local::STOP_WAIT) {
+            self.log.warn("Test Module: the local run had not ended as Moonglow closed");
+        }
+        self.poll_local_run(&egui::Context::default());
+    }
+
+    /// What Test Module's local server said since the last frame, in the
+    /// Log, and what the status bar says of it.
+    fn poll_local_run(&mut self, ctx: &egui::Context) {
+        let Some((run, status)) = self.local_run.as_mut() else { return };
+        let mut lines = Vec::new();
+        for p in run.poll() {
+            use test_module::Progress;
+            match p {
+                Progress::Preparing => *status = "Preparing the local server".into(),
+                Progress::Starting { port } => {
+                    *status = format!("Starting the local server (port {port})");
+                }
+                Progress::Loaded { seconds } => {
+                    *status = "The module is loaded".into();
+                    lines.push((Level::Info, format!("module loaded in {seconds:.1} s")));
+                }
+                Progress::Joining => {
+                    *status = "The game is joining the local server".into();
+                    lines.push((Level::Info, "the game is joining".into()));
+                }
+                Progress::Log(line) => {
+                    let (level, text) = if let Some(t) = line.strip_prefix("error: ") {
+                        (Level::Error, t.to_string())
+                    } else if let Some(t) = line.strip_prefix("warning: ") {
+                        (Level::Warning, t.to_string())
+                    } else {
+                        (Level::Info, line)
+                    };
+                    lines.push((level, text));
+                }
+                Progress::Ended { how, failed } => {
+                    lines.push((if failed { Level::Error } else { Level::Info }, how));
+                }
+            }
+        }
+        let ended = run.ended();
+        if ended {
+            self.local_run = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        for (level, line) in lines {
+            let line = format!("Test Module: {line}");
+            match level {
+                Level::Info => self.log.info(line),
+                Level::Warning => self.log.warn(line),
+                Level::Error => self.log.error(line),
+            }
         }
     }
 
