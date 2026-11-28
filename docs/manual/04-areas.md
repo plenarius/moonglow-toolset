@@ -3,7 +3,7 @@ type: Manual Page
 title: Areas
 description: Areas - the viewer's header and its popovers, minimaps and camera, selecting, arranging and placing objects, Setup Store, duplicate tags, claimed and protected areas, painting placeables, painting terrain, tiles, Area Properties, area sounds and making tilesets.
 tags: [manual, areas, terrain, tiles]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T07:40:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-27T06:41:14Z }
 ---
 
 # Areas
@@ -30,7 +30,7 @@ The row over the view is the area's **header**: on the left what you do
 (which objects show, how they are placed; while Paint is the tool in
 hand, the brush's settings: [Painting placeables](#painting-placeables)),
 on the right how the view looks (day or night, and the **Lighting**,
-**Overlays** and **Audio** popovers), then **Area Properties** and **⋯**
+**Overlays** and **Audio** popovers), then **Area Properties** and **…**
 (More). The tools are on the [tool shelf](#the-tool-shelf-and-the-compass)
 at the view's left, the compass at its top right. It never wraps:
 where the editor is narrow it gives way, a step at a time, and every
@@ -49,7 +49,7 @@ control stays on the row, as an icon (its name in its tip) or in More:
   into the row where it has room, from the left, those that fit (the
   area some 1700 points wide holds all three):
   **Day** and **Night** side by side, **Lighting**, **Shadows**, **Fog**,
-  **Grid**, **Minimap**, **Walkmesh** and **Sound ranges** with their
+  **Player's light**, **Grid**, **Minimap**, **Walkmesh** and **Sound ranges** with their
   words, **Fade Geometry** a list, and Animations, Grass, Tile border,
   Shaders and the three Audio switches icon toggles.
 
@@ -204,6 +204,27 @@ then the shadows, the fog and how the scene is drawn.
   the fog starts nearer, as the game's does for a camera zoomed in.
   The tile grid fades into the fog with the ground, but never wholly:
   its far lines stay faintly there to count tiles by.
+- **Player's light**: in a dim area, the light the game's player carries,
+  given to the module's start location, so that the area looks about
+  the start as it does to a player who arrives there. In the game every
+  player carries a vision light, and in a dim area it is much of the
+  light there is (in a dark area nearly all of it). Moonglow gives the
+  one read from the game's test character, an elf with low-light vision:
+  a pale blue light (0.3, 0.3, 0.4) that lights every surface whatever
+  way it faces, out to 22 m, from 0.64 m ahead of the player and 2.65 m
+  up, turning with it. Another race's light (a dwarf's darkvision, a
+  human's) has not been read and may differ. It is on only while the
+  area's ambient and diffuse colors (Area Properties, the sun's by day
+  and the moon's at night, as the view shows them) add up to less than
+  128 of 255, as in the game, so a night view can have it where the day
+  doesn't; for colored light, which hasn't been read in the game,
+  Moonglow takes the mean of the three channels. It is drawn only in the
+  area that holds the start location, whether or not **Start** shows its
+  marker, and follows the start location as you move or turn it (and as
+  Adjust Location tries it out). It casts no shadows (in the game the
+  player's light casts the shadows of the creatures about the player).
+  With **Lighting** off there is none.
+  Off by default; in every area view, and it stays as you leave it.
 - **Fade Geometry**: draws the tiles without the parts that fade in the
   game to show a character behind them (roofs, upper walls, trees'
   crowns; the black caps and strips under and beside them stay, as in
@@ -364,7 +385,7 @@ Transform** turns it on, to show the walkmeshes before and after.
 
 - **Area Properties**: the area's properties ([Area
   Properties](#area-properties)).
-- **⋯** (More): **To Scratch** and **Save N as Prefab…** (several
+- **…** (More): **To Scratch** and **Save N as Prefab…** (several
   objects selected; see [Prefabs](#placing-objects)). More holds what
   the row has no room for, too, in the row's order.
 - A **warning** sign with a count, at the right group's end, when
@@ -384,7 +405,7 @@ brush chosen in the palette), and taking one puts the others down. A
 tool's button clicked again puts it down too (Select Objects is in hand
 again). The buttons are reached with Tab, and their tips name their
 keys. In a view too short for them, those that don't fit go into **More
-Tools** (`⋮`) at the shelf's foot.
+Tools** (three dots) at the shelf's foot.
 
 - **Select Objects**: select, move and place objects (no other tool in
   hand).
@@ -532,7 +553,9 @@ thin dark edge, so that it reads over grass, snow or a bright floor
 alike, and over the object too (the handles are drawn over everything,
 whatever stands in front). A white dot marks the object's place, the
 point the handles are about; the selected object's box is a thin amber
-line under them. The handle under the pointer is lit, brighter and
+line under them, drawn with the picture: over every model, but under
+what is drawn over the view (the handles, trigger and encounter
+outlines, a light's sun, the door arrows). The handle under the pointer is lit, brighter and
 thicker, the rest of that object's handles fade to half (with several
 selected, the others' stay as they are), and a small chip beside the
 pointer names what a drag on it does: **Turn**, **Move East or West**,
@@ -2262,7 +2285,7 @@ Terrains and Crossers, Painting Rules, Tiles, Groups), **Save** (the
 tileset's file), **Make Palette**, **Check** and **Render Minimap
 Pictures**, and **OK** (save and close) and **Cancel** (close as last
 saved, asking first about unsaved changes) at its end. Where the editor is
-narrow the buttons show their icons alone, then go into **⋯** (More), the
+narrow the buttons show their icons alone, then go into **…** (More), the
 switch and Save last. **Undo** and **Redo** are the Top Bar's: they take
 the tileset's steps while the pointer is over the editor or its panels, or
 it was worked in last (Ctrl+Z and Ctrl+Y the same); saving the module

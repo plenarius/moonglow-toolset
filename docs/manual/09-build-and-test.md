@@ -3,7 +3,7 @@ type: Manual Page
 title: Build, verify and test
 description: Build Module, publishing to NWSync and uploading it to the web server, a module's haks read from its NWSync server instead of hak files, long work, Verify Module and the fixes beside its findings, the Round-Trip Check, Test Module, reloading haks and 2DAs, and Area Statistics.
 tags: [manual, build, verify, test, nwsync]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T08:49:31Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-27T23:23:12Z }
 ---
 
 # Build, verify and test
@@ -152,6 +152,20 @@ that web server serves into a folder, as neverwinter.nim's
 - **Latest:** **Make it the latest (what nwserver serves unless told a
   hash)** points the repository's `latest` at
   it; nwserver serves `latest` unless given `-nwsynchash`.
+- **Origins:** **Write an origins file** (`mg nwsync --write-origins`,
+  as `nwn_nwsync_write --write-origins`) writes `manifests/HASH.origin`
+  beside the manifest: each hak (and the talk table's file, and the
+  module with the module itself) a resource came from, with the
+  resources it gave. The game reads none of it; Moonglow does, where
+  your team reads the module's haks from NWSync
+  ([below](#nwsync-content-instead-of-haks)): it then knows which of the
+  module's haks the manifest holds, and writes each of them with exactly
+  its resources for a test. Each is named by its file's name alone
+  (`Erf:pw_parts.hak`), where `nwn_nwsync_write` writes the whole path it
+  was given: the folders of your computer stay off the web server. Upload
+  sends it with the manifests. A manifest published again with it is the
+  same manifest (the same hash): Moonglow asks for its origins file at
+  the next Sync even where it kept the manifest before.
 - **Compression:** the data files are compressed with zstd at level 3,
   as `nwn_nwsync_write` compresses them (the reference library, built
   into Moonglow: nothing to install). `mg nwsync --level` takes another,
@@ -302,6 +316,23 @@ source = "https://nwsync.example.org"   # as nwserver's -nwsyncurl
 manifest = "latest"                     # or a manifest's SHA-1, to stay on it
 ```
 
+**A repository folder** on this computer or a shared drive (the folder
+Publish to NWSync or `mg nwsync` writes: `latest`, `manifests/`,
+`data/sha1/…`) can be the source too, with no web server: `source =
+"file:///srv/nwsync"` (on Windows with its drive: `"file:///D:/nwsync"`), a
+whole path (`"/srv/nwsync"`, `"D:\\nwsync"`), or a
+path from the project's folder starting `./` or `../` (`"../nwsync"`;
+for a module kept in one file, from the `.mod`'s folder). A name alone
+(`"nwsync"`) is taken for a server's name that lacks its `https://`, and
+said. Sync reads the folder in place, without a server, and copies the
+manifest and the data not here into Moonglow's cache, each checked
+against its SHA-1, just as it downloads them from a server: the module
+then opens from the cache whatever becomes of the folder (a drive taken
+away, the repository pruned or published again), and a clean-up of
+either never takes what the other holds. The cost is the space of the
+copy. Where the folder isn't there, the manifest here is used and the
+log says so.
+
 When the module opens, the server's manifest is put into the game data
 as one layer, where the game puts it: above the haks, below the
 `development` folder and other loose files. Each resource is read from
@@ -331,23 +362,101 @@ downloaded yet can't be read (the log says so): Sync first.
 **Haks:** the game loads no hak files for a server that has a manifest
 (the manifest holds the haks' content), so a hak of the module's list
 that isn't on disk isn't reported missing. Where the server publishes
-its origins file (`nwn_nwsync_write --write-origins` writes
-`manifests/<sha1>.origin`, which names each hak and its resources), only
+its origins file (`mg nwsync --write-origins` and `nwn_nwsync_write
+--write-origins` write `manifests/<sha1>.origin`, which names each hak
+and its resources), only
 the haks it names are taken from NWSync, and any other is still
 reported. Haks that are on disk are read too, under the manifest, as the
-game would read them.
+game would read them, except one newer than the manifest (below).
+
+**Your own files newer than the manifest win.** A hak of the module's
+list that is on disk (in your `hak` folder, the game's, or a Workshop
+item's, as the game finds it), and whose file is newer than the
+manifest (the time the game registered it, for one read from the
+game's storage; else the time Moonglow's cache kept it), is your work
+in progress: it is read over the manifest (the load order shows it
+above the NWSync layer), and every test takes it from disk instead of
+writing it from the manifest. The custom talk table likewise: your
+project's own (`src/tlk/*.tlk.json`) or the one in `tlk`, when newer,
+comes from disk, and its feminine table with it. Each such file is
+said (the log, **Newer on disk** in the NWSync Content window, `mg`'s
+warnings and its server's notes: "hak x on disk is newer than the
+NWSync manifest: used over it"). A file older than the
+manifest stays under it, as in the game, and nothing is said. To take a
+newer manifest's copy again, sync (the manifest is then newer) or move
+your file away. This is Moonglow's rule, not the game's: a player's
+game reads the manifest over every hak.
+
+**Turning it off for yourself.** A team's `moonglow.toml` that names
+the server turns it on for everyone. `source = ""` under `[nwsync]` in
+your own `.moonglow/user.toml` turns it off for you: the haks and the
+talk table are then read and tested from disk, as without a server.
+`mg serve`, `mg test` and `mg watch` take `--no-nwsync` for one run.
 
 The cache is `nwsync` in Moonglow's cache folder (`~/.cache/moonglow` on
 Linux, `%LOCALAPPDATA%\Moonglow\cache` on Windows,
 `~/Library/Caches/Moonglow` on macOS); `[nwsync] cache` in your own
 `.moonglow/user.toml` puts it elsewhere. It is laid out as the server's
-repository is.
+repository is (`data/`, `manifests/`, `latest/`), with Moonglow's own
+folders beside: `haks/` for the haks written for testing, `written/`
+saying which hak is which for each manifest, and `used/`, an empty file
+per manifest whose time is when it was last used (what Clean Up Cache
+counts the last used by).
 
 From the command line, `mg nwsync-status MODULE` says the same as the
 window (`--online` asks the server for its latest manifest first), and
 `mg nwsync-pull MODULE` downloads (`--sample N` downloads N data files
 alone, to try a server); both take `--source URL` for a server the
 project doesn't name.
+
+A plugin reads the same state with `mg.nwsync.status()` (since plugin
+API 0.11; [the plugin API](17-plugin-api.md#mgnwsync)): the source,
+the manifest in the game data, the haks it holds, your files newer than
+it, the data not downloaded yet (as the NWSync Content window last
+looked) and a Sync under way, never the sign-in.
+
+### A private server
+
+A server that hands out its content only to those signed in (a web
+server asking for a token or a password) is signed in to with a token,
+sent as `Authorization: Bearer`, or with a user and password (`Basic`).
+Put them in **your own `.moonglow/user.toml`**, never in the team's
+`moonglow.toml`:
+
+```toml
+[nwsync]
+host = "nwsync.example.org"   # the server the sign-in is sent to
+token = "…"                   # or: user = "…" and password = "…"
+```
+
+`host` names the one server the sign-in is sent to; it may be left out
+where the same file names the source (`source = "https://…"`), whose
+host it then is. It is never taken from the team's file: a checkout
+that named another server would otherwise get your token. The sign-in
+is sent to that host alone: never with a redirect to another server, or
+to another port or scheme of the same one, and never over plain
+`http://` except to this computer (`localhost`, `127.0.0.1`): a
+source on `http://` to another computer is refused with a sign-in, and
+said, where anyone on the way could read it. A token, user, password or
+host in the team's `moonglow.toml` (or a `.mod`'s file beside it, which
+has no `.moonglow/user.toml`) is not read, and the log and `mg` say so
+with the file and line: take it out and have it replaced on the server,
+as everyone with the checkout has it. A user and password written into
+the source's address (`https://user:password@…`) are refused too.
+`.moonglow/` stays out of version control by the `.gitignore` of `*`
+Moonglow makes in it (one made by hand needs one too: the log warns).
+
+The token is never shown: not in the log, a message, `mg`'s output or
+its JSON. Build › NWSync Content… says *Signed in with a token from
+.moonglow/user.toml*; `mg nwsync-status --online` and `mg nwsync-pull`
+say *signed in with a token from .moonglow/user.toml* (JSON:
+`"signed_in": "a token"`). Where the server refuses it, the message
+says the sign-in was refused, or that the server asked for one.
+
+There is no environment variable for it: a sign-in is bound to a host
+that the builder's own file names, and a variable would follow
+whatever source a checkout names. On a build machine, write
+`.moonglow/user.toml` from the machine's secret before `mg` runs.
 
 ### Testing with NWSync content
 
@@ -361,17 +470,26 @@ first, and given to the game:
   origins file, each hak it names gets exactly the resources it lists
   for it (the copy of each name that won from that hak when the server
   built the manifest). A hak of the module's list that the origins file
-  doesn't name comes from disk, as before. A hak the origins file names
+  doesn't name comes from disk, as before, and so does one on disk newer
+  than the manifest (above). A hak the origins file names
   that the module doesn't list is not written (the game loads the
   module's haks alone; `mg nwsync-haks --all` writes them). Where the
   server publishes no origins file, the manifest's resources (but for
-  talk tables) are spread over all the module's haks, each resource in
-  one, each hak kept under the 2 GiB the game can read (an entry can't
-  start 2 GiB or more into a hak); a manifest too big for that many haks
-  is an error that says so.
+  talk tables) are spread over the module's haks that are **not on
+  disk**, each resource in one, each hak kept under the 2 GiB the game
+  can read (an entry can't start 2 GiB or more into a hak); a manifest
+  too big for that many haks is an error that says so. A hak on disk is
+  your file, perhaps never published, and is never replaced by a guessed
+  slice of the manifest: it is taken from disk, and that is said. (So on
+  the server a hak on disk listed above one written from the manifest is
+  read over it, where the game data reads the manifest over every hak
+  older than it; have the server publish its origins file for an exact
+  copy.) Where every hak is on disk, nothing is written from the
+  manifest.
 - **The talk table** comes from the manifest where it has the module's
   (`world.tlk`), over the project's own and the one in `tlk`, as the
-  game data has it.
+  game data has it, unless the one on disk is newer (above). Its
+  feminine table (`worldf.tlk`) always comes from where it comes from.
 - **Written once.** A hak is kept in the cache by what it holds, written
   the same way every time (resources in the order of their names, no
   build date), so the next test writes nothing, and a newer manifest
@@ -383,16 +501,46 @@ first, and given to the game:
 - **Not downloaded yet**: data the haks need that neither the game's
   storage nor the cache has stops the test before anything is written,
   saying so: Sync first (or `mg nwsync-pull`).
-- **Where the game finds them.** `mg serve` and `mg test` link them into
-  their server's own folder (links, not copies, where the system has
-  them). Test Module starts the game with a user folder of Moonglow's
-  (`test-user` in its cache folder) that is your own linked thing by
-  thing (your characters, settings, modules and logs: what the game
-  writes there is written in your folder), but for its `hak` and `tlk`
-  folders, which hold the haks and talk table of this module. Nothing is
-  ever written into your own `hak` folder, nor into the game's NWSync
-  storage. (On Windows a folder is linked as a junction where Moonglow
-  can't make a symbolic link.)
+- **Where the game finds them.** `mg serve` and `mg test` put them into
+  their server's own folder (hard links to the cache's files, which stay
+  while the server runs whatever a cleanup of the cache does; links or
+  copies where the system has no hard links). With `mg serve --dir
+  YOUR_NWN_FOLDER --real-user-dir` a file of your own there (not a link
+  Moonglow made) is never replaced: one the manifest's would replace
+  stops the run, saying so. Nothing is ever written into your own `hak`
+  folder, nor into the game's NWSync storage. Their folder has your
+  `development` folder as a link, as `test-user` has it, so work in
+  progress there is the server's too.
+
+**What Test Module does with your user folder.** Test Module (and Test
+From Here) starts the game with a user folder of Moonglow's, `test-user`
+in its cache folder, made again from your own at every test:
+
+- **Everything at the top of your folder but `hak`, `tlk` and
+  `nwn.ini` is linked**: each folder (`localvault`, `saves`, `modules`,
+  `logs`...) and each file (`settings.tml`, `nwnplayer.ini`,
+  `cdkey.ini`...). So the characters, saves, logs and settings the game
+  writes land in your own folder, as in any Test Module (and as in
+  Aurora's). Folders are symbolic links (junctions on Windows where
+  Moonglow can't make a symbolic link); files are symbolic links on
+  Linux and macOS, and hard links on Windows, else symbolic links,
+  else copies (another drive, without the right to make links). A file's link or copy is made again at every test, so a copy
+  follows your file; but what the game saves into a copy is not kept.
+- **`hak` and `tlk` are folders of `test-user`'s own**, holding links
+  to this module's haks and talk table: those written from the manifest,
+  and those of your own folder the module lists besides. A hak or talk
+  table of yours newer than the manifest (the rule above) is linked from
+  your folder instead of written; a project's own talk table kept as
+  JSON is made into a `.tlk` in the cache first. A hak in the game's own
+  folder or a Workshop item the game finds itself.
+- **`nwn.ini` is a copy** without the `HAK` and `TLK` lines of its
+  `[Alias]` section (the game would look for haks where they lead),
+  made again at every test: options the game saves there are not kept.
+- **Folders and files the game creates that your folder didn't have**
+  stay in `test-user`, and are kept from test to test.
+
+Nothing in your own folder is changed by making `test-user`: only what
+the game itself writes through the links.
 
 `mg nwsync-haks MODULE` writes them without a test and says what it
 wrote and how long it took (`--out DIR` puts them in `DIR/hak` and
@@ -404,7 +552,15 @@ for copies; `--jobs N`, 4 at once).
 **Clean Up Cache…** in the window says what of Moonglow's cache no kept
 manifest needs (data files, written haks, older manifests and their
 files) and removes it when you say **Remove** (the Status Bar shows
-either while it runs). Kept: the module's
+either while it runs); **Keep Everything** leaves the cache as it is.
+**Cancel** stops either before the next file, and so does closing the
+module (the look at what is here as the window opens, and a Sync, stop
+the same way). A clean-up stopped leaves the cache whole: it takes away
+the manifests it doesn't keep before their haks and data, so every
+manifest still in the cache has all it had, and what was left goes with
+the next clean-up; the window and the log say what it removed by then.
+A look for what would go that was stopped offers nothing to remove.
+Kept: the module's
 manifest (and the one pinned), the newest each server named, and the
 three last used (`[nwsync] keep` in the project file changes the
 number). What changed in the last hour stays whatever it is (a download
@@ -676,6 +832,50 @@ lagging combat, AI that overflows its time, and modules damaged when the
 game crashes. The module is always saved before
 the game starts, and Test From Here plays a copy.
 
+### Test Module with NWNX
+
+A module whose project uses [NWNX](11-command-line.md#nwnx)
+(`[nwnx] use = true` and your `home`, on Linux) can't be tested by the
+game alone: `+TestNewModule` starts the game's own server, which NWNX
+never loads into, so most of such a module's scripts would do nothing.
+Test Module serves it instead on a private `nwserver` with NWNX, in a
+folder of Moonglow's cache (`test-server`, never your NWN folder), with
+the module, its haks and talk table, and your `development` folder
+linked, as `mg serve` has it without `--no-development`.
+This is what **The game, on the module** in Options › Test Module does
+for such a project; with **A command of my own** your command runs
+instead ([below](#a-command-of-your-own)), and Moonglow starts no server
+of its own. Once the server says the module is
+loaded, the game starts on your user folder and joins it
+(`+connect 127.0.0.1:PORT +password …`), to the game's character list
+with your own characters on it. The Log follows the server (its
+preparing, starting, the module loaded, the game joining, what NWNX
+says and the module's log lines), and the status bar says how far it
+is. The checks before the start are `mg serve`'s: an error is said in
+the Log and nothing is started.
+
+**Quick start.** With **Join with a chosen character** ticked in
+[Options › Test Module](10-options.md#test-module), the game joins with
+the project's chosen character instead: one of your local vault's, or a
+`.bic` file of your own, kept for that project (the one chosen last). It
+is put alone in the server's vault (`-servervault 1`, a copy: your file
+is only read), so the character list shows it alone. One confirm
+remains: you still choose it once on that list, for the game has no way
+past it. Without a character chosen, or with its file gone, the game
+shows your own characters, and the Log says why.
+
+When the game ends, the server is told to `exit`. Only the server and
+the game this test started are ever stopped. While they run, the status
+bar shows the test as a job, and another test is refused: close the
+game, or choose **Build › Stop Test Server** (offered while the local
+server runs), which stops the server and the game, then test again.
+(A server your own command started is not Moonglow's to stop there: the
+next test or closing Moonglow stops it.)
+Closing Moonglow stops them too, and on Linux they end with Moonglow
+however it ends. On Windows and macOS such a module is tested by the game
+alone, as any other, and the Log says once that NWNX runs only on Linux
+servers.
+
 A test looks for a game already running first (Test Module before it
 saves), for it would write the module under one that has it open (the
 game then says the module is damaged). While the game Moonglow started for the last test runs, a
@@ -686,6 +886,48 @@ starts it); another game running is named in the log as a warning, and
 the test goes on: close it first if it has the module open. On Windows
 Moonglow can't see what a game was started on, so every game running
 is a warning. A game is never closed for you.
+
+### A command of your own
+
+A persistent world is often tested on its own server: one with NWNX, a
+database, settings in its environment, or one that runs in WSL on
+Windows. **Options › Test Module** can have Test Module (and Test From
+Here) run your own command in place of the game: choose **A command of
+my own** and type it, as you would in a terminal. Moonglow saves the
+module as Test Module always does, then runs the command with the
+system's shell (`sh -c` on Linux and macOS, `cmd` on Windows) in the
+module's folder. `{module_path}` in it is the module's file (or folder;
+a nasher project's packed module, Test From Here's
+`moonglow-test.mod`) and `{module_name}` its name, filled in as they
+are: put quotes around them where they may have spaces. The module's
+path is also in the `MOONGLOW_MODULE` environment variable.
+
+```text
+wsl.exe -d Ubuntu -- bash -lc "~/start-nwnx-server.sh '{module_path}'"
+bash -lc "~/nwn/server start '{module_name}'"
+```
+
+The window goes on while the command runs: what it prints comes into the
+log as it comes (what it writes to its error output as warnings), and
+the log says how it ended. It runs until it ends, until the next test
+of either kind, your command again or the game's (which stops it first,
+and what it started, so that its server lets go of the port), or until
+Moonglow closes, which stops it too.
+
+With **Then start the game, joining the server**, Moonglow then waits
+for a server to answer at **Server address** (`127.0.0.1:5121`, the
+game's own port on this machine, unless you type another), asking it as
+the game's server list does, for up to two minutes, and starts the game
+connected to it (`+connect`, and `+password` with the **Player
+password** you give), as it joins Test Module's own
+[local server](#test-module-with-nwnx). The game shows the server's character list. If no
+server answers in time, the log says so and no game is started. A server
+in WSL answers at `127.0.0.1` only where WSL passes UDP through to
+Windows (its mirrored networking mode); otherwise give the address WSL's
+own network has. (Moonglow can't read that server's log, so it asks the
+server, as the game does; a server Moonglow starts itself, the local
+server or `mg serve`, is ready only once its log says the module is
+loaded, as a game joining before then can quit.)
 
 `mg serve` runs a module in the game's headless server from a terminal,
 and `mg test` runs a module's test scripts there and reports what they

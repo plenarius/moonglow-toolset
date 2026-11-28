@@ -609,7 +609,7 @@ impl HakDoc {
 
 /// The Description's field's id, by its hak (typed text keeps to its hak).
 pub(crate) fn description_id(id: u32) -> egui::Id {
-    egui::Id::new(("hak-description", id))
+    egui::Id::unique(("hak-description", id))
 }
 
 /// Each open hak followed as a frame begins: what was made of a hak that
@@ -865,13 +865,12 @@ fn after_save(app: &mut Moonglow, i: usize) {
 }
 
 /// Saves a hak (asking where for a new one, or with `ask`), here and
-/// now: whether it was. For what goes on with the answer at once: the
-/// module's Save, which is followed in the same step by what reads the
-/// files written (the game started for a test, a project's pack, the
-/// plugins told of the save, Exit), and a NUI window's pictures, which
-/// says what was written. The hak editor's own Save, its tab's OK and
-/// its question on closing are jobs ([`save_then`]). A hak the module
-/// uses is read again.
+/// now: whether it was. A side editor's save in its own right
+/// ([`crate::side_doc::SideDoc::save`]); every save of a hak the window
+/// makes is a job: the hak editor's own Save, its tab's OK and its
+/// question on closing ([`save_then`]), the module's Save and a NUI
+/// window's pictures ([`save_and`], each going on once the hak is
+/// written). A hak the module uses is read again.
 pub(crate) fn save(app: &mut Moonglow, id: u32, ask: bool) -> bool {
     set_typed(app, id);
     let Some(i) = app.haks.iter().position(|d| d.id == id) else { return false };
@@ -892,7 +891,7 @@ pub(crate) fn save(app: &mut Moonglow, id: u32, ask: bool) -> bool {
 /// How far a job that writes `total` bytes is, `done` of them written:
 /// the bar by megabytes (none for less than one), and the sizes said.
 /// Whether to go on (not canceled).
-fn written(progress: &crate::jobs::Progress, done: u64, total: u64) -> bool {
+pub(crate) fn written(progress: &crate::jobs::Progress, done: u64, total: u64) -> bool {
     progress.step((done >> 20) as usize, (total >> 20) as usize);
     progress.say(format!("{} of {}", size(done), size(total)));
     !progress.cancelled()
@@ -911,6 +910,11 @@ pub(crate) enum Then {
     Close,
 }
 
+/// What runs once a hak's save as a job is over ([`save_and`]): given
+/// whether the hak was saved (not where it failed, was canceled or could
+/// not start).
+pub(crate) type AfterSave = Box<dyn FnOnce(&mut Moonglow, bool)>;
+
 /// The hak editor's Save and Save As…, as a job: the hak is written on a
 /// thread of its own, with how far it is and Cancel (which leaves the
 /// file as it was), and taken as saved when it is written: also where
@@ -927,48 +931,118 @@ fn save_as_job(app: &mut Moonglow, id: u32, ask: bool) {
 /// place not chosen, the disk full, the job canceled) stays as it was,
 /// open and unsaved.
 pub(crate) fn save_then(app: &mut Moonglow, id: u32, ask: bool, then: Then) {
+    save_job(app, id, ask, then, Box::new(|_, _| {}));
+}
+
+/// Saves a hak where it lives as a job ([`save_as_job`]), and calls
+/// `after` once the job is over, with whether it was saved: what the
+/// module's Save is followed by (the game started for a test, a
+/// project's pack, the plugins told of the save, Exit) and a NUI
+/// window's pictures' report, which read the file written. Written inside
+/// the frame, a hak of gigabytes stood the window still for the whole
+/// copy. `after` runs whatever becomes of it: also where it could not be
+/// started (another job running, the hak closed), or its thread stopped
+/// unexpectedly.
+pub(crate) fn save_and(app: &mut Moonglow, id: u32, after: AfterSave) {
+    save_job(app, id, false, Then::Stay, after);
+}
+
+fn save_job(app: &mut Moonglow, id: u32, ask: bool, then: Then, after: AfterSave) {
     set_typed(app, id);
-    let Some(i) = app.haks.iter().position(|d| d.id == id) else { return };
+    let Some(i) = app.haks.iter().position(|d| d.id == id) else { return after(app, false) };
     app.clear_failed(&Tab::Hak(id));
+    // (One job at a time: started under another, it was not started, and
+    // what was to follow it was dropped without a word. Under a hak's own
+    // save, a second is refused, said why; under another job, the hak is
+    // written here and now, as it was before it was a job.)
+    if let Some(job) = &app.job {
+        if job.title == SAVE_JOB {
+            let why =
+                format!("{SAVE_JOB} is still running: wait for it to finish, or cancel it, first");
+            app.log.error(format!("Could not save the hak: {why}"));
+            app.note_failed(&Tab::Hak(id), why);
+            failed(app, id, then);
+            return after(app, false);
+        }
+        let saved = save(app, id, ask);
+        if !saved {
+            failed(app, id, then);
+        }
+        return after(app, saved);
+    }
     // (Not where the Save dialog was canceled: that is no failure.)
-    let Ok(to) = save_to(app, i, ask) else { return failed(app, id, then) };
+    let Ok(to) = save_to(app, i, ask) else {
+        failed(app, id, then);
+        return after(app, false);
+    };
     let saving = match app.haks[i].hak.saving(to.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             app.log.error(format!("Could not save the hak: {e}"));
             app.note_failed(&Tab::Hak(id), e);
-            return failed(app, id, then);
+            failed(app, id, then);
+            return after(app, false);
         }
     };
     let total = saving.size();
+    // (Taken by the job's end; left here where it never began.)
+    let after = std::rc::Rc::new(std::cell::RefCell::new(Some(after)));
+    let at_end = after.clone();
     app.start_job_apart(
         SAVE_JOB,
-        move |cx| saving.write(&mut |done| written(&cx.progress, done, total)),
+        move |cx| {
+            // (A panic is a failure said, and what follows is told so: it
+            // skipped the job's end, and what was to follow with it.)
+            let write = || saving.write(&mut |done| written(&cx.progress, done, total));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(write)).unwrap_or_else(|p| {
+                Err(format!("it stopped unexpectedly: {}", crate::jobs::panic_text(&p)))
+            })
+        },
         move |app, saved| {
-            let Some(i) = app.haks.iter().position(|d| d.id == id) else { return };
-            match saved.and_then(|s| s.map(|s| app.haks[i].hak.saved(s)).transpose()) {
-                Ok(Some(())) => {
-                    after_save(app, i);
-                    // (Changed again while it was written: it stays, with
-                    // what is unsaved.)
-                    let saved = app.haks.get(i).is_some_and(|d| d.id == id && !d.hak.is_dirty());
-                    if then == Then::Close && saved {
-                        let tab = crate::Tab::Hak(id);
-                        app.side_closing.retain(|t| *t != tab);
-                        app.forget_side(&tab);
-                        app.actions.push(crate::Action::CloseTab(tab));
+            let ok = match app.haks.iter().position(|d| d.id == id) {
+                // (Let go of meanwhile: written, or not.)
+                None => matches!(saved, Ok(Some(_))),
+                Some(i) => {
+                    match saved.and_then(|s| s.map(|s| app.haks[i].hak.saved(s)).transpose()) {
+                        Ok(Some(())) => {
+                            after_save(app, i);
+                            // (Changed again while it was written: it stays, with
+                            // what is unsaved.)
+                            let saved =
+                                app.haks.get(i).is_some_and(|d| d.id == id && !d.hak.is_dirty());
+                            if then == Then::Close && saved {
+                                let tab = crate::Tab::Hak(id);
+                                app.side_closing.retain(|t| *t != tab);
+                                app.forget_side(&tab);
+                                app.actions.push(crate::Action::CloseTab(tab));
+                            }
+                            true
+                        }
+                        // (Stopped: the file is as it was.)
+                        Ok(None) => {
+                            app.log.info("Save Hak: canceled");
+                            false
+                        }
+                        Err(e) => {
+                            app.log.error(format!("Could not save the hak: {e}"));
+                            app.note_failed(&Tab::Hak(id), e);
+                            failed(app, id, then);
+                            false
+                        }
                     }
                 }
-                // (Stopped: the file is as it was.)
-                Ok(None) => app.log.info("Save Hak: canceled"),
-                Err(e) => {
-                    app.log.error(format!("Could not save the hak: {e}"));
-                    app.note_failed(&Tab::Hak(id), e);
-                    failed(app, id, then);
-                }
+            };
+            let after = at_end.borrow_mut().take();
+            if let Some(after) = after {
+                after(app, ok);
             }
         },
     );
+    // (Its thread could not be started: said in the log.)
+    let left = if app.job.is_none() { after.borrow_mut().take() } else { None };
+    if let Some(after) = left {
+        after(app, false);
+    }
 }
 
 /// A hak's save that was to close its tab failed, with a reason
@@ -1143,7 +1217,7 @@ fn header(ui: &mut Ui, d: &mut HakDoc, in_game: bool) -> HeaderAsked {
     let find = |ui: &mut Ui| {
         let mut text = filter.borrow_mut();
         let left =
-            crate::widgets::SearchField::new(egui::Id::new(("hak-filter-field", id)), &mut text)
+            crate::widgets::SearchField::new(egui::Id::unique(("hak-filter-field", id)), &mut text)
                 .name(FIND)
                 .hint("name or .type")
                 .width(FIND_WIDTH)
@@ -1201,7 +1275,7 @@ fn header(ui: &mut Ui, d: &mut HakDoc, in_game: bool) -> HeaderAsked {
             Item::custom(FIND, FIND_WIDTH, find)
                 .more(FIND_WIDTH, |ui| {
                     let mut text = filter.borrow_mut();
-                    let field = egui::Id::new(("hak-filter-field", id));
+                    let field = egui::Id::unique(("hak-filter-field", id));
                     let left = crate::widgets::SearchField::new(field, &mut text)
                         .name(FIND)
                         .hint("name or .type")
@@ -1314,7 +1388,7 @@ fn notice(ui: &mut Ui, lines: &[String]) {
     }
     let said = lines.join(" ");
     r.on_hover_text(&said)
-        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &said));
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &said));
 }
 
 /// What a row of the table asked for (its menu, a double click), done after
@@ -1363,7 +1437,7 @@ struct CutStartCache {
 /// the board's Source, "…/test-output/screens-hak/mg_chair.mdl".
 fn cut_start(ui: &Ui, text: &str, font: &egui::FontId, width: f32) -> String {
     let (pixels, width_key) = (ui.ctx().pixels_per_point().to_bits(), width.to_bits());
-    let id = egui::Id::new("hak-cut-start-cache");
+    let id = egui::Id::unique("hak-cut-start-cache");
     let same = |c: &CutStartCache| {
         c.font.as_ref() == Some(font) && c.pixels == pixels && c.width == width_key
     };
@@ -1414,13 +1488,13 @@ fn cut_start(ui: &Ui, text: &str, font: &egui::FontId, width: f32) -> String {
 
 /// The hak whose table was given the keys last.
 fn keys_of(ctx: &egui::Context) -> Option<u32> {
-    ctx.data(|d| d.get_temp(egui::Id::new("hak-keys-of")))
+    ctx.data(|d| d.get_temp(egui::Id::unique("hak-keys-of")))
 }
 
 /// The keys given to hak `id`'s table (a click on a row, F6).
 pub(crate) fn take_keys(ctx: &egui::Context, id: u32) {
     crate::palette_view::give_keys(ctx, crate::palette_view::Keys::Hak);
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("hak-keys-of"), id));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("hak-keys-of"), id));
 }
 
 /// Whether hak `id`'s table has the keys: they are a hak table's, its, its
@@ -1499,13 +1573,13 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
         let cell = egui::Rect::from_x_y_ranges(x, head.y_range());
         look::header_cell(ui, cell);
         let on = d.sort == sort;
-        let r = ui.interact(cell, ui.id().with(("hak-head", d.id, i)), egui::Sense::click());
+        let r = ui.interact(cell, ui.scope_id().with(("hak-head", d.id, i)), egui::Sense::click());
         let said = match (on, d.descending) {
             (true, false) => format!("{words}, sorted up"),
             (true, true) => format!("{words}, sorted down"),
             (false, _) => words.to_string(),
         };
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &said));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &said));
         let r = r.on_hover_text(match on {
             true => format!("Sort by {} the other way", words.to_lowercase()),
             false => format!("Sort by {}", words.to_lowercase()),
@@ -1563,7 +1637,7 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
         let items = d.hak.items();
         if let Some(at) = d.anchor.and_then(|a| rows.iter().position(|&r| items[r].key == a)) {
             let seen: Option<(usize, usize)> =
-                ui.data(|m| m.get_temp(egui::Id::new(("hak-rows-seen", d.id))));
+                ui.data(|m| m.get_temp(egui::Id::unique(("hak-rows-seen", d.id))));
             if seen.is_none_or(|(from, end)| at <= from || at + 2 >= end) {
                 let height = ui.available_height();
                 scroll = scroll.vertical_scroll_offset((at as f32 * pitch - height / 2.0).max(0.0));
@@ -1576,7 +1650,7 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
     let mut rename_focus = std::mem::take(&mut d.rename_focus);
     let shown = mg_uikit::show_rows(scroll, ui, rows.len(), |ui, range| {
         ui.data_mut(|m| {
-            m.insert_temp(egui::Id::new(("hak-rows-seen", id)), (range.start, range.end))
+            m.insert_temp(egui::Id::unique(("hak-rows-seen", id)), (range.start, range.end))
         });
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut clicked = None;
@@ -1591,12 +1665,8 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
             let words = kind_words(key.restype);
             let size_str = size(item.size);
             resp.widget_info(|| {
-                let mut info = egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
-                    true,
-                    selected,
-                    &name,
-                );
+                let mut info =
+                    egui::WidgetInfo::selected(egui::Role::Button, true, selected, &name);
                 info.current_text_value = Some(format!("{words}, {size_str}"));
                 info
             });
@@ -1657,6 +1727,7 @@ fn table(app: &mut Moonglow, ui: &mut Ui, d: &mut HakDoc) -> RowAsked {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
                     let edit =
                         child.add(mg_uikit::text_field(typed).desired_width(cell.width() - 40.0));
+                    let edit = edit.accessible_name(format!("New name of {key}"));
                     if std::mem::take(&mut rename_focus) {
                         edit.request_focus();
                     }
@@ -2053,7 +2124,7 @@ mod tests {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 if fresh {
                     ui.data_mut(|d| {
-                        d.remove::<CutStartCache>(egui::Id::new("hak-cut-start-cache"))
+                        d.remove::<CutStartCache>(egui::Id::unique("hak-cut-start-cache"))
                     });
                 }
                 out = cut_start(ui, text, font, 200.0);

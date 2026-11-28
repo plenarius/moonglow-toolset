@@ -4,11 +4,24 @@
 //!
 //! Kept: the manifests named ([`Keep::manifests`]: the module's own, the
 //! one pinned), the newest each server named ([`Cache::latest`]), and the
-//! last used ([`Keep::recent`]). What was changed within
+//! last used ([`Keep::recent`]; `manifests/`, `written/` and the marks
+//! [`Cache::touch`] leaves in `used/`). What was changed within
 //! [`Keep::min_age`] stays whatever it is, for a download or a write may
-//! be under way. Where a kept manifest's resources can't be read (the
+//! be under way. Where a named manifest's resources can't be read (the
 //! cache hasn't its file, the game's storage hasn't it either, or wasn't
-//! looked in), no data file goes: which it needs is not known.
+//! looked in), no data file goes: which it needs is not known. One of the
+//! newest or last used that can't be read is passed over with a note
+//! ([`Pruned::notes`]): a server's `latest/` naming a manifest never
+//! downloaded would otherwise stop every prune after it. (A manifest used
+//! from the game's storage alone is read only where the prune is given
+//! that storage.)
+//!
+//! What no kept manifest needs goes in an order that leaves the cache
+//! whole wherever it is stopped ([`prune_until`]: the window's Cancel,
+//! the module closed): first the manifests not kept, with their side
+//! files, indexes and marks; then the written haks; then the data files.
+//! A manifest still here has all it had, and what a stopped prune left
+//! behind (data and haks no manifest names now) goes with the next.
 //!
 //! This is the builder's cache, not a server's repository: publishing's
 //! `mg nwsync-prune` prunes that.
@@ -59,7 +72,14 @@ pub struct Pruned {
     pub other_bytes: u64,
     /// Why no data file was removed, where that is so.
     pub data_left: Option<String>,
+    /// Kept manifests passed over (one in `latest/` or among the last
+    /// used that can't be read here), each said once.
+    pub notes: Vec<String>,
     pub dry_run: bool,
+    /// Whether it was stopped before its end ([`prune_until`]): what it
+    /// says is what it removed by then (a dry run's, what it had looked
+    /// at, not what a whole prune would remove).
+    pub stopped: bool,
 }
 
 impl Pruned {
@@ -106,12 +126,29 @@ pub fn prune(
     keep: &Keep,
     dry_run: bool,
 ) -> Result<Pruned, String> {
+    prune_until(cache, game, keep, dry_run, &|| false)
+}
+
+/// [`prune`], stopping before the next file once `stop` says so: then
+/// [`Pruned::stopped`], and the cache is as the module's notes say,
+/// whole.
+pub fn prune_until(
+    cache: &Cache,
+    game: Option<&GameStorage>,
+    keep: &Keep,
+    dry_run: bool,
+    stop: &dyn Fn() -> bool,
+) -> Result<Pruned, String> {
     let root = cache.root();
     let now = SystemTime::now();
     let old = |at: SystemTime| now.duration_since(at).unwrap_or_default() >= keep.min_age;
     // The manifests here, the last used first.
     let mut here: Vec<(Sha1, SystemTime)> = Vec::new();
-    for path in files(&root.join("manifests")).into_iter().chain(files(&root.join("written"))) {
+    let marked = || {
+        let [m, w, u] = ["manifests", "written", "used"].map(|d| files(&root.join(d)));
+        m.into_iter().chain(w).chain(u)
+    };
+    for path in marked() {
         let (Some(sha), Some((at, _))) = (named(&path), stat(&path)) else { continue };
         match here.iter_mut().find(|(s, _)| *s == sha) {
             Some((_, t)) => *t = (*t).max(at),
@@ -132,8 +169,14 @@ pub fn prune(
     // What the kept manifests need.
     let mut data: HashSet<Sha1> = HashSet::new();
     let mut data_left = None;
+    let mut notes = Vec::new();
     let mut written: HashSet<Sha1> = HashSet::new();
     for sha in &kept {
+        if stop() {
+            let stopped =
+                Pruned { kept: kept.clone(), dry_run, stopped: true, ..Default::default() };
+            return Ok(stopped);
+        }
         let index = cache.written(sha);
         written.extend(index.haks.iter().chain(&index.files).map(|(_, s)| *s));
         let bytes = cache.manifest(sha, "").filter(|b| mg_core::sha1::sha1(b) == *sha);
@@ -146,17 +189,22 @@ pub fn prune(
         };
         match entries {
             Some(e) => data.extend(e.iter().map(|(_, s, _)| *s)),
-            None => {
+            None if keep.manifests.contains(sha) => {
                 data_left = Some(format!(
                     "manifest {} is kept and its resources can't be read here (neither the cache \
                      nor the game's NWSync storage has it), so no data file is removed",
                     &sha1_hex(sha)[..8]
                 ));
             }
+            None => notes.push(format!(
+                "manifest {} (a server's latest, or used lately) can't be read here (neither the \
+                 cache nor the game's NWSync storage has it): passed over",
+                &sha1_hex(sha)[..8]
+            )),
         }
     }
 
-    let mut out = Pruned { kept, data_left, dry_run, ..Default::default() };
+    let mut out = Pruned { kept, data_left, notes, dry_run, ..Default::default() };
     let remove = |path: &Path| -> Result<(), String> {
         if dry_run {
             return Ok(());
@@ -168,11 +216,55 @@ pub fn prune(
         }
     };
 
+    let mut removed = HashSet::new();
+
+    // Manifests not kept, their side files, indexes and marks.
+    for path in marked() {
+        if stop() {
+            return Ok(stopped(out, &here, &removed));
+        }
+        let Some((at, len)) = stat(&path) else { continue };
+        if !old(at) {
+            continue;
+        }
+        let gone = is_part(&path) || named(&path).is_some_and(|s| !kept_set.contains(&s));
+        if gone {
+            remove(&path)?;
+            out.other += 1;
+            out.other_bytes += len;
+            removed.extend(named(&path));
+        }
+    }
+    // Written haks and talk tables.
+    for path in files(&root.join("haks")) {
+        if stop() {
+            return Ok(stopped(out, &here, &removed));
+        }
+        let Some((at, len)) = stat(&path) else { continue };
+        if !old(at) {
+            continue;
+        }
+        if is_part(&path) {
+            remove(&path)?;
+            out.other += 1;
+            out.other_bytes += len;
+            continue;
+        }
+        if named(&path).is_some_and(|s| !written.contains(&s)) {
+            remove(&path)?;
+            out.haks += 1;
+            out.hak_bytes += len;
+        }
+    }
+
     // Data files.
     let data_root = root.join("data/sha1");
     for a in std::fs::read_dir(&data_root).into_iter().flatten().flatten() {
         for b in std::fs::read_dir(a.path()).into_iter().flatten().flatten() {
             for path in files(&b.path()) {
+                if stop() {
+                    return Ok(stopped(out, &here, &removed));
+                }
                 let Some((at, len)) = stat(&path) else { continue };
                 if !old(at) {
                     continue;
@@ -200,40 +292,18 @@ pub fn prune(
         }
     }
 
-    // Written haks and talk tables.
-    for path in files(&root.join("haks")) {
-        let Some((at, len)) = stat(&path) else { continue };
-        if !old(at) {
-            continue;
-        }
-        if is_part(&path) {
-            remove(&path)?;
-            out.other += 1;
-            out.other_bytes += len;
-            continue;
-        }
-        if named(&path).is_some_and(|s| !written.contains(&s)) {
-            remove(&path)?;
-            out.haks += 1;
-            out.hak_bytes += len;
-        }
-    }
-
-    // Manifests not kept, their side files and indexes.
-    let mut removed = HashSet::new();
-    for path in files(&root.join("manifests")).into_iter().chain(files(&root.join("written"))) {
-        let Some((at, len)) = stat(&path) else { continue };
-        if !old(at) {
-            continue;
-        }
-        let gone = is_part(&path) || named(&path).is_some_and(|s| !kept_set.contains(&s));
-        if gone {
-            remove(&path)?;
-            out.other += 1;
-            out.other_bytes += len;
-            removed.extend(named(&path));
-        }
-    }
-    out.removed = here.iter().map(|(s, _)| *s).filter(|s| removed.contains(s)).collect();
+    out.removed = removed_of(&here, &removed);
     Ok(out)
+}
+
+/// The manifests removed, the last used first.
+fn removed_of(here: &[(Sha1, SystemTime)], removed: &HashSet<Sha1>) -> Vec<Sha1> {
+    here.iter().map(|(s, _)| *s).filter(|s| removed.contains(s)).collect()
+}
+
+/// What a prune stopped before its end did.
+fn stopped(mut out: Pruned, here: &[(Sha1, SystemTime)], removed: &HashSet<Sha1>) -> Pruned {
+    out.removed = removed_of(here, removed);
+    out.stopped = true;
+    out
 }

@@ -254,7 +254,7 @@ fn nui_and_nwsync_commands_answer_in_json() {
     assert_eq!(pruned["problems"], serde_json::json!([]));
     // Read back from a server of this computer's, into a cache of the
     // test's: its progress kept off the JSON.
-    let (url, _, _) = crate::nwsync_read::serve(std::path::PathBuf::from(at("repo")));
+    let (url, _, _) = crate::nwsync_read::serve(g.dir.join("repo"));
     let pulled = ok(&["nwsync-pull", "--source", &url, "--cache", &at("nwsync-cache")]);
     assert_eq!(
         (pulled["manifest"].clone(), pulled["left"].as_u64()),

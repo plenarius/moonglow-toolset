@@ -122,7 +122,7 @@ fn offline() -> Arc<dyn Fetch> {
 }
 
 fn settings(manifest: Wanted) -> Settings {
-    Settings { url: URL.into(), manifest, cache: None }
+    Settings { url: URL.into(), manifest, cache: None, auth: None }
 }
 
 /// A game storage that has registered `content`'s manifest (from `url`,
@@ -324,7 +324,8 @@ fn a_pull_downloads_what_is_missing_alone() {
 
 /// A data file that isn't what its name says, or that the server doesn't
 /// have, is given up and said, the rest kept; a sample (`most`) asks for
-/// that many; Cancel stops before the next.
+/// that many; Cancel stops before the next (or before the look at what is
+/// here is done).
 #[test]
 fn bad_and_missing_data_is_given_up_and_said() {
     let dir = mg_testkit::scratch_dir("nwsync-bad-data");
@@ -381,8 +382,9 @@ fn bad_and_missing_data_is_given_up_and_said() {
         &|_| {},
         &|| true,
     )
-    .unwrap();
-    assert!(stopped.downloaded.stopped);
+    .unwrap_err();
+    // (Stopped as it looked at what is here: nothing downloaded.)
+    assert_eq!(stopped, mg_nwsync::CANCELED);
     assert_eq!(server.data_asked(), 2);
 }
 
@@ -430,6 +432,32 @@ fn offline_the_newest_manifest_here_is_used() {
     assert!(e.contains("not connected"), "{e}");
 }
 
+/// When a manifest came here ([`mg_nwsync::Found::at`]): the game's
+/// `created_at` for one read from its storage, the time Moonglow's cache
+/// kept it for one read from there; a use ([`Cache::touch`]) leaves that
+/// time as it was (it is what a hak on disk is compared with).
+#[test]
+fn a_manifest_s_time_is_when_it_came_here() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let dir = mg_testkit::scratch_dir("nwsync-manifest-time");
+    let content = Content::new();
+    let (sha, bytes) = content.manifest();
+    let g = game_storage(&dir.join("game"), &content, URL, 1_700_000_000, &[], true);
+    let f = find(URL, Wanted::Pinned(sha), None, Some(&g)).unwrap();
+    assert_eq!(f.from, ManifestFrom::GameStorage);
+    assert_eq!(f.at, Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)));
+    let cache = Cache::new(dir.join("cache"));
+    cache.put_manifest(&sha, "", &bytes).unwrap();
+    let kept = SystemTime::now() - Duration::from_secs(3600);
+    let file = dir.join("cache/manifests").join(sha1_hex(&sha));
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(kept).unwrap();
+    cache.touch(&sha);
+    assert_eq!(cache.manifest_time(&sha), Some(kept));
+    let f = find(URL, Wanted::Pinned(sha), Some(&cache), Some(&g)).unwrap();
+    assert_eq!((f.from, f.at), (ManifestFrom::Cache, Some(kept)));
+    assert!(cache.used_path(&sha).is_file());
+}
+
 /// The server's origins file is kept with its manifest and read back,
 /// and asked for where the game's storage had the manifest.
 #[test]
@@ -453,6 +481,19 @@ fn origins_come_with_the_manifest() {
     let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, Some(&g)).unwrap();
     assert_eq!(r.found.from, ManifestFrom::GameStorage);
     assert!(r.found.origins.is_some_and(|o| o.hak("pw_parts").is_some()));
+
+    // A manifest kept before the server published its origins (published
+    // again with `--write-origins`, the same manifest): asked for again,
+    // and kept with it.
+    let cache = Cache::new(dir.join("cache3"));
+    let mut server = Server::of(&content);
+    let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert!(r.found.origins.is_none());
+    server.files.insert(format!("manifests/{}.origin", sha1_hex(&sha)), text.as_bytes().to_vec());
+    let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert_eq!(r.found.from, ManifestFrom::Cache);
+    assert!(r.found.origins.is_some_and(|o| o.hak("pw_parts").is_some()));
+    assert!(find(URL, Wanted::Latest, Some(&cache), None).unwrap().origins.is_some());
 }
 
 /// The layer in a resource manager, at NWSync's priority: above a hak,
@@ -497,6 +538,13 @@ fn the_layer_reads_from_the_game_then_the_cache() {
     cache.put(&sha1(sound), &store(b"short", MAGIC_NSYC)).unwrap();
     let e = rm.get(&key("pw_sound", ResType::WAV)).unwrap_err().to_string();
     assert!(e.contains("the manifest says"), "{e}");
+    assert!(cache.contains(&sha1(sound)));
+    // One cut off (a write a crash broke): taken away, for the next pull.
+    let packed = compress(sound, MAGIC_NSYC).unwrap();
+    cache.put(&sha1(sound), &packed[..packed.len() - 3]).unwrap();
+    let e = rm.get(&key("pw_sound", ResType::WAV)).unwrap_err().to_string();
+    assert!(e.contains("damaged") && e.contains("removed"), "{e}");
+    assert!(!cache.contains(&sha1(sound)));
 }
 
 /// The client with a server of its own on this computer: a file, a
@@ -539,6 +587,155 @@ fn the_client_downloads_over_http() {
     assert_eq!(c.get(&format!("{base}/manifests/none"), 100).unwrap(), None);
     assert!(c.get(&format!("{base}/big"), 100).is_err());
     server.join().unwrap();
+}
+
+/// What a server of a test's own on this computer was asked: each
+/// request's path, with its `Authorization` header.
+type Asked = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// A server on 127.0.0.1 answering each request with `answer(path)` (a
+/// whole HTTP response), for as long as the test runs: its port and what
+/// it was asked.
+fn recording_server(answer: impl Fn(&str) -> String + Send + 'static) -> (u16, Asked) {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let asked: Asked = Arc::default();
+    let heard = asked.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            let mut auth = None;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("authorization")
+                {
+                    auth = Some(value.trim().to_string());
+                }
+            }
+            let path = first.split(' ').nth(1).unwrap_or("").to_string();
+            heard.lock().unwrap().push((path.clone(), auth));
+            let _ = stream.write_all(answer(&path).as_bytes());
+        }
+    });
+    (port, asked)
+}
+
+/// An HTTP response: `status` with `body`, and a `Location` where given.
+fn response(status: &str, location: Option<&str>, body: &str) -> String {
+    let location = location.map_or(String::new(), |l| format!("Location: {l}\r\n"));
+    format!(
+        "HTTP/1.1 {status}\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+const TOKEN: &str = "s3cret-t0ken-4c9e";
+
+fn token_for(host: &str) -> mg_nwsync::Auth {
+    mg_nwsync::Auth { host: host.into(), credentials: mg_nwsync::Credentials::Token(TOKEN.into()) }
+}
+
+/// A sign-in goes to its own host alone: with a request there (a token as
+/// `Bearer`, a user and password as `Basic`), and a redirect on the same
+/// scheme, host and port; not to another port of it, another host (one
+/// redirected to, or one asked first), nor over plain HTTP to another
+/// computer. A refusal says why, never the secret. Redirects are followed
+/// without a sign-in too.
+#[test]
+fn a_sign_in_goes_to_its_own_host_alone() {
+    let (other, other_asked) = recording_server(|_| response("200 OK", None, "other"));
+    let (port, asked) = recording_server(move |path| match path {
+        "/latest" | "/beside/latest" => response("200 OK", None, "hello"),
+        "/same" => response("302 Found", Some("/latest"), ""),
+        "/beside/x" => response("301 Moved Permanently", Some("latest"), ""),
+        "/port" => response("302 Found", Some(&format!("http://127.0.0.1:{other}/port")), ""),
+        "/host" => {
+            response("307 Temporary Redirect", Some(&format!("http://localhost:{other}/host")), "")
+        }
+        "/loop" => response("302 Found", Some("/loop"), ""),
+        "/private" => response("401 Unauthorized", None, ""),
+        _ => response("404 Not Found", None, ""),
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    let header = |asked: &Asked, path: &str| {
+        let asked = asked.lock().unwrap();
+        let found = asked.iter().rev().find(|(p, _)| p == path);
+        found.unwrap_or_else(|| panic!("{path} not asked: {asked:?}")).1.clone()
+    };
+    let get = |c: &fetch::Client, path: &str| c.get(&format!("{base}{path}"), 100);
+    let bearer = Some(format!("Bearer {TOKEN}"));
+
+    let c = fetch::Client::new().with_auth(Some(token_for("127.0.0.1")));
+    assert_eq!(get(&c, "/latest").unwrap().as_deref(), Some(&b"hello"[..]));
+    assert_eq!(header(&asked, "/latest"), bearer);
+    // (Followed on the same scheme, host and port: with it.)
+    asked.lock().unwrap().clear();
+    assert_eq!(get(&c, "/same").unwrap().as_deref(), Some(&b"hello"[..]));
+    assert_eq!(
+        (header(&asked, "/same"), header(&asked, "/latest")),
+        (bearer.clone(), bearer.clone())
+    );
+    assert_eq!(get(&c, "/beside/x").unwrap().as_deref(), Some(&b"hello"[..]));
+    assert_eq!(header(&asked, "/beside/latest"), bearer);
+    // (Another port of the host, and another host: without.)
+    assert_eq!(get(&c, "/port").unwrap().as_deref(), Some(&b"other"[..]));
+    assert_eq!((header(&asked, "/port"), header(&other_asked, "/port")), (bearer.clone(), None));
+    assert_eq!(get(&c, "/host").unwrap().as_deref(), Some(&b"other"[..]));
+    assert_eq!(header(&other_asked, "/host"), None);
+    let e = get(&c, "/loop").unwrap_err();
+    assert!(e.contains("redirected too many times"), "{e}");
+    // A refusal said, without the token.
+    let e = get(&c, "/private").unwrap_err();
+    assert!(e.contains("401") && e.contains("refused the sign-in") && !e.contains(TOKEN), "{e}");
+    assert!(!format!("{c:?}").contains(TOKEN));
+
+    // A user and password.
+    let basic = mg_nwsync::Auth {
+        host: "127.0.0.1".into(),
+        credentials: mg_nwsync::Credentials::Basic { user: "ann".into(), password: "pw:9".into() },
+    };
+    let c = fetch::Client::new().with_auth(Some(basic));
+    get(&c, "/latest").unwrap();
+    // (base64 of "ann:pw:9".)
+    assert_eq!(header(&asked, "/latest").as_deref(), Some("Basic YW5uOnB3Ojk="));
+
+    // A sign-in for another host: not sent, and said so at a refusal.
+    asked.lock().unwrap().clear();
+    let c = fetch::Client::new().with_auth(Some(token_for("nwsync.example.org")));
+    get(&c, "/latest").unwrap();
+    assert_eq!(header(&asked, "/latest"), None);
+    let e = get(&c, "/private").unwrap_err();
+    assert!(e.contains("is for nwsync.example.org") && !e.contains(TOKEN), "{e}");
+
+    // None: redirects followed all the same; a refusal asks for one.
+    let c = fetch::Client::new();
+    assert_eq!(get(&c, "/same").unwrap().as_deref(), Some(&b"hello"[..]));
+    assert_eq!(get(&c, "/port").unwrap().as_deref(), Some(&b"other"[..]));
+    let e = get(&c, "/private").unwrap_err();
+    assert!(e.contains("asks for a sign-in"), "{e}");
+
+    // Over plain HTTP to another computer: refused before anything is
+    // asked; over HTTPS, or a repository folder, taken.
+    let settings = |url: &str| Settings {
+        url: url.into(),
+        manifest: Wanted::Latest,
+        cache: None,
+        auth: Some(token_for("nwsync.example.org")),
+    };
+    let e = fetch::for_settings(&settings("http://nwsync.example.org")).err().unwrap();
+    assert!(e.contains("plain http://") && e.contains("user.toml") && !e.contains(TOKEN), "{e}");
+    assert!(fetch::for_settings(&settings("https://nwsync.example.org")).is_ok());
+    assert!(fetch::for_settings(&settings("http://other.example.org")).is_ok());
+    assert!(fetch::for_settings(&settings("file:///srv/nwsync")).is_ok());
+    assert!(!format!("{:?}", settings("https://nwsync.example.org")).contains(TOKEN));
 }
 
 /// The haks of `content` as an origins file names them: `one` with the
@@ -757,4 +954,454 @@ fn the_cache_is_pruned_of_what_no_kept_manifest_needs() {
     assert!(p.data_left.is_some());
     assert_eq!(p.data_files, 0);
     assert!(cache.contains(&texture(0)));
+}
+
+/// A cache of three manifests (each with a texture of its own, the rest
+/// shared, a hak written for each), the first named by its server; the
+/// last used kept, with `Keep { recent: 1 }`.
+fn three_manifests(dir: &Path) -> (Cache, Vec<(Sha1, Content)>) {
+    use mg_nwsync::haks::{self, Index, Store};
+    let cache = Cache::new(dir.join("cache"));
+    let store = Store { game: None, cache: &cache };
+    let mut manifests = Vec::new();
+    for n in 0..3 {
+        let mut c = Content::new();
+        c.resources[3].1 = format!("texture {n} ").repeat(30).into_bytes();
+        let (sha, bytes) = c.manifest();
+        cache.put_manifest(&sha, "", &bytes).unwrap();
+        cache.put_manifest(&sha, "origin", b"Erf:one.hak\n").unwrap();
+        for (_, data) in &c.resources {
+            cache.put(&sha1(data), &compress(data, MAGIC_NSYC).unwrap()).unwrap();
+        }
+        let plan = haks::from_origins(&origins_of(), &c.entries(), &["two".into()]).unwrap();
+        haks::write_all(&plan, store, 1, &|_| {}, &|| false).unwrap();
+        let index = Index { haks: vec![("two".into(), plan.haks[0].key())], files: vec![] };
+        cache.put_written(&sha, index).unwrap();
+        cache.touch(&sha);
+        manifests.push((sha, c));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    cache.set_latest(URL, &manifests[0].0).unwrap();
+    (cache, manifests)
+}
+
+/// Every file of a folder, by its path in it.
+fn tree(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.file_type().unwrap().is_dir() {
+                dirs.push(e.path());
+            } else {
+                out.push(e.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A clean-up stopped after each of its checks in turn (the window's
+/// Cancel, the module closed): every manifest still in the cache has all
+/// its data and its written haks, the kept ones survey complete, and a
+/// clean-up run after it leaves what one run to its end leaves. Stopped
+/// before it began, nothing goes, a dry run's too.
+#[test]
+fn a_clean_up_stopped_anywhere_leaves_the_cache_whole() {
+    use mg_nwsync::prune::{Keep, prune, prune_until};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let keep = Keep { recent: 1, min_age: std::time::Duration::ZERO, ..Default::default() };
+    let dir = mg_testkit::scratch_dir("nwsync-prune-stopped");
+
+    // To the end, its checks counted.
+    let (cache, _) = three_manifests(&dir.join("whole"));
+    let before = tree(cache.root());
+    let checks = AtomicUsize::new(0);
+    let p = prune_until(&cache, None, &keep, false, &|| {
+        checks.fetch_add(1, Ordering::Relaxed);
+        false
+    })
+    .unwrap();
+    assert!(!p.stopped && p.removed.len() == 1 && p.data_files == 1, "{p:?}");
+    let end = tree(cache.root());
+    let checks = checks.into_inner();
+    assert!(checks > 10, "{checks}");
+
+    for k in 0..=checks {
+        for dry_run in [true, false] {
+            let at = dir.join(format!("at-{k}-{dry_run}"));
+            let (cache, manifests) = three_manifests(&at);
+            let asked = AtomicUsize::new(0);
+            let stop = || asked.fetch_add(1, Ordering::Relaxed) >= k;
+            let p = prune_until(&cache, None, &keep, dry_run, &stop).unwrap();
+            assert_eq!(p.stopped, k < checks, "stopped after {k}");
+            if dry_run || k == 0 {
+                assert_eq!(tree(cache.root()), before, "stopped after {k}, dry run {dry_run}");
+            }
+            if k == 0 {
+                assert_eq!(p.bytes(), 0, "stopped before it began, dry run {dry_run}: {p:?}");
+            }
+            if dry_run {
+                continue;
+            }
+            for (sha, c) in &manifests {
+                if cache.manifest(sha, "").is_none() {
+                    continue;
+                }
+                let s = survey(&c.entries(), None, Some(&cache)).unwrap();
+                assert!(s.complete(), "stopped after {k}: manifest {} lacks data", sha1_hex(sha));
+                for (_, key) in &cache.written(sha).haks {
+                    assert!(cache.hak_path(key).is_file(), "stopped after {k}");
+                }
+            }
+            for sha in [manifests[0].0, manifests[2].0] {
+                assert!(cache.manifest(&sha, "").is_some(), "stopped after {k}");
+            }
+            prune(&cache, None, &keep, false).unwrap();
+            assert_eq!(tree(cache.root()), end, "stopped after {k}, then pruned again");
+        }
+    }
+}
+
+/// A look stopped: the error says so, and nothing is counted.
+#[test]
+fn a_look_stops() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = mg_testkit::scratch_dir("nwsync-survey-stopped");
+    let (cache, manifests) = three_manifests(&dir);
+    let entries = manifests[0].1.entries();
+    let e = mg_nwsync::survey_until(&entries, None, Some(&cache), &|| true).unwrap_err();
+    assert_eq!(e, mg_nwsync::CANCELED);
+    let asked = AtomicUsize::new(0);
+    let later = || asked.fetch_add(1, Ordering::Relaxed) >= 2;
+    let e = mg_nwsync::survey_until(&entries, None, Some(&cache), &later).unwrap_err();
+    assert_eq!(e, mg_nwsync::CANCELED);
+    let s = mg_nwsync::survey_until(&entries, None, Some(&cache), &|| false).unwrap();
+    assert!(s.complete() && s.in_cache == s.data_files, "{s:?}");
+}
+
+/// The server names a manifest it then doesn't give: `latest/` is not
+/// pointed at it (a prune would keep a manifest nothing here can read),
+/// and the one here is used with a warning.
+#[test]
+fn latest_is_kept_only_once_its_manifest_is_here() {
+    let dir = mg_testkit::scratch_dir("nwsync-latest-kept");
+    let content = Content::new();
+    let (sha, _) = content.manifest();
+    let mut server = Server::of(&content);
+    server.files.remove(&format!("manifests/{}", sha1_hex(&sha)));
+    let cache = Cache::new(dir.join("cache"));
+    let e = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap_err();
+    assert!(e.contains("has no manifest"), "{e}");
+    assert_eq!(cache.latest(URL), None, "latest/ names a manifest that isn't here");
+    // An older one here: used, with a warning; latest/ still names it.
+    let mut older = Content::new();
+    older.resources[0].1 = b"an older table".to_vec();
+    let (old_sha, old_bytes) = older.manifest();
+    cache.put_manifest(&old_sha, "", &old_bytes).unwrap();
+    cache.set_latest(URL, &old_sha).unwrap();
+    let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert_eq!((r.found.sha1, r.server_latest), (old_sha, Some(sha)));
+    assert_eq!(r.warnings.len(), 1);
+    assert_eq!(cache.latest(URL).map(|l| l.0), Some(old_sha));
+    // Given: latest/ names it.
+    let server = Server::of(&content);
+    fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert_eq!(cache.latest(URL).map(|l| l.0), Some(sha));
+}
+
+/// A manifest named in `latest/`, or one of the last used, that can't be
+/// read here is passed over with a note: data files no readable kept
+/// manifest needs still go. Only a manifest the caller named keeps them
+/// all.
+#[test]
+fn an_unreadable_latest_or_recent_manifest_doesnt_stop_the_prune() {
+    use mg_nwsync::prune::{Keep, prune};
+    use std::time::Duration;
+    let dir = mg_testkit::scratch_dir("nwsync-prune-unreadable");
+    let cache = Cache::new(dir.join("cache"));
+    let content = Content::new();
+    let (sha, bytes) = content.manifest();
+    cache.put_manifest(&sha, "", &bytes).unwrap();
+    for (_, data) in &content.resources {
+        cache.put(&sha1(data), &compress(data, MAGIC_NSYC).unwrap()).unwrap();
+    }
+    let stale = b"needed by nothing".to_vec();
+    cache.put(&sha1(&stale), &store(&stale, MAGIC_NSYC)).unwrap();
+    // latest/ names a manifest neither has; a manifest file here that
+    // isn't what its name says.
+    cache.set_latest("https://other.example.org", &sha1(b"never downloaded")).unwrap();
+    let broken = sha1(b"a manifest cut off");
+    cache.put_manifest(&broken, "", b"NSYM cut").unwrap();
+    let keep = Keep { manifests: vec![sha], recent: 3, min_age: Duration::ZERO };
+    let p = prune(&cache, None, &keep, false).unwrap();
+    assert_eq!(p.data_left, None);
+    assert_eq!(p.data_files, 1);
+    assert!(!cache.contains(&sha1(&stale)));
+    assert!(content.resources.iter().all(|(_, d)| cache.contains(&sha1(d))));
+    assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
+    assert!(p.notes.iter().all(|n| n.contains("passed over")), "{:?}", p.notes);
+}
+
+/// A manifest used from the game's storage alone (pinned, never in the
+/// cache's `manifests/`) leaves a mark when it is used: a prune counts it
+/// among the last used, and keeps the data the cache holds for it. With
+/// the game's storage not given it can't be read, and is passed over with
+/// a note.
+#[test]
+fn a_manifest_used_from_the_game_s_storage_keeps_its_data() {
+    use mg_nwsync::prune::{Keep, prune};
+    use std::time::Duration;
+    let dir = mg_testkit::scratch_dir("nwsync-prune-used");
+    let content = Content::new();
+    let (sha, _) = content.manifest();
+    let g = game_storage(&dir.join("game"), &content, URL, 100, &["appearance"], false);
+    let cache = Cache::new(dir.join("cache"));
+    for (_, data) in &content.resources[1..] {
+        cache.put(&sha1(data), &compress(data, MAGIC_NSYC).unwrap()).unwrap();
+    }
+    cache.touch(&sha);
+    let keep = Keep { manifests: vec![], recent: 1, min_age: Duration::ZERO };
+    let p = prune(&cache, Some(&g), &keep, true).unwrap();
+    assert_eq!(p.kept, [sha]);
+    assert_eq!(p.data_files, 0);
+    let p = prune(&cache, None, &keep, true).unwrap();
+    assert_eq!(p.data_left, None);
+    assert!(p.notes.iter().any(|n| n.contains(&sha1_hex(&sha)[..8])), "{:?}", p.notes);
+    // The mark of one used before it, not kept, goes with a prune; the
+    // kept one's stays.
+    let before = sha1(b"a manifest used before");
+    cache.touch(&before);
+    let past = std::time::SystemTime::now() - Duration::from_secs(60);
+    let f = std::fs::File::options().write(true).open(cache.used_path(&before)).unwrap();
+    f.set_modified(past).unwrap();
+    drop(f);
+    let p = prune(&cache, Some(&g), &keep, false).unwrap();
+    assert_eq!((p.kept, p.removed), (vec![sha], vec![before]));
+    assert!(!cache.used_path(&before).exists());
+    assert!(cache.used_path(&sha).is_file());
+    assert_eq!(p.data_files, 0);
+    // (Touching a cache that isn't there makes no folder.)
+    let none = Cache::new(dir.join("no cache"));
+    none.touch(&sha);
+    assert!(!none.root().exists());
+}
+
+/// A shard's id the game's metadata can't have (no file before the
+/// first): an error that says so, not an overflow.
+#[test]
+fn a_shard_id_out_of_range_is_an_error() {
+    let dir = mg_testkit::scratch_dir("nwsync-game-shard-id");
+    let content = Content::new();
+    drop(game_storage(&dir, &content, URL, 100, &["appearance"], false));
+    let meta = rusqlite::Connection::open(dir.join(mg_nwsync::game::META)).unwrap();
+    meta.execute("insert into shards values (?1, 1)", [i64::MIN]).unwrap();
+    drop(meta);
+    let e = GameStorage::open(&dir).unwrap_err();
+    assert!(e.contains("shard"), "{e}");
+}
+
+/// The game holding its data file exclusively (a commit being written):
+/// a read waits for it, without writing, and once the game lets go it
+/// reads; the storage's files are as they were.
+#[test]
+fn a_read_waits_for_the_game_s_exclusive_lock() {
+    let dir = mg_testkit::scratch_dir("nwsync-game-exclusive");
+    let content = Content::new();
+    let all = ["appearance", "pw_head001", "pw_head002", "pw_tex", "world", "pw_sound"];
+    let g = game_storage(&dir, &content, URL, 100, &all, false);
+    let stamp = |dir: &Path| -> Vec<(String, u64, std::time::SystemTime)> {
+        let mut out: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                let m = e.metadata().unwrap();
+                (e.file_name().to_string_lossy().into_owned(), m.len(), m.modified().unwrap())
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let before = stamp(&dir);
+    let game = rusqlite::Connection::open(dir.join("nwsyncdata_0.sqlite3")).unwrap();
+    game.execute_batch("begin exclusive").unwrap();
+    let appearance = sha1(content.bytes("appearance", ResType::TWODA));
+    let (started, done) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+    std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            started.0.send(()).unwrap();
+            let read = g.read(&appearance);
+            let hashes = g.hashes();
+            done.0.send(()).unwrap();
+            (read, hashes)
+        });
+        started.1.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(done.1.try_recv().is_err(), "the read went on under the game's exclusive lock");
+        game.execute_batch("rollback").unwrap();
+        let (read, hashes) = reader.join().unwrap();
+        assert!(read.unwrap().is_some());
+        assert_eq!(hashes.unwrap().len(), 5);
+    });
+    drop(game);
+    drop(g);
+    assert_eq!(stamp(&dir), before, "the game's storage was changed");
+}
+
+/// Every SHA-1 a shard holds is read, whatever its first digits (the
+/// reads go a small range at a time), uppercase ones too.
+#[test]
+fn every_hash_is_read_range_by_range() {
+    let dir = mg_testkit::scratch_dir("nwsync-game-hashes");
+    let mut held = Vec::new();
+    for b in 0..=255u8 {
+        let mut sha = sha1(&[b]);
+        sha[0] = b;
+        held.push((sha, vec![b]));
+    }
+    write_storage(&dir, &[], &[held.clone()]);
+    let upper = "FF".repeat(20);
+    let shard = rusqlite::Connection::open(dir.join("nwsyncdata_0.sqlite3")).unwrap();
+    shard.execute("insert into resrefs values (?1, x'00', 1, 0)", [&upper]).unwrap();
+    drop(shard);
+    let g = GameStorage::open(&dir).unwrap().unwrap();
+    let got = g.hashes().unwrap();
+    assert_eq!(got.len(), 257);
+    assert!(held.iter().all(|(s, _)| got.contains(s)));
+    assert!(got.contains(&[0xff; 20]));
+}
+
+/// Whether a manifest holds the module's own resources (`--with-module`):
+/// as its `.json` side file says, else the game's metadata; not known
+/// where neither says.
+#[test]
+fn a_manifest_says_whether_it_holds_the_module() {
+    use mg_nwsync::fixtures::write_metadata;
+    let dir = mg_testkit::scratch_dir("nwsync-includes-module");
+    let content = Content::new();
+    let (sha, _) = content.manifest();
+    let game_dir = dir.join("game");
+    drop(game_storage(&game_dir, &content, URL, 100, &[], false));
+    write_metadata(&game_dir, &sha, Some(true));
+    let g = GameStorage::open(&game_dir).unwrap().unwrap();
+    assert_eq!(g.includes_module_contents(&sha), Some(true));
+    assert_eq!(g.includes_module_contents(&sha1(b"another")), None);
+    let f = find(URL, Wanted::Pinned(sha), None, Some(&g)).unwrap();
+    assert_eq!(f.includes_module, Some(true));
+    // The cache's side file says otherwise: it is the word.
+    let cache = Cache::new(dir.join("cache"));
+    cache
+        .put_manifest(&sha, "json", br#"{"version": 3, "includes_module_contents": false}"#)
+        .unwrap();
+    let f = find(URL, Wanted::Pinned(sha), Some(&cache), Some(&g)).unwrap();
+    assert_eq!(f.includes_module, Some(false));
+    // Downloaded from the server, with its side file.
+    let mut server = Server::of(&content);
+    let json = format!("manifests/{}.json", sha1_hex(&sha));
+    server.files.insert(json.clone(), br#"{"includes_module_contents": true}"#.to_vec());
+    let cache = Cache::new(dir.join("cache2"));
+    let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert_eq!((r.found.from, r.found.includes_module), (ManifestFrom::Server, Some(true)));
+    // Neither says (a side file without it, a game's storage without the
+    // value, or without the table at all).
+    let server = Server::of(&content);
+    let cache = Cache::new(dir.join("cache3"));
+    let r = fetch::resolve(&*server.fetch(), &settings(Wanted::Latest), &cache, None).unwrap();
+    assert_eq!(r.found.includes_module, None);
+    let empty = dir.join("game-empty");
+    drop(game_storage(&empty, &content, URL, 100, &[], false));
+    write_metadata(&empty, &sha, None);
+    let g = GameStorage::open(&empty).unwrap().unwrap();
+    assert_eq!(g.includes_module_contents(&sha), None);
+    let meta = rusqlite::Connection::open(empty.join(mg_nwsync::game::META)).unwrap();
+    meta.execute_batch("drop table manifest_metadata").unwrap();
+    drop(meta);
+    let g = GameStorage::open(&empty).unwrap().unwrap();
+    assert_eq!(g.includes_module_contents(&sha), None);
+}
+
+/// A source is a server's address or a repository folder: an HTTP(S)
+/// address as it is (without its last `/`), a `file://` URL, a folder's
+/// whole path or one from `./` or `../`, resolved against the project's
+/// folder; a server's name alone (a forgotten `https://`) is neither.
+#[test]
+fn a_source_is_a_server_or_a_folder() {
+    use mg_nwsync::{folder_url, local_folder, source_url};
+    let base = if cfg!(windows) { Path::new("C:\\work\\krezk") } else { Path::new("/work/krezk") };
+    let url = |p: &str| folder_url(Path::new(p));
+    assert_eq!(
+        source_url("https://nwsync.example.org/", Some(base)).unwrap(),
+        "https://nwsync.example.org"
+    );
+    assert_eq!(source_url(" HTTP://a.example ", None).unwrap(), "HTTP://a.example");
+    assert_eq!(source_url("https://", None), None);
+    assert_eq!(source_url("nwsync.example.org", Some(base)), None);
+    assert_eq!(source_url("nwsync-repo", Some(base)), None);
+    assert_eq!(source_url("ftp://a.example", Some(base)), None);
+    // (A relative folder with no project folder to place it: none.)
+    assert_eq!(source_url("../repo", None), None);
+    if cfg!(windows) {
+        assert_eq!(source_url("../repo", Some(base)).unwrap(), "file:///C:/work/repo");
+        assert_eq!(source_url(".\\repo\\", Some(base)).unwrap(), "file:///C:/work/krezk/repo");
+        assert_eq!(source_url("D:\\nwsync", Some(base)).unwrap(), "file:///D:/nwsync");
+        assert_eq!(source_url("file:///D:/nw%20sync", None).unwrap(), "file:///D:/nw sync");
+    } else {
+        assert_eq!(source_url("../repo", Some(base)).unwrap(), "file:///work/repo");
+        assert_eq!(source_url("./repo/", Some(base)).unwrap(), "file:///work/krezk/repo");
+        assert_eq!(source_url("/srv/nwsync", Some(base)).unwrap(), url("/srv/nwsync"));
+        assert_eq!(source_url("file:///srv/a/../nw%20sync", None).unwrap(), "file:///srv/nw sync");
+        assert_eq!(source_url("file://localhost/srv/x", None).unwrap(), "file:///srv/x");
+        assert_eq!(local_folder("file:///srv/100%25"), Some("/srv/100%".into()));
+        assert_eq!(local_folder(&url("/srv/100%")), Some("/srv/100%".into()));
+        assert_eq!(local_folder("file://relative/x"), None);
+    }
+    assert_eq!(source_url("file://", None), None);
+    assert_eq!(local_folder("file:///srv/%zz"), None);
+    assert_eq!(local_folder("file:///srv/%e"), None);
+    assert_eq!(local_folder("https://a.example"), None);
+}
+
+/// A repository folder read in place, as a server is: its files, none
+/// for one it hasn't, an error for one over the limit, for an address
+/// outside it, and for a folder that isn't there (which the pull then
+/// says, using the manifest here). Pulled through it, the data lands in
+/// the cache, `latest/` kept for it, the manifest said to come from the
+/// folder; the folder itself is left as it was.
+#[test]
+fn a_repository_folder_is_read_in_place() {
+    let dir = mg_testkit::scratch_dir("nwsync-folder-source");
+    let content = Content::new();
+    let repo = dir.join("repo");
+    for (path, bytes) in &Server::of(&content).files {
+        let at = repo.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+    let before = tree(&repo);
+    let url = mg_nwsync::folder_url(&repo);
+    let folder = fetch::Folder::of(&url).unwrap();
+    assert!(fetch::Folder::of(URL).is_none());
+    let latest = folder.get(&fetch::at(&url, "latest"), 100).unwrap().unwrap();
+    assert_eq!(String::from_utf8(latest).unwrap().trim(), sha1_hex(&content.manifest().0));
+    assert_eq!(folder.get(&fetch::at(&url, "manifests/none"), 100).unwrap(), None);
+    assert_eq!(folder.get(&fetch::at(&url, "data"), 100).unwrap(), None);
+    assert!(folder.get(&fetch::at(&url, "latest"), 5).unwrap_err().contains("larger"));
+    assert!(folder.get(&fetch::at(&url, "../repo/latest"), 100).is_err());
+    assert!(folder.get(&fetch::at(URL, "latest"), 100).is_err());
+
+    let cache = Cache::new(dir.join("cache"));
+    let s = Settings { url: url.clone(), manifest: Wanted::Latest, cache: None, auth: None };
+    let o = Options::default();
+    let pulled = fetch::pull(&folder, &s, &cache, None, o, &|_| {}, &|| false).unwrap();
+    assert_eq!(pulled.resolved.found.from, ManifestFrom::Folder);
+    assert_eq!(pulled.downloaded.files, 5);
+    assert!(content.resources.iter().all(|(_, d)| cache.contains(&sha1(d))));
+    assert_eq!(cache.latest(&url).map(|l| l.0), Some(content.manifest().0));
+    assert_eq!(tree(&repo), before);
+    // The folder gone: the manifest here, with a warning that says why.
+    std::fs::rename(&repo, dir.join("moved")).unwrap();
+    let r = fetch::resolve(&folder, &s, &cache, None).unwrap();
+    assert_eq!(r.found.from, ManifestFrom::Cache);
+    assert!(r.warnings[0].contains("is not there"), "{:?}", r.warnings);
 }

@@ -68,14 +68,13 @@ mod tests {
         assert_eq!(with("").unwrap().layonara_api, "1");
     }
 
-    /// Upstream's numbering is upstream's: the fork's old 0.11 and 0.12 are gone.
+    /// Upstream's numbering is upstream's (its own 0.11 since 5.5.0): the
+    /// fork's old 0.12 is gone.
     #[test]
     fn api_is_upstreams_and_layonara_api_the_forks() {
-        assert_eq!((crate::API, super::API), ("0.10", "1"));
-        for old in ["0.11", "0.12"] {
-            let e = Manifest::parse(&PLUGIN.replace("0.10", old)).unwrap_err();
-            assert!(e.contains(&format!("plugin API {old}")), "{e}");
-        }
+        assert_eq!((crate::API, super::API), ("0.11", "1"));
+        let e = Manifest::parse(&PLUGIN.replace("0.10", "0.12")).unwrap_err();
+        assert!(e.contains("plugin API 0.12"), "{e}");
         let e = Manifest::parse(&PLUGIN.replace("layonara_api = \"1\"", "layonara_api = \"2\""));
         assert!(e.unwrap_err().contains("Layonara API 2"));
     }

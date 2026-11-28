@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use mg_nwsync::fetch::{self, Client, Fetch, Step};
+use mg_nwsync::fetch::{self, Fetch, Step};
 use mg_nwsync::{Cache, GameStorage, Settings, Survey, Wanted, sha1_hex};
 use serde_json::json;
 
@@ -24,7 +24,8 @@ pub(crate) struct Source {
     /// The module, whose project names its server ([nwsync] source in
     /// moonglow.toml); none where --source is given.
     pub module: Option<PathBuf>,
-    /// The NWSync server, as nwserver's -nwsyncurl (default: the
+    /// The NWSync server, as nwserver's -nwsyncurl, or a repository
+    /// folder on this computer (a path, or a file:// URL) (default: the
     /// project's [nwsync] source).
     #[arg(long, value_name = "URL")]
     pub source: Option<String>,
@@ -38,14 +39,47 @@ pub(crate) struct Source {
     pub cache: Option<PathBuf>,
 }
 
-/// The settings: the project's, with what the command line says over them.
-fn settings(s: &Source) -> Result<Settings> {
+/// The settings: the project's, with what the command line says over them
+/// (and what to say of that).
+fn settings(s: &Source) -> Result<(Settings, Vec<String>)> {
+    let mut notes = Vec::new();
     let project = match &s.module {
-        Some(path) => crate::open_module(path)?.project_file.nwsync_settings(),
+        Some(path) => {
+            // (What its project file said wasn't read: a sign-in refused
+            // in the team's file is told, not a bare 401 later.)
+            let p = crate::open_module(path)?.project_file;
+            notes.extend(p.errors.iter().chain(&p.warnings).map(|w| format!("warning: {w}")));
+            p.nwsync_settings()
+        }
         None => None,
     };
     let url = match (&s.source, &project) {
-        (Some(u), _) => u.trim().trim_end_matches('/').to_string(),
+        // (Said without the address, which would show the password.)
+        (Some(u), _)
+            if mg_nwsync::auth::has_userinfo(u)
+                || (!u.contains("://") && u.contains('@') && !Path::new(u).exists()) =>
+        {
+            bail!(
+                "--source has a user or password in its address, which is not read: give them as \
+             [nwsync] user and password in the project's .moonglow/user.toml"
+            )
+        }
+        (Some(u), _) => {
+            // (A folder's path from where mg runs: one that is there by
+            // its name alone too, where a name alone that isn't is taken
+            // for a server's name without its https://.)
+            let here = std::env::current_dir().ok();
+            let plain = (!u.contains("://")).then(|| Path::new(u.trim()).to_path_buf());
+            let plain = plain.filter(|p| p.is_absolute() || p.is_dir());
+            let path = plain.map(|p| if p.is_absolute() { p } else { Path::new(".").join(p) });
+            let text = path.map_or_else(|| u.clone(), |p| p.to_string_lossy().into_owned());
+            mg_nwsync::source_url(&text, here.as_deref()).ok_or_else(|| {
+                anyhow!(
+                    "--source is the NWSync server's address, as nwserver's -nwsyncurl \
+                     (https://nwsync.example.org), or a repository folder: {u:?}"
+                )
+            })?
+        }
         (None, Some(p)) => p.url.clone(),
         (None, None) if s.module.is_some() => bail!(
             "the module's project names no NWSync server ([nwsync] source in moonglow.toml): give \
@@ -59,10 +93,29 @@ fn settings(s: &Source) -> Result<Settings> {
             mg_nwsync::parse_sha1(m.trim())
                 .ok_or_else(|| anyhow!("--manifest is latest or a manifest's SHA-1: {m:?}"))?,
         ),
-        None => project.as_ref().map_or(Wanted::Latest, |p| p.manifest),
+        None => match &project {
+            // (Another server than the project's: the project's pin is a
+            // manifest of its own server's.)
+            Some(p) if mg_nwsync::server_key(&p.url) != mg_nwsync::server_key(&url) => {
+                if let Wanted::Pinned(sha) = p.manifest {
+                    notes.push(format!(
+                        "the project's [nwsync] manifest {} is its own server's ({}), not taken \
+                         for {url}: its latest instead (--manifest picks one)",
+                        &sha1_hex(&sha)[..8],
+                        p.url
+                    ));
+                }
+                Wanted::Latest
+            }
+            Some(p) => p.manifest,
+            None => Wanted::Latest,
+        },
     };
+    // (The project's sign-in, which is sent to its own host alone,
+    // whatever server --source names.)
+    let auth = project.as_ref().and_then(|p| p.auth.clone());
     let cache = s.cache.clone().or_else(|| project.and_then(|p| p.cache));
-    Ok(Settings { url, manifest, cache })
+    Ok((Settings { url, manifest, cache, auth }, notes))
 }
 
 /// The game's NWSync storage, as `mg` finds the game's user folder:
@@ -81,6 +134,26 @@ fn game_storage(cli: &Cli) -> Result<Option<GameStorage>> {
 fn cache_of(settings: &Settings) -> Result<Cache> {
     mg_module::nwsync_content::cache_of(settings)
         .context("no cache folder for NWSync data: give one, --cache DIR")
+}
+
+/// The source as a line says it: the server's address, or the folder.
+fn source_line(settings: &Settings) -> String {
+    match mg_nwsync::local_folder(&settings.url) {
+        Some(dir) => format!("repository folder: {}", dir.display()),
+        None => format!("server: {}", settings.url),
+    }
+}
+
+/// The sign-in sent to the source, as a line says it (never its value);
+/// none without one for it.
+fn sign_in(settings: &Settings) -> Option<&'static str> {
+    let a = settings.auth.as_ref().filter(|a| a.sent_to(&settings.url))?;
+    Some(a.said())
+}
+
+/// What makes the requests for `settings` ([`fetch::for_settings`]).
+fn fetcher(settings: &Settings) -> Result<std::sync::Arc<dyn Fetch>> {
+    fetch::for_settings(settings).map_err(anyhow::Error::msg)
 }
 
 fn megabytes(n: u64) -> String {
@@ -105,7 +178,10 @@ fn survey_lines(out: &mut Output, s: &Survey, game: Option<&Path>, cache: &Path)
         Some(dir) => {
             out.line(format!("in the game's NWSync storage: {} ({})", s.in_game, dir.display()))
         }
-        None => out.line("in the game's NWSync storage: none (it has none)".to_string()),
+        None => out.line(
+            "in the game's NWSync storage: none (no user folder, or no NWSync storage in it)"
+                .to_string(),
+        ),
     }
     out.line(format!("in Moonglow's cache: {} ({})", s.in_cache, cache.display()));
     out.line(format!(
@@ -117,23 +193,43 @@ fn survey_lines(out: &mut Output, s: &Survey, game: Option<&Path>, cache: &Path)
 
 fn origins_line(origins: Option<&mg_nwsync::Origins>) -> String {
     match origins {
-        Some(o) => format!(
-            "origins: {} haks and {} other containers named",
-            o.haks().count(),
-            o.containers.len() - o.haks().count()
-        ),
+        Some(o) => {
+            let haks = o.haks().count();
+            let others = o.containers.len().saturating_sub(haks);
+            format!(
+                "origins: {haks} {} and {others} other {} named",
+                if haks == 1 { "hak" } else { "haks" },
+                if others == 1 { "container" } else { "containers" }
+            )
+        }
         None => "origins: none (the server publishes no origins file for it)".into(),
+    }
+}
+
+/// An error, with the warnings said of the settings after it (a sign-in
+/// the team's file had, refused: the reason the server refused).
+fn with_notes(said: &[String]) -> impl Fn(anyhow::Error) -> anyhow::Error + '_ {
+    move |e| match said.is_empty() {
+        true => e,
+        false => anyhow!("{e:#}\n{}", said.join("\n")),
     }
 }
 
 /// `mg nwsync-status`.
 pub(crate) fn status(cli: &Cli, s: &Source, online: bool) -> Result<Output> {
-    let settings = settings(s)?;
+    let (settings, said) = settings(s)?;
+    status_with(cli, settings, said.clone(), online).map_err(with_notes(&said))
+}
+
+fn status_with(cli: &Cli, settings: Settings, said: Vec<String>, online: bool) -> Result<Output> {
     let cache = cache_of(&settings)?;
     let game = game_storage(cli)?;
     let mut out = Output::default();
+    for n in said {
+        out.note(n);
+    }
     let (found, server_latest) = if online {
-        let r = fetch::resolve(&Client::new(), &settings, &cache, game.as_ref())
+        let r = fetch::resolve(&*fetcher(&settings)?, &settings, &cache, game.as_ref())
             .map_err(anyhow::Error::msg)?;
         for w in &r.warnings {
             out.note(format!("warning: {w}"));
@@ -147,7 +243,10 @@ pub(crate) fn status(cli: &Cli, s: &Source, online: bool) -> Result<Output> {
     let survey = mg_nwsync::survey(&found.entries, game.as_ref(), Some(&cache))
         .map_err(anyhow::Error::msg)?;
     let game_dir = game.as_ref().map(|g| g.dir.clone());
-    out.line(format!("server: {}", settings.url));
+    out.line(source_line(&settings));
+    if let Some(said) = sign_in(&settings).filter(|_| online) {
+        out.line(format!("signed in with {said} from .moonglow/user.toml"));
+    }
     out.line(format!("manifest: {} ({})", sha1_hex(&found.sha1), found.from.said()));
     if let Some(latest) = server_latest.filter(|l| *l != found.sha1) {
         out.line(format!("the server's latest: {}", sha1_hex(&latest)));
@@ -166,6 +265,7 @@ pub(crate) fn status(cli: &Cli, s: &Source, online: bool) -> Result<Output> {
         "manifest": sha1_hex(&found.sha1),
         "from": from_word(found.from),
         "server_latest": server_latest.map(|l| sha1_hex(&l)),
+        "signed_in": sign_in(&settings).filter(|_| online),
         "game_storage": game_dir.as_deref().map(path_text),
         "cache": path_text(cache.root()),
         "origins": found.origins.as_ref().map(|o| o.haks().collect::<Vec<_>>()),
@@ -174,20 +274,23 @@ pub(crate) fn status(cli: &Cli, s: &Source, online: bool) -> Result<Output> {
     Ok(out)
 }
 
+/// (The plugin API's `mg.nwsync.status()` names it with the same word.)
 fn from_word(from: mg_nwsync::ManifestFrom) -> &'static str {
-    match from {
-        mg_nwsync::ManifestFrom::Server => "server",
-        mg_nwsync::ManifestFrom::Cache => "cache",
-        mg_nwsync::ManifestFrom::GameStorage => "game_storage",
-    }
+    from.word()
 }
 
 /// `mg nwsync-pull`.
 pub(crate) fn pull(cli: &Cli, s: &Source, jobs: usize, sample: Option<usize>) -> Result<Output> {
-    let settings = settings(s)?;
-    let cache = cache_of(&settings)?;
-    let game = game_storage(cli)?;
-    pull_with(&Client::new(), &settings, &cache, game.as_ref(), jobs, sample, !cli.json)
+    let (settings, said) = settings(s)?;
+    let pulled = (|| {
+        let cache = cache_of(&settings)?;
+        let game = game_storage(cli)?;
+        let f = fetcher(&settings)?;
+        pull_with(&*f, &settings, &cache, game.as_ref(), jobs, sample, !cli.json)
+    })();
+    let mut out = pulled.map_err(with_notes(&said))?;
+    out.notes.splice(0..0, said);
+    Ok(out)
 }
 
 /// [`pull`] through `fetch`, with progress on standard error where
@@ -207,7 +310,10 @@ fn pull_with(
             return;
         }
         match s {
-            Step::Asking => eprintln!("asking {} for its manifest", settings.url),
+            Step::Asking => match mg_nwsync::local_folder(&settings.url) {
+                Some(dir) => eprintln!("reading the manifest of {}", dir.display()),
+                None => eprintln!("asking {} for its manifest", settings.url),
+            },
             Step::Looking => eprintln!("looking for its data in the game's storage and the cache"),
             Step::Downloading(p) => {
                 let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
@@ -234,7 +340,10 @@ fn pull_with(
     }
     let found = &p.resolved.found;
     let game_dir = game.map(|g| g.dir.clone());
-    out.line(format!("server: {}", settings.url));
+    out.line(source_line(settings));
+    if let Some(said) = sign_in(settings) {
+        out.line(format!("signed in with {said} from .moonglow/user.toml"));
+    }
     out.line(format!("manifest: {} ({})", sha1_hex(&found.sha1), found.from.said()));
     survey_lines(&mut out, &p.before, game_dir.as_deref(), cache.root());
     out.line(origins_line(found.origins.as_ref()));
@@ -254,7 +363,7 @@ fn pull_with(
     if d.failed.len() > 20 {
         out.note(format!("warning: {} more data files not downloaded", d.failed.len() - 20));
     }
-    let left = p.before.missing.len() - d.files;
+    let left = p.before.missing.len().saturating_sub(d.files);
     if left == 0 {
         out.note("all of the manifest's data is here");
     } else {
@@ -265,6 +374,7 @@ fn pull_with(
         "manifest": sha1_hex(&found.sha1),
         "from": from_word(found.from),
         "server_latest": p.resolved.server_latest.map(|l| sha1_hex(&l)),
+        "signed_in": sign_in(settings),
         "game_storage": game_dir.as_deref().map(path_text),
         "cache": path_text(cache.root()),
         "origins": found.origins.as_ref().map(|o| o.haks().collect::<Vec<_>>()),
@@ -302,17 +412,24 @@ pub(crate) struct HakArgs {
 }
 
 /// Puts a written file at `to`: a hard link (it stays when the cache is
-/// pruned), else a copy; a copy with `copy`.
+/// pruned), else a copy; a copy with `copy`. Made beside it and moved
+/// into place: what was at `to` is replaced whole (never written through
+/// a link), and stays until the new file is there.
 fn put(from: &Path, to: &Path, copy: bool) -> Result<()> {
     if same_file(from, to) {
         return Ok(());
     }
-    let _ = std::fs::remove_file(to);
-    if !copy && std::fs::hard_link(from, to).is_ok() {
-        return Ok(());
-    }
-    std::fs::copy(from, to).with_context(|| to.display().to_string())?;
-    Ok(())
+    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let part = to.with_file_name(format!(".{name}.{}.mg-part", std::process::id()));
+    let _ = std::fs::remove_file(&part);
+    let made = match !copy && std::fs::hard_link(from, &part).is_ok() {
+        true => Ok(()),
+        false => std::fs::copy(from, &part).map(|_| ()),
+    };
+    made.and_then(|()| std::fs::rename(&part, to)).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        anyhow::Error::new(e).context(to.display().to_string())
+    })
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -324,7 +441,15 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// `mg nwsync-haks`.
 pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
-    let settings = settings(s)?;
+    let (settings, said) = settings(s)?;
+    // (Before anything is made in it: not the player's own folder, with
+    // the game installed or not.)
+    if let Some(dir) = &a.out {
+        match crate::install(cli) {
+            Ok(gi) => crate::serve::refuse_dir(&gi, dir, None)?,
+            Err(_) => crate::serve::refuse_players_dir(cli.user_dir.as_deref(), dir, None)?,
+        }
+    }
     let game = game_storage(cli)?;
     let module = match &s.module {
         Some(path) => Some(crate::open_module(path)?),
@@ -353,6 +478,16 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
             (Vec::new(), (tlks.len() == 1).then(|| tlks[0].clone()))
         }
     };
+    // What is on disk, for the rule (a hak or talk table newer than the
+    // manifest is taken from disk, not written); the module's resources.
+    let on_disk = match (&module, crate::install(cli)) {
+        (Some(m), Ok(gi)) => m.nwsync_on_disk(&gi),
+        (Some(m), Err(_)) => mg_module::nwsync_content::OnDisk {
+            module: Some(m.keys().copied().collect()),
+            ..Default::default()
+        },
+        (None, _) => Default::default(),
+    };
     let all = a.all || module.is_none();
     let last = Mutex::new(Instant::now() - Duration::from_secs(60));
     let show = !cli.json;
@@ -373,17 +508,23 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
         ..Default::default()
     };
     let started = Instant::now();
-    let files =
-        mg_module::nwsync_content::write_haks(&settings, game.as_ref(), &names, tlk.as_deref(), &o)
-            .map_err(anyhow::Error::msg)?;
+    let files = mg_module::nwsync_content::write_haks(
+        &settings,
+        game.as_ref(),
+        &names,
+        tlk.as_deref(),
+        &on_disk,
+        &o,
+    )
+    .map_err(anyhow::Error::msg)?;
     let mut out = Output::default();
-    out.line(format!("server: {}", settings.url));
+    for n in said.into_iter().chain(files.notes()) {
+        out.note(n);
+    }
+    out.line(source_line(&settings));
     out.line(format!("manifest: {} ({})", sha1_hex(&files.manifest), files.from.said()));
     let mut placed: Vec<(String, PathBuf)> = Vec::new();
     if let Some(dir) = &a.out {
-        if let Ok(gi) = crate::install(cli) {
-            crate::serve::refuse_dir(&gi, dir, None)?;
-        }
         for sub in ["hak", "tlk"] {
             std::fs::create_dir_all(dir.join(sub))
                 .with_context(|| dir.join(sub).display().to_string())?;
@@ -395,7 +536,7 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
             put(&h.path, &to, a.copy)?;
             placed.push((h.name.clone(), to));
         }
-        if let Some((name, path)) = &files.tlk {
+        for (name, path) in files.tlk.iter().chain(&files.tlk_f) {
             let to = dir.join("tlk").join(name);
             put(path, &to, a.copy)?;
             placed.push((name.clone(), to));
@@ -415,7 +556,7 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
             at(&h.name, &h.path).display()
         ));
     }
-    if let Some((name, path)) = &files.tlk {
+    for (name, path) in files.tlk.iter().chain(&files.tlk_f) {
         out.line(format!("{name}: {}", at(name, path).display()));
     }
     if !files.not_listed.is_empty() {
@@ -429,8 +570,9 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
         .fold((0usize, 0u64), |(n, b), h| (n + 1, b + h.bytes));
     let took = started.elapsed().as_secs_f64();
     out.note(format!(
-        "{} haks ({}), {written} written now ({}), in {took:.1} s{}",
+        "{} {} ({}), {written} written now ({}), in {took:.1} s{}",
         files.haks.len(),
+        if files.haks.len() == 1 { "hak" } else { "haks" },
         megabytes(files.haks.iter().map(|h| h.bytes).sum()),
         megabytes(bytes),
         match &a.out {
@@ -455,6 +597,10 @@ pub(crate) fn haks(cli: &Cli, s: &Source, a: &HakArgs) -> Result<Output> {
             "cached": path_text(&h.path),
         })).collect::<Vec<_>>(),
         "tlk": files.tlk.as_ref().map(|(n, p)| json!({"name": n, "file": path_text(&at(n, p))})),
+        "tlk_feminine": files.tlk_f.as_ref().map(|(n, p)| json!({"name": n, "file": path_text(&at(n, p))})),
+        "newer_on_disk": files.newer_haks.iter().map(|h| format!("{h}.hak"))
+            .chain(files.newer_tlk.iter().map(|t| format!("{t}.tlk"))).collect::<Vec<_>>(),
+        "kept_on_disk": files.kept_on_disk,
         "not_listed": files.not_listed,
         "seconds": took,
     });
@@ -532,6 +678,9 @@ pub(crate) fn cache_prune(cli: &Cli, a: &PruneArgs) -> Result<Output> {
     if let Some(why) = &p.data_left {
         out.note(format!("warning: {why}"));
     }
+    for n in &p.notes {
+        out.note(n.clone());
+    }
     out.note(format!(
         "{} {would}{}",
         megabytes(p.bytes()),
@@ -549,6 +698,7 @@ pub(crate) fn cache_prune(cli: &Cli, a: &PruneArgs) -> Result<Output> {
         "other": p.other,
         "other_bytes": p.other_bytes,
         "data_left": p.data_left,
+        "passed_over": p.notes,
     });
     Ok(out)
 }

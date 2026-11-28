@@ -34,9 +34,34 @@ pub(super) fn shoot_close(
     r: Reading,
     body: &str,
     settings: &str,
-    (facing, distance, pitch): (f32, f32, f32),
+    camera: (f32, f32, f32),
     view: &dyn Fn(&mut mg_area::View),
 ) -> (PathBuf, Rgba) {
+    let (dir, client, _) = shoot_close_beside(r, body, settings, camera, view);
+    (dir, client)
+}
+
+/// [`shoot_close`], with Moonglow's two pictures (its own shaders, the
+/// game's): `None` without a GPU.
+pub(super) fn shoot_close_beside(
+    r: Reading,
+    body: &str,
+    settings: &str,
+    camera: (f32, f32, f32),
+    view: &dyn Fn(&mut mg_area::View),
+) -> (PathBuf, Rgba, Option<(Rgba, Rgba)>) {
+    shoot_close_beside_at(r, body, settings, camera, &|v, _| view(v))
+}
+
+/// [`shoot_close_beside`], Moonglow's view set knowing where the player
+/// stands (from the client's log): to give it the player's light.
+pub(super) fn shoot_close_beside_at(
+    r: Reading,
+    body: &str,
+    settings: &str,
+    (facing, distance, pitch): (f32, f32, f32),
+    view: &dyn Fn(&mut mg_area::View, Vec3),
+) -> (PathBuf, Rgba, Option<(Rgba, Rgba)>) {
     let (are, git) = (r.are.clone(), r.git.clone());
     let dir = r.dir.clone();
     let game = GameData::open(&GameInstall::new(
@@ -49,15 +74,15 @@ pub(super) fn shoot_close(
         r.shoot(&enter(&super::readings::logged(body), (facing, distance, pitch)), settings);
     crate::common::gpu_after_display();
     let Some(gpu) = Gpu::headless() else {
-        return (dir, client);
+        return (dir, client, None);
     };
     let tileset = mg_area::tileset(&game, are.root.resref("Tileset").unwrap()).ok();
     let model = mg_area::AreaModel::read(&game, &are.root, &git.root, tileset.as_ref());
     let area_scene = mg_area::AreaScene::new(&gpu, &game, &model);
     let pc = player_stood(&dir, &game, &model, glam::Vec2::new(20.0, 20.0));
-    let camera = camera_facing(pc, facing, FIT_FOV, FIT_FOCUS, distance * 0.92, pitch - 1.0);
+    let camera = close_camera(pc, (facing, distance, pitch));
     let mut v = mg_area::View { fog: false, ..mg_area::View::of(&model) };
-    view(&mut v);
+    view(&mut v, pc);
     let mut scene = area_scene.scene(&model, &v);
     if v.animate {
         let mut sims = HashMap::new();
@@ -66,7 +91,7 @@ pub(super) fn shoot_close(
         scene.particles = particles;
         scene.instances.extend(chunks);
     }
-    off_and_on(
+    let pictures = off_and_on(
         &gpu,
         &game,
         &scene,
@@ -76,7 +101,13 @@ pub(super) fn shoot_close(
         &dir,
         "moonglow",
     );
-    (dir, client)
+    (dir, client, Some(pictures))
+}
+
+/// Moonglow's camera for the client's `(facing, distance, pitch)` given a
+/// second after entry over the player standing at `pc` ([`shoot_close`]).
+pub(super) fn close_camera(pc: Vec3, (facing, distance, pitch): (f32, f32, f32)) -> Camera {
+    camera_facing(pc, facing, FIT_FOV, FIT_FOCUS, distance * 0.92, pitch - 1.0)
 }
 
 /// An emitter of [`probe_model`] `model` at (x, y, z): 12 cm white squares

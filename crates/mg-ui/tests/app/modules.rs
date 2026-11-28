@@ -1129,7 +1129,7 @@ fn import_files_says_which_editors_hold_unsaved_changes() {
     h.run_steps(3);
     h.event(egui::Event::Text("// typed\n".into()));
     h.run_steps(3);
-    h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(("script", hello))));
+    h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique(("script", hello))));
     h.state_mut().actions.push(mg_ui::Action::ImportFilesDialog);
     settle(&mut h);
     assert_eq!(h.state().import.as_ref().unwrap().unsaved, [hello]);
@@ -1569,10 +1569,12 @@ fn module_name_in_every_language_and_variables() {
 /// Build › NWSync Content…: a module folder whose project names an NWSync
 /// server, the game's storage holding its manifest and one of its two
 /// data files. Opened, the layer is in the game data (the log says so);
-/// the window says what is here; Sync, through a server of the test's
+/// the window says what is here, and that a token from the builder's own
+/// file signs in (never the token); Sync, through a server of the test's
 /// own, downloads the other into the cache, and it reads.
 #[test]
 fn nwsync_content_from_the_build_menu() {
+    const TOKEN: &str = "ui-s3cret-token";
     use mg_core::sha1::sha1;
     let root = mg_testkit::corpus!();
     let dir = mg_testkit::scratch_dir("ui-nwsync-content");
@@ -1608,7 +1610,10 @@ fn nwsync_content_from_the_build_menu() {
         .unwrap();
     std::fs::create_dir_all(folder.join(".moonglow")).unwrap();
     let cache = dir.join("cache");
-    let own = format!("[nwsync]\ncache = '{}'\n", cache.display());
+    let own = format!(
+        "[nwsync]\ncache = '{}'\ntoken = '{TOKEN}'\nhost = 'nwsync.example.org'\n",
+        cache.display()
+    );
     std::fs::write(folder.join(".moonglow/user.toml"), own).unwrap();
     let mut app = game_app(&root, Some(user));
     app.background_jobs = true;
@@ -1660,6 +1665,9 @@ fn nwsync_content_from_the_build_menu() {
     let s = h.state().nwsync_content.survey.clone().expect("looked");
     assert_eq!((s.in_game, s.in_cache, s.missing.len()), (1, 0, 1));
     h.get_by_label_contains("1 data file (");
+    h.get_by_label("Signed in with a token from .moonglow/user.toml");
+    assert!(h.query_by_label_contains(TOKEN).is_none());
+    assert!(!log(&h).contains(TOKEN));
     h.get_by_label("Sync").click();
     h.run_steps(1);
     // Under way it is no job (the window takes input meanwhile), and the
@@ -1689,6 +1697,366 @@ fn nwsync_content_from_the_build_menu() {
     // (The data the game had was asked for not at all.)
     let asked = asked.lock().unwrap().clone();
     assert!(!asked.iter().any(|u| u.ends_with(&mg_nwsync::sha1_hex(&sha1(&here)))), "{asked:?}");
+}
+
+/// Moonglow's cache folder, in these tests, is their own (the shared
+/// `own_cache`, set before `main`): no test writes the user's NWSync
+/// cache or Test Module's `test-user` in `~/.cache/moonglow`.
+#[test]
+fn the_tests_keep_moonglow_s_cache_in_their_own_folder() {
+    let dir = mg_module::build::cache_dir().expect("a cache folder");
+    assert_eq!(dir, crate::own_cache::dir());
+    assert!(dir.starts_with(mg_testkit::test_output()), "{}", dir.display());
+}
+
+/// A module folder whose project names an NWSync server, the game's
+/// storage holding manifest `m1` (whose resources are `m1`'s), and the
+/// cache in `dir`. The module's folder, the user folder and the cache.
+pub(crate) fn nwsync_module(
+    dir: &std::path::Path,
+    m1: &[(ResKey, Vec<u8>)],
+    in_game: usize,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    use mg_core::sha1::sha1;
+    let user = user_folder(dir, &["hak"]);
+    let entries: Vec<_> = m1.iter().map(|(k, d)| (*k, sha1(d), d.len() as u32)).collect();
+    let manifest = mg_nwsync::manifest::write(&entries);
+    mg_nwsync::fixtures::write_storage(
+        &user.join("nwsync"),
+        &[mg_nwsync::fixtures::Registered {
+            sha1: sha1(&manifest),
+            origin_url: NWSYNC_URL.into(),
+            created_at: 1,
+            last_used_at: 1,
+            resources: entries.iter().map(|(k, s, _)| (*k, *s)).collect(),
+            cached: Some(manifest.clone()),
+        }],
+        &[m1[..in_game].iter().map(|(_, d)| (sha1(d), d.clone())).collect()],
+    );
+    let folder = dir.join("module");
+    Module::open(&sample_module(dir))
+        .unwrap()
+        .save_as(&ModuleLocation::Folder(folder.clone()))
+        .unwrap();
+    let project = format!("[nwsync]\nsource = \"{NWSYNC_URL}\"\n");
+    std::fs::write(folder.join("moonglow.toml"), project).unwrap();
+    std::fs::create_dir_all(folder.join(".moonglow")).unwrap();
+    let cache = dir.join("cache");
+    let own = format!("[nwsync]\ncache = '{}'\n", cache.display());
+    std::fs::write(folder.join(".moonglow/user.toml"), own).unwrap();
+    (folder, user, cache)
+}
+
+pub(crate) const NWSYNC_URL: &str = "https://nwsync.example.org";
+
+/// A server of the test's: `latest` names `manifest`, served with
+/// `data`; a data file's answer waits for `held` (the test lets it go).
+pub(crate) fn held_server(
+    manifest: Vec<u8>,
+    data: Vec<Vec<u8>>,
+    held: std::sync::mpsc::Receiver<()>,
+) -> std::sync::Arc<dyn mg_nwsync::fetch::Fetch> {
+    held_server_saying(manifest, data, held, std::sync::mpsc::channel().0)
+}
+
+/// `held_server`, which also says on `reached` when a download is held.
+fn held_server_saying(
+    manifest: Vec<u8>,
+    data: Vec<Vec<u8>>,
+    held: std::sync::mpsc::Receiver<()>,
+    reached: std::sync::mpsc::Sender<()>,
+) -> std::sync::Arc<dyn mg_nwsync::fetch::Fetch> {
+    use mg_core::sha1::sha1;
+    let reached = std::sync::Mutex::new(reached);
+    let hex = mg_nwsync::sha1_hex(&sha1(&manifest));
+    let held = std::sync::Mutex::new(held);
+    mg_nwsync::fetch::from_fn(move |u: &str| {
+        if u.ends_with("/latest") {
+            return Ok(Some(hex.clone().into_bytes()));
+        }
+        if u.ends_with(&format!("manifests/{hex}")) {
+            return Ok(Some(manifest.clone()));
+        }
+        let Some(d) = data.iter().find(|d| u.ends_with(&mg_nwsync::sha1_hex(&sha1(d)))) else {
+            return Ok(None);
+        };
+        let _ = reached.lock().unwrap().send(());
+        let _ = held.lock().unwrap().recv_timeout(std::time::Duration::from_secs(30));
+        Ok(Some(mg_erf::compressedbuf::compress(d, *b"NSYC").unwrap()))
+    })
+}
+
+/// Waits (a deadline that fails) until `done` says so, a frame at a time.
+pub(crate) fn frames_until(
+    h: &mut Harness<'_, Moonglow>,
+    what: &str,
+    done: impl Fn(&Harness<'_, Moonglow>) -> bool,
+) {
+    let started = std::time::Instant::now();
+    while !done(h) {
+        assert!(started.elapsed().as_secs() < 30, "never {what}");
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run_steps(2);
+}
+
+/// Opens Build › NWSync Content… and waits for its look.
+pub(crate) fn nwsync_window(h: &mut Harness<'_, Moonglow>) {
+    h.get_by_label("Build").click();
+    h.run();
+    h.get_by_label("NWSync Content…").click();
+    h.run_steps(1);
+    frames_until(h, "looked", |h| !h.state().nwsync_content.running());
+}
+
+/// The review of PR #53: the module's layers made again once the game
+/// data is free (here a Save while a job holds it) put the NWSync layer
+/// in again and nothing else; a Sync under way goes on, its window open,
+/// and is done. (It was called off, the window closed, silently.)
+#[test]
+fn a_sync_goes_on_while_the_module_s_layers_are_made_again() {
+    use mg_core::sha1::sha1;
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-nwsync-layers-again");
+    let here = b"2DA V2.0\n\n   Label\n0  here\n".to_vec();
+    let away = b"2DA V2.0\n\n   Label\n0  downloaded\n".to_vec();
+    let k_away = ResKey::parse("mg_away", ResType::TWODA).unwrap();
+    let m1 = [(ResKey::parse("mg_here", ResType::TWODA).unwrap(), here), (k_away, away.clone())];
+    let (folder, user, cache) = nwsync_module(&dir, &m1, 1);
+    let entries: Vec<_> = m1.iter().map(|(k, d)| (*k, sha1(d), d.len() as u32)).collect();
+    let manifest = mg_nwsync::manifest::write(&entries);
+    let mut app = game_app(&root, Some(user));
+    app.background_jobs = true;
+    let (go, held) = std::sync::mpsc::channel::<()>();
+    app.nwsync_content.fetch = Some(held_server(manifest, vec![away.clone()], held));
+    app.open_module(&folder);
+    let mut h = harness(app, 1200.0, 800.0);
+    h.run();
+    nwsync_window(&mut h);
+    h.get_by_label("Sync").click();
+    frames_until(&mut h, "syncing", |h| h.state().nwsync_content.syncing());
+
+    // A job holds the game data; a Save meanwhile has the module's layers
+    // made again once it is free.
+    let (free, job) = std::sync::mpsc::channel::<()>();
+    h.state_mut().start_job_for_tests("Held", move |_| {
+        let _ = job.recv();
+    });
+    h.state_mut().actions.push(mg_ui::Action::Save);
+    h.run_steps(2);
+    assert!(h.state().game_changes_waiting(), "the layers wait for the game data");
+    free.send(()).unwrap();
+    frames_until(&mut h, "the layers made", |h| {
+        !h.state().busy() && !h.state().game_changes_waiting()
+    });
+    let c = &h.state().nwsync_content;
+    assert!(c.syncing(), "the Sync goes on");
+    assert!(c.open, "its window open");
+    assert!(c.mounted.as_ref().is_some_and(|m| m.layer.is_ok()), "the layer in again");
+
+    go.send(()).unwrap();
+    frames_until(&mut h, "synced", |h| h.state().nwsync_content.synced.is_some());
+    frames_until(&mut h, "looked", |h| !h.state().nwsync_content.running());
+    let c = &h.state().nwsync_content;
+    assert_eq!(c.error, None);
+    assert!(c.synced.as_deref().is_some_and(|l| l.starts_with("1 data file of 1 downloaded")));
+    assert!(mg_nwsync::Cache::new(&cache).contains(&sha1(&away)));
+    let game = h.state().game.as_ref().unwrap();
+    assert_eq!(game.resman.get(&k_away).unwrap().into_owned(), away);
+}
+
+/// The review of PR #53: a Sync that brings a newer manifest while
+/// something holds the game data has it put in once the data is free (the
+/// log saying so meanwhile), where the game data kept the older manifest,
+/// silently. The newer manifest's resource is then read.
+#[test]
+fn a_synced_manifest_waits_for_the_game_data_to_be_free() {
+    use mg_core::sha1::sha1;
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-nwsync-remount-held");
+    let here = b"2DA V2.0\n\n   Label\n0  here\n".to_vec();
+    let new = b"2DA V2.0\n\n   Label\n0  new\n".to_vec();
+    let k_here = ResKey::parse("mg_here", ResType::TWODA).unwrap();
+    let k_new = ResKey::parse("mg_new", ResType::TWODA).unwrap();
+    let m1 = [(k_here, here.clone())];
+    let (folder, user, _cache) = nwsync_module(&dir, &m1, 1);
+    let m1_sha = sha1(&mg_nwsync::manifest::write(&[(k_here, sha1(&here), here.len() as u32)]));
+    let m2 = mg_nwsync::manifest::write(&[
+        (k_here, sha1(&here), here.len() as u32),
+        (k_new, sha1(&new), new.len() as u32),
+    ]);
+    let mut app = game_app(&root, Some(user));
+    app.background_jobs = true;
+    let (go, held) = std::sync::mpsc::channel::<()>();
+    app.nwsync_content.fetch = Some(held_server(m2.clone(), vec![new.clone()], held));
+    app.open_module(&folder);
+    let mut h = harness(app, 1200.0, 800.0);
+    h.run();
+    let sha_in = |h: &Harness<'_, Moonglow>| {
+        let m = h.state().nwsync_content.mounted.as_ref();
+        m.and_then(|m| m.layer.as_ref().ok()).map(|l| l.sha1)
+    };
+    assert_eq!(sha_in(&h), Some(m1_sha));
+    nwsync_window(&mut h);
+    h.get_by_label("Sync").click();
+    frames_until(&mut h, "syncing", |h| h.state().nwsync_content.syncing());
+
+    // A job holds the game data as the Sync ends.
+    let (free, job) = std::sync::mpsc::channel::<()>();
+    h.state_mut().start_job_for_tests("Held", move |_| {
+        let _ = job.recv();
+    });
+    go.send(()).unwrap();
+    frames_until(&mut h, "synced", |h| h.state().nwsync_content.synced.is_some());
+    assert!(h.state().game_changes_waiting(), "the new manifest waits for the game data");
+    assert_eq!(sha_in(&h), Some(m1_sha), "not yet");
+    let load_orders = h.state().load_orders();
+    let said = h.state().log.entries.iter().any(|(_, m)| m.starts_with("The game data is still"));
+    assert!(said, "the log says it waits");
+
+    free.send(()).unwrap();
+    frames_until(&mut h, "the layers made", |h| {
+        !h.state().busy() && !h.state().game_changes_waiting()
+    });
+    frames_until(&mut h, "looked", |h| !h.state().nwsync_content.running());
+    assert_eq!(sha_in(&h), Some(sha1(&m2)), "the newer manifest in the game data");
+    assert!(h.state().load_orders() > load_orders, "the load order said to have changed");
+    let game = h.state().game.as_ref().unwrap();
+    assert_eq!(game.resman.get(&k_new).unwrap().into_owned(), new);
+}
+
+/// The review of PR #53: a Sync under way as its module closes is called
+/// off and not waited for, but nothing else starts until its thread has
+/// ended (the next module's window waits, then looks); what it made is
+/// not the next module's and is thrown away.
+#[test]
+fn a_sync_left_by_a_module_closed_ends_before_another_starts() {
+    use mg_core::sha1::sha1;
+    let root = mg_testkit::corpus!();
+    let dir = mg_testkit::scratch_dir("ui-nwsync-left");
+    let here = b"2DA V2.0\n\n   Label\n0  here\n".to_vec();
+    let away = b"2DA V2.0\n\n   Label\n0  downloaded\n".to_vec();
+    let m1 = [
+        (ResKey::parse("mg_here", ResType::TWODA).unwrap(), here),
+        (ResKey::parse("mg_away", ResType::TWODA).unwrap(), away.clone()),
+    ];
+    let (folder, user, _cache) = nwsync_module(&dir, &m1, 1);
+    let entries: Vec<_> = m1.iter().map(|(k, d)| (*k, sha1(d), d.len() as u32)).collect();
+    let manifest = mg_nwsync::manifest::write(&entries);
+    let mut app = game_app(&root, Some(user));
+    app.background_jobs = true;
+    let (go, held) = std::sync::mpsc::channel::<()>();
+    let (reached, held_now) = std::sync::mpsc::channel::<()>();
+    app.nwsync_content.fetch = Some(held_server_saying(manifest, vec![away], held, reached));
+    app.open_module(&folder);
+    let mut h = harness(app, 1200.0, 800.0);
+    h.run();
+    nwsync_window(&mut h);
+    h.get_by_label("Sync").click();
+    frames_until(&mut h, "syncing", |h| h.state().nwsync_content.syncing());
+    // Closed while its download is held (closed sooner, the Sync sees its
+    // cancel and ends before the module is open again).
+    held_now.recv_timeout(std::time::Duration::from_secs(30)).expect("the download is held");
+
+    h.state_mut().close();
+    h.state_mut().open_module(&folder);
+    h.run_steps(2);
+    let c = &h.state().nwsync_content;
+    assert!(!c.syncing() && c.running(), "the last module's Sync not yet ended");
+    nwsync_window_opened(&mut h);
+    assert!(h.state().nwsync_content.survey.is_none(), "no look while it runs");
+
+    go.send(()).unwrap();
+    frames_until(&mut h, "ended", |h| !h.state().nwsync_content.running());
+    let c = &h.state().nwsync_content;
+    assert_eq!(c.synced, None, "the last module's Sync thrown away");
+    assert!(c.survey.is_some(), "the window looked once it ended");
+}
+
+/// How long the NWSync layer of a persistent world's manifest takes to be
+/// put into the game data (`mount`, which a Sync's end and the module's
+/// opening run on the window's thread): 220,000 resources, as the one
+/// measured (218,936), read from Moonglow's cache, and from the game's
+/// storage (the manifest registered as a player's game has it). Run by
+/// hand, in release:
+/// `cargo test -p mg-ui --release --test app -- --ignored nwsync_mount_is_timed --nocapture`.
+#[test]
+#[ignore]
+fn nwsync_mount_is_timed() {
+    use mg_core::sha1::sha1;
+    let root = mg_testkit::corpus!();
+    let types = [ResType::TWODA, ResType::MDL, ResType::TGA, ResType::DDS, ResType::NCS];
+    let entries: Vec<_> = (0..220_000u32)
+        .map(|i| {
+            let k = ResKey::parse(&format!("pw_{i:07}"), types[i as usize % types.len()]).unwrap();
+            (k, sha1(&i.to_le_bytes()), 1000 + i % 5000)
+        })
+        .collect();
+    let manifest = mg_nwsync::manifest::write(&entries);
+    for from_storage in [false, true] {
+        let dir = mg_testkit::scratch_dir(&format!("ui-nwsync-mount-timed-{from_storage}"));
+        let user = user_folder(&dir, &["hak"]);
+        if from_storage {
+            mg_nwsync::fixtures::write_storage(
+                &user.join("nwsync"),
+                &[mg_nwsync::fixtures::Registered {
+                    sha1: sha1(&manifest),
+                    origin_url: NWSYNC_URL.into(),
+                    created_at: 1,
+                    last_used_at: 1,
+                    // (The manifest's own bytes are what is read; the
+                    // fixture writes its resources' rows one at a time.)
+                    resources: Vec::new(),
+                    cached: Some(manifest.clone()),
+                }],
+                &[Vec::new()],
+            );
+        } else {
+            let cache = mg_nwsync::Cache::new(dir.join("cache"));
+            cache.put_manifest(&sha1(&manifest), "", &manifest).unwrap();
+            cache.set_latest(NWSYNC_URL, &sha1(&manifest)).unwrap();
+        }
+        let settings = mg_nwsync::Settings {
+            url: NWSYNC_URL.into(),
+            manifest: mg_nwsync::Wanted::Latest,
+            cache: Some(dir.join("cache")),
+            auth: None,
+        };
+        let install = mg_resman::GameInstall::new(&root, Some(user.clone()), "en");
+        let mut game = shared_game_data(&root, Some(user));
+        let on_disk = mg_module::nwsync_content::OnDisk::default();
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let m = mg_module::nwsync_content::mount(
+                &mut game.resman,
+                &install,
+                &settings,
+                &on_disk,
+                &mut Vec::new(),
+            );
+            times.push(started.elapsed());
+            let l = m.layer.as_ref().unwrap();
+            assert_eq!(l.resources, 220_000);
+            let from = if from_storage {
+                mg_nwsync::ManifestFrom::GameStorage
+            } else {
+                mg_nwsync::ManifestFrom::Cache
+            };
+            assert_eq!(l.from, from);
+        }
+        let what = if from_storage { "the game's storage" } else { "the cache" };
+        println!("mount of 220,000 resources ({} bytes) from {what}: {times:.0?}", manifest.len());
+    }
+}
+
+/// Opens Build › NWSync Content… without waiting for anything.
+fn nwsync_window_opened(h: &mut Harness<'_, Moonglow>) {
+    h.get_by_label("Build").click();
+    h.run();
+    h.get_by_label("NWSync Content…").click();
+    h.run_steps(2);
 }
 
 /// A module whose hak and talk table come from NWSync, for Test Module:
@@ -1755,7 +2123,7 @@ fn nwsync_haks_for_test_module_and_the_cache_cleaned_up() {
     let test_dir = dir.join("test-user");
     let o = mg_module::nwsync_content::WriteOptions::default();
     let said = mg_ui::test_module::with_content(&module, &install, &user, &test_dir, &o).unwrap();
-    assert!(said.starts_with("1 haks from NWSync manifest"), "{said}");
+    assert!(said.starts_with("1 hak from NWSync manifest"), "{said}");
     assert!(said.contains("the talk table mytlk.tlk") && said.contains("1 written now"), "{said}");
     let hak = std::fs::read(test_dir.join("hak/mg_sync.hak")).unwrap();
     let erf = mg_erf::Erf::read(&hak).unwrap();
@@ -3043,6 +3411,7 @@ fn closing_the_window_asks_first() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_game_moonglow_did_not_start_is_known_before_a_test() {
+    let _games = TEST_GAMES.lock().unwrap_or_else(|e| e.into_inner());
     let dir = mg_testkit::scratch_dir("ui-other-game");
     let (root, user, elsewhere) = (dir.join("root"), dir.join("user"), dir.join("elsewhere"));
     let client = root.join("bin/linux-x86/nwmain-linux");
@@ -3124,6 +3493,110 @@ fn a_game_moonglow_did_not_start_is_known_before_a_test() {
         "{said:?}"
     );
     assert!(said.iter().any(|m| *m == format!("Testing {name}")), "{said:?}");
+}
+
+/// Options › Test Module's command (GitHub issue 52): Test Module runs it
+/// in place of the game, the module filled in, its output in the log as
+/// it comes and how it ended said; with Then start the game, the game
+/// joins the server once one answers at the address (a stand-in answering
+/// the game's query; `true` as the client), and the next test stops the
+/// command still running first: a test of the command's own, or the
+/// game's.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_module_runs_a_command_of_the_builders_own() {
+    use mg_ui::settings::TestStarts;
+    use std::time::{Duration, Instant};
+    let _games = TEST_GAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = mg_testkit::scratch_dir("ui-test-command");
+    let (root, user) = (dir.join("root"), dir.join("user"));
+    let client = root.join("bin/linux-x86/nwmain-linux");
+    for d in [client.parent().unwrap(), &user.join("modules")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let Some(truth) = true_program() else { return };
+    std::fs::copy(&truth, &client).unwrap();
+    let file = user.join("modules/My Module.mod");
+    std::fs::copy(sample_module(&dir), &file).unwrap();
+    let mut app = game_app_with(&root, Some(user.clone()), NoDialogs::default());
+    app.settings.no_last_area = true;
+    app.settings.test_starts = TestStarts::Command;
+    app.settings.test_command =
+        "echo \"said {module_name} in $(basename \"$PWD\")\"; echo oops >&2; exit 3".into();
+    app.open_module(&file);
+    let mut h = window_harness(app);
+    h.run_steps(2);
+    let until = |h: &mut Harness<'_, Moonglow>, from: usize, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            h.run_steps(1);
+            let log = &h.state().log.entries[from..];
+            if log.iter().any(|(_, m)| m.contains(what)) {
+                return log.to_vec();
+            }
+            assert!(Instant::now() < deadline, "no {what:?} in {log:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let from = h.state().log.entries.len();
+    h.state_mut().actions.push(mg_ui::Action::TestModule);
+    let log = until(&mut h, from, "the command ended with exit code 3");
+    let (info, warn) = (mg_ui::Level::Info, mg_ui::Level::Warning);
+    assert!(log.contains(&(info, "  said My Module in modules".into())), "{log:?}");
+    assert!(log.contains(&(warn, "  oops".into())), "{log:?}");
+    assert!(!log.iter().any(|(_, m)| m.starts_with("Testing ")), "no game: {log:?}");
+
+    // Then start the game: once the address answers.
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = server.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        while let Ok((_, from)) = server.recv_from(&mut buf) {
+            let _ = server.send_to(b"BNER\x00\x00\x00\x00\x04Test", from);
+        }
+    });
+    let settings = &mut h.state_mut().settings;
+    (settings.test_command, settings.test_joins) = ("sleep 30".into(), true);
+    (settings.test_address, settings.test_password) = (address.clone(), "pw".into());
+    let from = h.state().log.entries.len();
+    h.state_mut().actions.push(mg_ui::Action::TestModule);
+    let log = until(&mut h, from, "Test Module: the game joins ");
+    assert!(
+        log.iter().any(|(_, m)| *m == format!("Test Module: waiting for the server at {address}"))
+    );
+    // (The stand-in game, `true`, ends at once, but is known as running
+    // until its wait is over: the next test would be refused meanwhile, as
+    // with a game still open. CI push 18 caught it so.)
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while mg_ui::test_module::game_running() {
+        assert!(Instant::now() < deadline, "the stand-in game never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The next test stops it first.
+    let from = h.state().log.entries.len();
+    h.state_mut().settings.test_joins = false;
+    h.state_mut().actions.push(mg_ui::Action::TestModule);
+    let log = until(&mut h, from, "Test Module: sleep 30");
+    assert!(
+        log.iter().any(|(_, m)| m == "Test Module: the last test's command stopped"),
+        "{log:?}"
+    );
+    // No command: said, nothing run.
+    let from = h.state().log.entries.len();
+    h.state_mut().settings.test_command.clear();
+    h.state_mut().actions.push(mg_ui::Action::TestModule);
+    let log = until(&mut h, from, "Options › Test Module has no command to run");
+    assert!(!log.iter().any(|(_, m)| m.contains("command stopped")), "{log:?}");
+    // The game's own test stops the command left running too (its server
+    // would hold the game's port).
+    let from = h.state().log.entries.len();
+    h.state_mut().settings.test_starts = TestStarts::Game;
+    h.state_mut().actions.push(mg_ui::Action::TestModule);
+    let log = until(&mut h, from, "Testing My Module");
+    assert!(
+        log.iter().any(|(_, m)| m == "Test Module: the last test's command stopped"),
+        "{log:?}"
+    );
 }
 
 /// A program on `PATH`.

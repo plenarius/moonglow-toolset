@@ -73,6 +73,10 @@ pub struct Context {
     /// The game data, the module layered in as it was then.
     pub game: Option<Arc<GameData>>,
     pub progress: Arc<Progress>,
+    /// The module's NWSync content as the window knew it then, for a
+    /// plugin's `mg.nwsync.status()` (none where its project names no
+    /// source, or the job needs no module).
+    pub nwsync: Option<mg_module::nwsync_content::State>,
 }
 
 type Made = Box<dyn Any + Send>;
@@ -135,7 +139,7 @@ pub(crate) fn wake(ctx: &egui::Context, at_once: bool) {
 }
 
 /// What a thread that panicked said.
-fn panic_text(panic: &Made) -> String {
+pub(crate) fn panic_text(panic: &Made) -> String {
     mg_render::guard::panic_message(&**panic).unwrap_or_else(|| "it stopped unexpectedly".into())
 }
 
@@ -304,6 +308,19 @@ impl Moonglow {
         self.start_job_on(title.into(), false, true, false, work, finish);
     }
 
+    /// [`start_job_to_its_end`](Self::start_job_to_its_end) for work on
+    /// the open module (Add Haks' copy, which the module is then told of):
+    /// let go, as [`start_job`](Self::start_job)'s is, where the module is
+    /// closed or another opened before it ends.
+    pub(crate) fn start_module_job_to_its_end<T: Send + 'static>(
+        &mut self,
+        title: impl Into<String>,
+        work: impl FnOnce(&Context) -> T + Send + 'static,
+        finish: impl FnOnce(&mut Moonglow, T) + 'static,
+    ) {
+        self.start_job_on(title.into(), true, true, true, work, finish);
+    }
+
     pub(crate) fn start_job_on<T: Send + 'static>(
         &mut self,
         title: String,
@@ -348,7 +365,8 @@ impl Moonglow {
         crate::trace::note(format!("job starts: {title}"));
         let progress = Arc::new(Progress::default());
         let game = self.game.clone().filter(|_| reads_game);
-        let context = Context { module, game, progress: progress.clone() };
+        let nwsync = self.plugin_nwsync().filter(|_| needs_module);
+        let context = Context { module, game, progress: progress.clone(), nwsync };
         // (The context, and its share of the game data, is dropped when
         // the work returns: before `finish` may change the game data.)
         let thread =
@@ -387,7 +405,14 @@ impl Moonglow {
     /// worked in: [`crate::nwsync_content_view`]).
     pub(crate) fn job_shown(&self) -> Option<JobShown> {
         let Some(job) = self.job.as_ref() else {
-            return self.nwsync_content.shown();
+            // (Test Module's local server, under way.)
+            // (Its stop in the tip: Build › Stop Test Server.)
+            let local = self.local_run.as_ref().map(|(_, status)| JobShown {
+                title: "Test Module".into(),
+                steps: None,
+                note: format!("{status}\nBuild › Stop Test Server stops it"),
+            });
+            return self.nwsync_content.shown().or(local);
         };
         let p = &job.progress;
         let (done, total) = (p.done.load(Ordering::Relaxed), p.total.load(Ordering::Relaxed));
@@ -510,7 +535,7 @@ pub(crate) fn window(app: &mut Moonglow, ctx: &egui::Context) {
     let (title, progress, started) = (job.title.clone(), job.progress.clone(), job.started);
     let plugin = job.plugin.clone();
     let command = crate::project_commands::running(app);
-    let mut modal = crate::widgets::modal_window(ctx, egui::Id::new("job"));
+    let mut modal = crate::widgets::modal_window(ctx, egui::Id::unique("job"));
     if plugin.is_some() {
         modal = modal.backdrop_color(egui::Color32::TRANSPARENT);
     }

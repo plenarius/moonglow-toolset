@@ -11,6 +11,10 @@
 
 use std::sync::Arc;
 
+// (Moonglow's cache folder the tests' own, set before `main`.)
+#[path = "support/own_cache.rs"]
+mod own_cache;
+
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use mg_core::ResType;
@@ -283,7 +287,7 @@ fn color_button_paste() {
     let mut h = Harness::builder().with_size(egui::vec2(420.0, 420.0)).wgpu().build_ui_state(
         |ui, rgb: &mut [u8; 3]| {
             mg_uikit::apply(ui.ctx(), theme());
-            mg_ui::color_button::edit_srgb(ui, rgb);
+            mg_ui::color_button::edit_srgb(ui, rgb).accessible_name("Color");
         },
         [158, 151, 211],
     );
@@ -419,6 +423,7 @@ fn picture_viewer_zoom() {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(0.0, 40.0 * 9.0),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
     });
     let (_, scale) = still(&mut h);
@@ -527,20 +532,29 @@ fn window_bar_maximize_and_an_older_hak() {
 
 /// Build › NWSync Content…: a module folder whose project names an
 /// NWSync server, the game's storage holding its manifest and the first
-/// of its 61 data files: as it opens (`nwsync-content`), during a Sync
-/// through a slow server of the test's (`nwsync-content-syncing`), and
-/// after (`nwsync-content-synced`).
+/// of its 61 data files, and one of its three haks on disk, newer than the
+/// manifest: as it opens (`nwsync-content`), a Sync through a slow
+/// server of the test's canceled (`nwsync-content-canceled`), a Sync
+/// under way (`nwsync-content-syncing`), after (`nwsync-content-synced`),
+/// and Clean Up Cache's dry run (`nwsync-content-clean-up`).
 #[test]
 #[ignore]
 fn nwsync_content_window() {
     use mg_core::sha1::sha1;
     mg_testkit::gpu::hold();
+    // (Moonglow's cache folder the tests' own, never the user's.)
+    assert_eq!(mg_module::build::cache_dir(), Some(own_cache::dir()));
     let root = mg_testkit::corpus!();
     let dir = mg_testkit::output_dir("screens-nwsync-content");
     let _ = std::fs::remove_dir_all(dir.join("user"));
     let _ = std::fs::remove_dir_all(dir.join("cache"));
     let user = dir.join("user");
     std::fs::create_dir_all(user.join("hak")).unwrap();
+    // (A hak of the builder's, newer than the manifest: used over it.)
+    let mut vfx = mg_erf::ErfWriter::new(*b"HAK ");
+    let table = b"2DA V2.0\n\n   Label\n0  mine\n".to_vec();
+    vfx.add(mg_core::ResRef::from_str("mg_vfx").unwrap(), ResType::TWODA, table).unwrap();
+    std::fs::write(user.join("hak/pw_vfx.hak"), vfx.to_bytes().unwrap()).unwrap();
     let data: Vec<Vec<u8>> = (0..61)
         .map(|i| format!("2DA V2.0\n\n   Label\n0  row{i}\n").repeat(400).into_bytes())
         .collect();
@@ -579,6 +593,16 @@ fn nwsync_content_window() {
     std::fs::create_dir_all(folder.join(".moonglow")).unwrap();
     let own = format!("[nwsync]\ncache = '{}'\n", dir.join("cache").display());
     std::fs::write(folder.join(".moonglow/user.toml"), own).unwrap();
+    // (A data file no manifest needs, two days old: Clean Up's to remove.)
+    let cache = mg_nwsync::Cache::new(dir.join("cache"));
+    let orphan = vec![7u8; 3 << 20];
+    cache.put(&sha1(&orphan), &orphan).unwrap();
+    let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(cache.data_path(&sha1(&orphan)))
+        .and_then(|f| f.set_modified(two_days))
+        .unwrap();
     let mut app = Moonglow::new(
         Some(GameInstall::new(&root, Some(user), "en")),
         Box::new(NoDialogs::default()),
@@ -606,24 +630,51 @@ fn nwsync_content_window() {
     h.get_by_label("Build").click();
     h.run_steps(2);
     h.get_by_label("NWSync Content…").click();
+    let deadline = std::time::Duration::from_secs(60);
+    // (Until the window's thread is done and its result taken.)
     let wait = |h: &mut Harness<'_, Moonglow>| {
-        for _ in 0..2000 {
+        let started = std::time::Instant::now();
+        while h.state().nwsync_content.running() {
+            assert!(started.elapsed() < deadline, "the window's thread never ended");
             h.run_steps(1);
-            if !h.state().nwsync_content.running() {
-                break;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        h.run_steps(2);
+    };
+    // (Until the window's bar says at least `least` data files are done.)
+    let downloaded = |h: &mut Harness<'_, Moonglow>, least: usize| {
+        let started = std::time::Instant::now();
+        loop {
+            h.run_steps(1);
+            let done = h
+                .query_by(|n| n.label().is_some_and(|l| l.contains(" data files, ")))
+                .and_then(|n| n.accesskit_node().label())
+                .and_then(|l| l.split(' ').next().and_then(|n| n.parse::<usize>().ok()));
+            if done.is_some_and(|n| n >= least) {
+                return;
             }
+            assert!(started.elapsed() < deadline, "never {least} downloaded: {done:?}");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     };
     wait(&mut h);
     shoot(&mut h, &dir, "nwsync-content");
     h.get_by_label("Sync").click();
-    h.run_steps(1);
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    downloaded(&mut h, 8);
+    h.get_all_by_label("Cancel").last().unwrap().click();
+    wait(&mut h);
+    wait(&mut h);
+    shoot(&mut h, &dir, "nwsync-content-canceled");
+    h.get_by_label("Sync").click();
+    downloaded(&mut h, 12);
     shoot(&mut h, &dir, "nwsync-content-syncing");
     wait(&mut h);
     wait(&mut h);
     shoot(&mut h, &dir, "nwsync-content-synced");
+    h.get_by_label("Clean Up Cache…").click();
+    h.run_steps(1);
+    wait(&mut h);
+    shoot(&mut h, &dir, "nwsync-content-clean-up");
     eprintln!("{}", dir.join("nwsync-content-synced.png").display());
 }
 
@@ -1280,6 +1331,7 @@ fn read_only_script_and_text() {
                 unit: egui::MouseWheelUnit::Point,
                 delta,
                 phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
                 modifiers: egui::Modifiers::NONE,
             });
             h.run_steps(20);
@@ -1353,6 +1405,7 @@ fn table_read_only_and_column_widths() {
             unit: egui::MouseWheelUnit::Point,
             delta,
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(60);
@@ -1904,6 +1957,15 @@ fn options_pages_whole() {
             shoot(&mut h, &dir, &file);
         }
     }
+    // Test Module with every field shown: a command of one's own, joining.
+    let draft = h.state_mut().options.as_mut().unwrap();
+    draft.page = P::TestModule;
+    draft.test_starts = mg_ui::settings::TestStarts::Command;
+    draft.test_command =
+        "wsl.exe -d Ubuntu -- bash -lc \"~/start-nwnx-server.sh '{module_path}'\"".into();
+    draft.test_joins = true;
+    h.run();
+    shoot(&mut h, &dir, "test-module");
     eprintln!("{}", dir.display());
 }
 
@@ -3184,6 +3246,7 @@ fn whole_item_icons() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -29.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(3);
@@ -3300,13 +3363,16 @@ fn armor_part_pictures() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -100.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         settle(&mut h);
     }
     let named = |n: &str| wide.map_or(n.to_string(), |w| format!("{n}-{w}"));
     shoot(&mut h, &dir, &named("armor-parts-torso"));
-    h.get_all_by_label("Right shoulder").last().unwrap().click();
+    // (The gallery's Right Shoulder toggle: a click on the list's label,
+    // as this was, did nothing, and the torsos were pictured again.)
+    h.get_by_label("Right Shoulder").click();
     settle(&mut h);
     shoot(&mut h, &dir, &named("armor-parts-shoulder"));
 }
@@ -4384,6 +4450,7 @@ fn store_scrolled() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, dy),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(20);
@@ -4455,10 +4522,9 @@ fn user_manual() {
 fn update_notice_and_options() {
     mg_testkit::gpu::hold();
     let dir = mg_testkit::output_dir("screens");
-    let repo = mg_update::release::REPO;
     let answer = |tag: &str| {
         format!(
-            r#"{{"tag_name":"{tag}","html_url":"https://github.com/{repo}/releases/tag/{tag}","draft":false,"prerelease":false}}"#
+            r#"{{"tag_name":"{tag}","html_url":"https://github.com/jadzziaa/moonglow-toolset/releases/tag/{tag}","draft":false,"prerelease":false}}"#
         )
     };
     let newer = answer("v2.5.0");
@@ -5312,7 +5378,7 @@ fn script_selection() {
     let from = text.find("    int").unwrap();
     let to = text.find("\n\n").unwrap() + 1;
     for (name, range) in [("lines", (from, to)), ("part", (from + 4, from + 13))] {
-        let id = egui::Id::new(("script", key));
+        let id = egui::Id::unique(("script", key));
         let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap_or_default();
         state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
             egui::text::CCursor::new(range.0),
@@ -5416,6 +5482,8 @@ fn creature_wizard() {
         .wgpu()
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run();
+    // (The new module's Area Wizard, as Aurora opens it, closed.)
+    h.state_mut().wizard = None;
     h.state_mut().creature_wizard = Some(Default::default());
     h.run();
     for page in 0..8 {
@@ -5456,6 +5524,8 @@ fn item_wizard_magical() {
         .wgpu()
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run();
+    // (The new module's Area Wizard, as Aurora opens it, closed.)
+    h.state_mut().wizard = None;
     h.state_mut().blueprint_wizard = Some(mg_ui::blueprint_wizard::BlueprintWizard::new(
         mg_module::palette::BlueprintKind::Item,
     ));
@@ -5603,10 +5673,10 @@ fn hak_editor_and_attach() {
         .with_size(egui::vec2(1280.0, 800.0))
         .wgpu()
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
-    h.run();
+    settle(&mut h);
     mg_ui::hak_view::open_hak(h.state_mut());
     h.state_mut().haks[0].hak.add_files(&[added]);
-    h.run();
+    settle(&mut h);
     shoot(&mut h, &dir, "hak-editor");
     // Its resources viewed: a picture, a table (`hak-editor-view-*`).
     for t in [mg_core::ResType::TGA, mg_core::ResType::DDS, mg_core::ResType::TWODA] {
@@ -5614,11 +5684,11 @@ fn hak_editor_and_attach() {
         let Some(item) = items.iter().find(|i| i.key.restype == t) else { continue };
         let name = item.key.to_string();
         h.state_mut().haks[0].filter = name.clone();
-        h.run();
+        settle(&mut h);
         h.get_by_label(&name).click_secondary();
-        h.run();
+        settle(&mut h);
         h.get_all_by_label("View").last().unwrap().click();
-        h.run();
+        settle(&mut h);
         shoot(&mut h, &dir, &format!("hak-editor-view-{t}"));
     }
     h.state_mut().haks[0].filter.clear();
@@ -5627,12 +5697,12 @@ fn hak_editor_and_attach() {
     h.state_mut().haks.clear();
     // (Chess opens on its start area: Module Properties is opened.)
     h.state_mut().actions.push(mg_ui::Action::OpenTab(mg_ui::Tab::ModuleProperties));
-    h.run();
+    settle(&mut h);
     use egui_kittest::kittest::Queryable;
     h.get_by_label("Custom Content").click();
-    h.run();
+    settle(&mut h);
     h.get_by_label("Add Haks and Talk Table…").click();
-    h.run();
+    settle(&mut h);
     shoot(&mut h, &dir, "attach");
 }
 
@@ -7416,7 +7486,7 @@ fn tile_textures() {
         }
         h.run_steps(2);
         popup_item(&h, "Tile Properties").click();
-        h.run_steps(5);
+        settle(&mut h);
         // (The Right Dock's Tile Properties panel, as wide as the dock.)
         h.get_by_label_contains("Textures of ").click();
         h.run_steps(20);
@@ -9512,12 +9582,9 @@ fn armor_part_none() {
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run_steps(4);
     shoot(&mut h, &dir, &format!("{shot}-appearance"));
-    let label = h.get_by_label("Left bicep").rect();
-    h.get_all_by_role(egui::accesskit::Role::ComboBox)
-        .find(|n| {
-            let r = n.rect();
-            r.min.x > label.max.x && (r.center().y - label.center().y).abs() < 6.0
-        })
+    // (The list is named by its label.)
+    h.get_all_by_label("Left bicep")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::ComboBox)
         .expect("the left bicep's list")
         .click();
     h.run_steps(3);
@@ -9905,6 +9972,7 @@ fn module_tree_long_names() {
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(-400.0, 0.0),
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
     });
@@ -9913,6 +9981,7 @@ fn module_tree_long_names() {
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(400.0, 0.0),
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
     });
@@ -10303,6 +10372,7 @@ fn main_window_log_and_tree() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, 200.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
@@ -10484,7 +10554,7 @@ fn script_selection_menu() {
         .wgpu()
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run_steps(3);
-    let id = egui::Id::new(("script", key));
+    let id = egui::Id::unique(("script", key));
     let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap_or_default();
     let (from, to) = (text.find("  if").unwrap(), text.find("    n++").unwrap() + 2);
     let range =
@@ -11198,13 +11268,8 @@ fn grouped_context_menus() {
     };
     // (A submenu opens with the pointer on it, as a builder's.)
     let open = |h: &mut Harness<'_, Moonglow>, name: &str| {
-        // (The menu's: a popup is a layer of its own, with the fewest containers
-        // above it; the toolbars name some of the same words.)
-        let depth = |n: &egui_kittest::Node<'_>| {
-            std::iter::successors(n.accesskit_node().parent(), |p| p.parent()).count()
-        };
-        let all: Vec<_> = h.get_all_by_label(name).collect();
-        let at = all.into_iter().rev().min_by_key(depth).expect(name).rect().center();
+        // (The menu's: the toolbars name some of the same words.)
+        let at = popup_item(h, name).rect().center();
         h.hover_at(at);
         h.run_steps(4);
     };
@@ -11383,7 +11448,7 @@ fn script_editor_large() {
         .wgpu()
         .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
     h.run_steps(3);
-    let id = egui::Id::new(("script", key));
+    let id = egui::Id::unique(("script", key));
     let select = |h: &mut Harness<'_, Moonglow>, from: usize, to: usize| {
         let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap_or_default();
         let c = egui::text::CCursorRange::two(
@@ -11609,6 +11674,7 @@ fn theme_read_only_focus_and_tabs() {
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -120.0),
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
             phase: egui::TouchPhase::Move,
         });
@@ -12216,7 +12282,7 @@ fn shell_doc_tabs() {
         // The script typed in: its dot too.
         let key = ResKey::parse("m1q3_formosa_9", ResType::NSS).unwrap();
         h.state_mut().script_tools.jump = Some((key, 0));
-        let editor = egui::Id::new(("script", key));
+        let editor = egui::Id::unique(("script", key));
         let started = std::time::Instant::now();
         while !h.ctx.memory(|m| m.has_focus(editor)) {
             assert!(started.elapsed().as_secs() < 10, "the script's editor never had the keys");
@@ -12399,6 +12465,7 @@ fn resources_chicken(h: &mut Harness<'_, Moonglow>, size: egui::Vec2, width: Opt
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -300.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
@@ -12565,6 +12632,7 @@ fn shell_tree_well_heights() {
                     unit: egui::MouseWheelUnit::Point,
                     delta: egui::vec2(0.0, -200.0),
                     phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     modifiers: egui::Modifiers::NONE,
                 });
                 h.run_steps(2);
@@ -12688,6 +12756,7 @@ fn shell_tree_narrowed() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(-100.0, 0.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
@@ -14230,13 +14299,15 @@ fn w1_tree_rows_least() {
 /// area's shaders, a preview's model): an area keeps the window
 /// repainting, so not a settle.
 /// The item `name` of the open right-click menu (the header's toggle of
-/// the same name aside): the popup's, with the fewest containers above it.
+/// the same name aside): the last of those in a menu.
 fn popup_item<'t>(h: &'t Harness<'_, Moonglow>, name: &'t str) -> egui_kittest::Node<'t> {
-    let depth = |n: &egui_kittest::Node<'_>| {
-        std::iter::successors(n.accesskit_node().parent(), |p| p.parent()).count()
+    // (In a menu: egui 0.37 hangs a menu under the widget it opened from,
+    // so not by its depth, and a toolbar names some of the same words.)
+    let in_menu = |n: &egui_kittest::Node<'_>| {
+        std::iter::successors(n.accesskit_node().parent(), |p| p.parent())
+            .any(|p| p.role() == egui::accesskit::Role::Menu)
     };
-    let all: Vec<_> = h.get_all_by_label(name).collect();
-    all.into_iter().rev().min_by_key(depth).unwrap_or_else(|| panic!("no menu item {name}"))
+    h.get_all_by_label(name).rfind(in_menu).unwrap_or_else(|| panic!("no menu item {name}"))
 }
 
 fn pictures_shown(h: &mut Harness<'_, Moonglow>) {
@@ -14432,7 +14503,7 @@ fn board_script_pitch() {
             mg_ui::script_tools::line_start(&text, 17),
             mg_ui::script_tools::line_start(&text, 20),
         );
-        let id = egui::Id::new(("script", key));
+        let id = egui::Id::unique(("script", key));
         let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap_or_default();
         state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
             egui::text::CCursor::new(text[..from].chars().count()),
@@ -15505,6 +15576,7 @@ fn choose_victim(h: &mut Harness<'_, Moonglow>, advanced: bool) {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -6.0 * 22.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(10);
@@ -15693,6 +15765,7 @@ fn board_options() {
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Page,
         delta: egui::vec2(0.0, 20.0),
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
     });
@@ -15821,6 +15894,7 @@ fn gff_scrolled_to(h: &mut Harness<'_, Moonglow>, name: &str) {
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(0.0, top - to),
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
     });
@@ -16449,6 +16523,7 @@ fn board_pickers() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -(row.top() - 140.0)),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         pictures_made(&mut h);
@@ -16545,6 +16620,7 @@ fn gallery_as_the_board(h: &mut Harness<'_, Moonglow>, hover: Option<&str>, held
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -30.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
@@ -16626,6 +16702,7 @@ fn gallery_as_the_board(h: &mut Harness<'_, Moonglow>, hover: Option<&str>, held
                 unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(0.0, -10.0),
                 phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
                 modifiers: egui::Modifiers::NONE,
             });
             h.run_steps(2);
@@ -16754,6 +16831,7 @@ fn board_gallery_tiles() {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, -20.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::NONE,
         });
         h.run_steps(2);
@@ -16852,13 +16930,26 @@ fn u26_gallery_views() {
             };
             h.query_all_by_label_contains("Barrel").find(tile).map(|n| n.rect())
         };
+        let grid_top = |h: &Harness<'_, Moonglow>| {
+            (h.query_all_by(|n| {
+                n.role() == egui::accesskit::Role::List
+                    && n.label().as_deref() == Some("Placeables")
+            }))
+            .next()
+            .map(|n| n.rect().top())
+        };
         let start = std::time::Instant::now();
         let down_now = std::cell::Cell::new(false);
         while in_sight(h).is_none() {
             assert!(
-                start.elapsed().as_secs() < 20,
-                "no barrel's picture in sight: {:?} {screen:?}",
-                h.query_all_by_label_contains("Barrel").map(|n| n.rect()).collect::<Vec<_>>()
+                start.elapsed().as_secs() < 30,
+                "no barrel's picture in sight: {:?} {screen:?}, the grid {:?}, down {}",
+                h.query_all_by_label_contains("Barrel").map(|n| n.rect()).collect::<Vec<_>>(),
+                h.query_all_by(|n| n.role() == egui::accesskit::Role::List
+                    && n.label().as_deref() == Some("Placeables"))
+                    .map(|n| n.rect())
+                    .collect::<Vec<_>>(),
+                down_now.get()
             );
             let grid = h
                 .query_all_by(|n| {
@@ -16880,10 +16971,20 @@ fn u26_gallery_views() {
                 unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(0.0, if down { -150.0 } else { 600.0 }),
                 phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
                 modifiers: egui::Modifiers::NONE,
             });
-            pictures_shown(h);
+            // (Until the grid has moved, not a count of frames: a fixed
+            // wait each step once ran the walk past the deadline. At an
+            // end it does not move: a second without it is that.)
+            let was = grid_top(h);
+            let moved = std::time::Instant::now();
+            while grid_top(h) == was && moved.elapsed().as_secs() < 1 {
+                h.step();
+            }
+            settle(h);
         }
+        pictures_shown(h);
         // (The Preview shows it, another row than before the click: the
         // Appearance panel is the dock's other tab, behind.)
         let rows = |h: &Harness<'_, Moonglow>| -> std::collections::BTreeSet<u32> {
@@ -17285,7 +17386,7 @@ fn menus_color_picker_at_a_larger_text() {
             ui.set_style(style.clone());
             let usual = ui.ctx().global_style();
             ui.ctx().set_global_style(style);
-            mg_ui::color_button::edit_srgb(ui, rgb);
+            mg_ui::color_button::edit_srgb(ui, rgb).accessible_name("Color");
             ui.ctx().set_global_style(usual);
         },
         [158, 151, 211],
