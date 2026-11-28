@@ -174,6 +174,15 @@ struct NetGrants {
 /// How a host the user allowed a plugin is kept among its grants.
 const NET_GRANT: &str = "net:";
 
+impl Plugins {
+    /// How many plugins' events wait to run (the tests': a save's event is
+    /// queued only once its haks are written).
+    #[doc(hidden)]
+    pub fn events_waiting(&self) -> usize {
+        self.events.len()
+    }
+}
+
 /// A pane whose selection a plugin's command may run on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -826,6 +835,7 @@ pub(crate) fn check_findings(
             });
             let input = Input {
                 settings: Some(settings.clone()),
+                nwsync: job.nwsync.clone(),
                 ..Input::new(job.module.clone(), job.game.clone())
             };
             match mg_plugin::run_check(plugin, &check.id, input, host) {
@@ -2175,7 +2185,10 @@ impl Moonglow {
                     net: job_net,
                     hak_dir,
                 });
-                let input = Input::new(job.module.clone(), job.game.clone());
+                let input = Input {
+                    nwsync: job.nwsync.clone(),
+                    ..Input::new(job.module.clone(), job.game.clone())
+                };
                 run(input, host)
             },
             move |app, result| {
@@ -2918,7 +2931,7 @@ pub(crate) fn field_widget(
                     drawn.picking = Some((v.clone(), rgb));
                 }
                 // (Its picker closed this frame: it was open the last.)
-                let was_open_id = ui.id().with("color-open");
+                let was_open_id = ui.scope_id().with("color-open");
                 let was_open = ui.data(|d| d.get_temp::<bool>(was_open_id)).unwrap_or(false);
                 ui.data_mut(|d| d.insert_temp(was_open_id, open));
                 drawn.editing = open;
@@ -3283,7 +3296,7 @@ pub(crate) fn tab(app: &mut Moonglow, ui: &mut egui::Ui) {
                 .desired_rows(4)
                 .desired_width(f32::INFINITY)
                 .hint_text("return ctx.module:resources(\"utc\")");
-            crate::widgets::text_area(ui, egui::Id::new("plugin-console"), field);
+            crate::widgets::text_area(ui, egui::Id::unique("plugin-console"), field);
             run_console = ui.add_enabled(app.ws.is_some(), egui::Button::new("Run")).clicked();
             for (l, line) in &app.plugins.console_output {
                 ui.label(egui::RichText::new(line).monospace().color(l.color(ui)));
@@ -3460,7 +3473,7 @@ pub(crate) fn project_window(app: &mut Moonglow, ctx: &egui::Context) {
     });
     let mut answers: Vec<(String, bool)> = Vec::new();
     let modal =
-        crate::widgets::modal_window(ctx, egui::Id::new("plugin-project")).show(ctx, |ui| {
+        crate::widgets::modal_window(ctx, egui::Id::unique("plugin-project")).show(ctx, |ui| {
             crate::widgets::modal_titled_foot(ui, "This Project Comes with Plugins", |ui| {
                 // (Never past the application's window: the modal holds it.)
                 ui.set_width(ui.available_width().min(520.0));
@@ -3574,7 +3587,7 @@ pub(crate) fn settings_window(app: &mut Moonglow, ctx: &egui::Context) {
     let mut open = true;
     let title = format!("Settings: {}", p.manifest.name);
     let footed = crate::widgets::dialog(ctx, &title, &mut open)
-        .id(egui::Id::new("plugin-settings"))
+        .id(egui::Id::unique("plugin-settings"))
         .default_width(460.0)
         .collapsible(false)
         .show_foot(ctx, |ui| {
@@ -3831,7 +3844,7 @@ pub(crate) fn replace_window(app: &mut Moonglow, ctx: &egui::Context) {
     let Some(r) = &app.plugins.replace else { return };
     let m = &r.package.manifest;
     let modal =
-        crate::widgets::modal_window(ctx, egui::Id::new("plugin-replace")).show(ctx, |ui| {
+        crate::widgets::modal_window(ctx, egui::Id::unique("plugin-replace")).show(ctx, |ui| {
             crate::widgets::modal_titled_foot(ui, &format!("Replace {}?", m.name), |ui| {
                 // (Never past the application's window: the modal holds it.)
                 ui.set_width(ui.available_width().min(400.0));
@@ -3867,18 +3880,19 @@ pub(crate) fn replace_window(app: &mut Moonglow, ctx: &egui::Context) {
 /// The question before an installed plugin's folder is deleted.
 pub(crate) fn remove_window(app: &mut Moonglow, ctx: &egui::Context) {
     let Some(r) = &app.plugins.remove else { return };
-    let modal = crate::widgets::modal_window(ctx, egui::Id::new("plugin-remove")).show(ctx, |ui| {
-        crate::widgets::modal_titled_foot(ui, &format!("Remove {}?", r.name), |ui| {
-            // (Never past the application's window: the modal holds it.)
-            ui.set_width(ui.available_width().min(400.0));
-            ui.label(
+    let modal =
+        crate::widgets::modal_window(ctx, egui::Id::unique("plugin-remove")).show(ctx, |ui| {
+            crate::widgets::modal_titled_foot(ui, &format!("Remove {}?", r.name), |ui| {
+                // (Never past the application's window: the modal holds it.)
+                ui.set_width(ui.available_width().min(400.0));
+                ui.label(
                 "Its folder is deleted from the plugins folder. Your modules are not touched: what \
              its commands changed in them stays.",
             );
-            ((), crate::widgets::Foot::new().main("Remove", true).no_enter().cancel())
-        })
-        .1
-    });
+                ((), crate::widgets::Foot::new().main("Remove", true).no_enter().cancel())
+            })
+            .1
+        });
     let (close, pressed) = (modal.should_close(), modal.inner);
     let (yes, no) = (pressed.main(), pressed.cancelled());
     if yes {

@@ -3,7 +3,7 @@ type: Manual Page
 title: Options
 description: The Options tab page by page (folders and the NWSync upload command, area, general with Open editors (as tabs or as floating windows), the graphics backend, script editor with its tips over names, conversation editor, sounds, verify, language, keyboard, updates with installing them automatically and pre-releases) and where the settings are kept.
 tags: [manual, options]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T01:48:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-27T23:23:12Z }
 ---
 
 # Options
@@ -11,7 +11,7 @@ generated: { by: claude-code/claude-opus-5-5, at: 2026-11-26T01:48:00Z }
 **Tools › Options** opens Options, with Aurora's pages (and Moonglow's
 own Updates). It opens as a tab, or as a window of its own with **As
 Floating Windows** (General, Editors), and docks and tabs as the other
-editors do. Its ten pages are listed at the left, each with its icon;
+editors do. Its eleven pages are listed at the left, each with its icon;
 **OK** and **Cancel** sit at the right end of its header. Where a page
 groups its options under headings (Sounds, Verify, Keyboard and Updates
 have none), this chapter does too: Aurora's own first in each, in its
@@ -692,6 +692,35 @@ models of a module with many haks makes Verify much quicker. The log's summary l
 after a Verify names what it left out, not checked, so a module isn't
 taken to be clean for what wasn't looked at. `mg verify --skip` does
 the same from a terminal.
+
+## Test Module
+
+What **Build › Test Module** and **Test From Here** start
+([Build, verify and test](09-build-and-test.md#a-command-of-your-own)):
+
+- **The game, on the module** (the default): the game on the module with
+  your first character, as Aurora's F9 does; a project that uses NWNX is
+  served by a [local server with NWNX](09-build-and-test.md#test-module-with-nwnx)
+  that the game joins.
+- **A command of my own**: the **Command** you type, run by the system's
+  shell in the module's folder once the module is saved, with
+  `{module_path}` and `{module_name}` filled in, its output in the log.
+  **Then start the game, joining the server** waits up to two minutes for
+  a server to answer at **Server address** (`127.0.0.1:5121` when empty)
+  and starts the game connected to it, with the **Player password** if
+  the server has one.
+
+With the game, **Quick Start** is for a project that uses NWNX, whose
+module a local server tests
+([Test Module with NWNX](09-build-and-test.md#test-module-with-nwnx)):
+**Join with a chosen character** has the game join with the open
+project's **Character**, the one chosen for it last, one of your local
+vault's (by name) or **Choose a File…**. It is alone on the character
+list, and you confirm it once there: no argument of the game's skips
+that.
+
+**Minimize Toolset on test module** stays on General's Testing, where
+Aurora has it.
 
 ## Language
 

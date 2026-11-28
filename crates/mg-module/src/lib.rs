@@ -31,11 +31,14 @@ pub mod instances;
 pub mod journal;
 pub mod lighting;
 pub mod lights;
+pub mod links;
 pub mod locks;
+pub mod merge;
 pub mod minimap;
 pub mod models;
 pub mod nasher;
 pub mod new;
+pub mod nwnx;
 pub mod nwsync;
 pub mod nwsync_content;
 pub mod outside;
@@ -55,6 +58,7 @@ pub mod row_uses;
 pub mod script_set;
 pub mod script_wizard;
 pub mod search;
+pub mod server_dir;
 pub mod sounds;
 pub mod stamp;
 pub mod store_setup;
@@ -465,11 +469,8 @@ impl Module {
             Ok(missing) => (missing, None),
             Err(e) => (Vec::new(), Some(e)),
         };
-        let nwsync = (self.project_file.nwsync_settings()).map(|s| {
-            let mut m = nwsync_content::mount(resman, install, &s, &mut missing);
-            m.raised = nwsync_content::raise_haks(resman, &self.project_file.user.above_nwsync);
-            m
-        });
+        let nwsync = (self.project_file.nwsync_settings())
+            .map(|s| self.mount_nwsync(resman, install, &s, &mut missing));
         // The walkmesh bake's rows the haks' table lacks yet, drawn as the
         // project's build will add them (`bake::PENDING_LABEL`).
         let rows = self.project_file.baked_rows().ok();

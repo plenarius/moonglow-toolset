@@ -5,7 +5,10 @@
 //! what the fix was about (the trigger) and without it (the control) on
 //! alternate frames of one run, each with its own renderer and targets,
 //! so that the machine's load and the GPU's clock level are the same for
-//! both and their difference is the cost. Its figures are an area's draw
+//! both and their difference is the cost. The frames are paced as the app
+//! paces them, one drawn while the next is encoded (`FRAME_BLOCKING=1`:
+//! each waited for, which lets the card's clocks settle low), and each
+//! view says the GPU's clock while it was timed. Its figures are an area's draw
 //! alone, not a window's frame (no interface): the scene posed, the
 //! particles moved on, the draws encoded (and the time the thread had the
 //! processor for them, beside the clock's), and the GPU drawing them (its
@@ -14,7 +17,9 @@
 //! - R9: a second view (a two-tile area with a creature, as the model
 //!   viewer shows one, with its ground's shadow) drawn through the same
 //!   renderer between the frames of a large area with the sun's shadows,
-//!   seen from a camera that stays put.
+//!   seen from a camera that stays put; and the same second view drawn
+//!   through a renderer of its own, the measure of what sharing one
+//!   still costs.
 //! - R15: a large area with the sun's shadows, the camera at rest in one
 //!   corner, and an animated creature with a skin (the meshes a cloak's
 //!   are) at the far corner, out of the map's region.
@@ -40,6 +45,7 @@
 //! --ignored --nocapture renderer_fixes`.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use glam::Vec3;
@@ -110,6 +116,57 @@ fn shot(gpu: &Gpu, targets: &Targets, name: &str) {
         .unwrap();
 }
 
+/// The timed frames paced as the app paces them, one on the GPU while
+/// the next is encoded (`FRAME_BLOCKING=1`: each waited for), each
+/// frame's GPU time taken by [`crate::GpuWatch`] (a second view's draw
+/// after an arm's frame too, so that it is not counted in the next).
+struct Pace {
+    watch: crate::GpuWatch,
+    submitted: Vec<wgpu::SubmissionIndex>,
+    timed: Vec<bool>,
+}
+
+impl Pace {
+    fn new(gpu: &Gpu) -> Pace {
+        Pace {
+            watch: crate::GpuWatch::start(&gpu.device),
+            submitted: Vec::new(),
+            timed: Vec::new(),
+        }
+    }
+
+    /// Before a frame is encoded: the one before last done.
+    fn before(&self, gpu: &Gpu) {
+        match self.submitted.len().checked_sub(2) {
+            Some(i) if !crate::blocking() => {
+                let _ = gpu.device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(self.submitted[i].clone()),
+                    timeout: Some(Duration::from_secs(10)),
+                });
+            }
+            _ => wait(gpu),
+        }
+    }
+
+    /// What was drawn last submitted, at `at`: a timed frame or not.
+    fn submitted(&mut self, gpu: &Gpu, at: Instant, timed: bool) {
+        let index = gpu.queue.submit([]);
+        self.watch.submitted(index.clone(), at);
+        self.submitted.push(index);
+        self.timed.push(timed);
+        if crate::blocking() {
+            wait(gpu);
+        }
+    }
+
+    /// The timed frames' GPU times, in order.
+    fn finish(self, gpu: &Gpu) -> Vec<Duration> {
+        wait(gpu);
+        let took = self.watch.finish();
+        took.into_iter().zip(self.timed).filter_map(|(t, timed)| timed.then_some(t)).collect()
+    }
+}
+
 fn wait(gpu: &Gpu) {
     let _ = gpu.device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -158,11 +215,12 @@ fn area(
     model
 }
 
-/// What one area is drawn with: its model and scene, the camera, the
-/// targets and its particles' simulations.
+/// What one area is drawn with: its model and scene (which panes may
+/// share: [`Pane::sharing`]), the camera, the targets and its particles'
+/// simulations.
 struct Pane {
-    model: mg_area::AreaModel,
-    scene: mg_area::AreaScene,
+    model: Rc<mg_area::AreaModel>,
+    scene: Rc<mg_area::AreaScene>,
     view: mg_area::View,
     camera: Camera,
     targets: Targets,
@@ -185,7 +243,27 @@ impl Pane {
         view.creature_shadows = true;
         view.light_shadows = false;
         let targets = Targets::new(gpu, FORMAT, 4, size.0, size.1);
+        let (model, scene) = (Rc::new(model), Rc::new(scene));
         Pane { model, scene, view, camera, targets, sims: HashMap::new() }
+    }
+
+    /// A pane of its own (view, targets, particles) on `self`'s model and
+    /// scene: the same meshes, so that arms drawing them draw from the same
+    /// places in the meshes' pool (an area's scene made after another's
+    /// lies in other chunks, and its draws bind other chunks' buffers more
+    /// or less often: `Drawn::chunks`, which was 3 for one arm's area and
+    /// 2,106 for another's of the same tiles, the most of what told them
+    /// apart).
+    fn sharing(&self, gpu: &Gpu) -> Pane {
+        let (w, h) = (self.targets.color.width(), self.targets.color.height());
+        Pane {
+            model: self.model.clone(),
+            scene: self.scene.clone(),
+            view: self.view,
+            camera: self.camera,
+            targets: Targets::new(gpu, FORMAT, 4, w, h),
+            sims: HashMap::new(),
+        }
     }
 }
 
@@ -220,23 +298,33 @@ struct Times {
 }
 
 /// One arm of a view: a renderer, the area it times and, where `after`
-/// is given, a second view drawn through the same renderer after each of
-/// its frames (not timed).
+/// is given, a second view drawn after each of its frames (not timed):
+/// through the same renderer, or through `apart` where that is given.
 struct Arm {
     name: &'static str,
     renderer: Renderer,
     pane: Pane,
     after: Option<Pane>,
+    /// The second view's own renderer (`None`: the arm's).
+    apart: Option<Renderer>,
     t: Times,
     /// What its last frame drew.
     counts: String,
+    /// How often its last frame bound another chunk's buffers
+    /// (`Drawn::chunks`).
+    chunks: usize,
 }
 
 impl Arm {
-    fn frame(&mut self, gpu: &Gpu, game: &GameData, record: bool) {
+    /// A frame, waited for before and after where `pace` is `None` (its
+    /// GPU time is then not taken), else paced by it.
+    fn frame(&mut self, gpu: &Gpu, game: &GameData, record: bool, mut pace: Option<&mut Pace>) {
         let dt = 1.0 / FPS;
         let p = &mut self.pane;
-        wait(gpu);
+        match pace.as_deref() {
+            Some(pace) => pace.before(gpu),
+            None => wait(gpu),
+        }
         p.view.time += dt;
         let t0 = Instant::now();
         let mut frame = p.scene.scene(&p.model, &p.view);
@@ -247,8 +335,10 @@ impl Arm {
         self.renderer.render_targets(gpu, &game.resman, &frame, &p.camera, &p.targets);
         let t3 = Instant::now();
         let c3 = on_cpu();
-        wait(gpu);
-        let t4 = Instant::now();
+        match pace.as_deref_mut() {
+            Some(pace) => pace.submitted(gpu, t3, record),
+            None => wait(gpu),
+        }
         if record {
             self.t.scene.push(t1 - t0);
             self.t.particles.push(t2 - t1);
@@ -256,12 +346,12 @@ impl Arm {
             if let (Some(a), Some(b)) = (c2, c3) {
                 self.t.encode_cpu.push(b.saturating_sub(a));
             }
-            self.t.gpu.push(t4 - t3);
         }
         let d = self.renderer.drawn;
+        self.chunks = d.chunks;
         self.counts = format!(
             "{} instances, {} lights, {} particles; {} meshes drawn in {} draws, {} of the \
-             game's, {} casting the sun's shadows",
+             game's, {} casting the sun's shadows; {} chunks' buffers bound",
             frame.instances.len(),
             frame.lights.len(),
             frame.particles.iter().map(|b| b.vertices.len() / 4).sum::<usize>(),
@@ -269,14 +359,19 @@ impl Arm {
             d.batches,
             d.game,
             d.sun_casters,
+            d.chunks,
         );
         if let Some(b) = self.after.as_mut() {
             b.view.time += dt;
             let mut frame = b.scene.scene(&b.model, &b.view);
             frame.particles =
                 b.scene.particles(&b.model, &b.view, &mut b.sims, dt, b.camera.view());
-            self.renderer.render_targets(gpu, &game.resman, &frame, &b.camera, &b.targets);
-            wait(gpu);
+            let r = self.apart.as_mut().unwrap_or(&mut self.renderer);
+            r.render_targets(gpu, &game.resman, &frame, &b.camera, &b.targets);
+            match pace {
+                Some(pace) => pace.submitted(gpu, Instant::now(), false),
+                None => wait(gpu),
+            }
         }
     }
 
@@ -285,7 +380,7 @@ impl Arm {
     fn settle(&mut self, gpu: &Gpu, game: &GameData) {
         let start = Instant::now();
         for n in 0.. {
-            self.frame(gpu, game, false);
+            self.frame(gpu, game, false, None);
             let d = self.renderer.drawn;
             let done = d.game_pending == 0 && d.textures_pending == 0;
             if (n >= 8 && done) || start.elapsed() > Duration::from_secs(120) {
@@ -303,21 +398,29 @@ impl Arm {
 }
 
 /// The arms' frames in turn (`count` each, the order swapped every other
-/// round), then a line for each and their difference (the first's less
-/// the second's).
+/// round), then a line for each and their differences (the first's less
+/// each other's).
 fn alternate(view: &str, gpu: &Gpu, game: &GameData, arms: &mut [Arm]) {
     for a in arms.iter_mut() {
         a.settle(gpu, game);
     }
     let from = load();
+    let clocks = mg_testkit::clocks::Clocks::start(crate::sclk_file(&gpu.device));
+    let mut pace = Pace::new(gpu);
+    let mut whose = Vec::new();
     for n in 0..count() {
         let order: Vec<usize> =
             if n % 2 == 0 { (0..arms.len()).collect() } else { (0..arms.len()).rev().collect() };
         for i in order {
-            arms[i].frame(gpu, game, true);
+            arms[i].frame(gpu, game, true, Some(&mut pace));
+            whose.push(i);
         }
     }
-    println!("  {view} (load {from} to {})", load());
+    for (i, took) in whose.into_iter().zip(pace.finish(gpu)) {
+        arms[i].t.gpu.push(took);
+    }
+    let clocks = clocks.finish();
+    println!("  {view} (load {from} to {}; {})", load(), mg_testkit::clocks::said(&clocks));
     for a in arms.iter() {
         let t = &a.t;
         println!(
@@ -340,7 +443,18 @@ fn alternate(view: &str, gpu: &Gpu, game: &GameData, arms: &mut [Arm]) {
             println!("      GPU: {}", each(&t.gpu));
         }
     }
-    if let [a, b, ..] = arms {
+    // (Arms whose meshes lie otherwise in the pool's chunks bind chunks'
+    // buffers more or less often, which is a cost of its own: R9's arms
+    // differed by 0.27 ms for it alone, with 2,106 and 237.)
+    let chunks: Vec<usize> = arms.iter().map(|a| a.chunks).collect();
+    if chunks.iter().any(|&c| c != chunks[0]) {
+        println!(
+            "    (the arms bind chunks' buffers {chunks:?} times: their meshes lie apart in the \
+             pool, and the difference is partly that)"
+        );
+    }
+    let Some((a, rest)) = arms.split_first() else { return };
+    for b in rest {
         let d = |x: &[Duration], y: &[Duration], at: f64| ms(pick(x, at)) - ms(pick(y, at));
         println!(
             "    {:34} scene {:+5.2} ms, particles {:+5.2} ms, draws encoded {:+5.2} ms (on the \
@@ -439,22 +553,40 @@ fn second_view(gpu: &Gpu, game: &GameData) {
         area(game, "ttr01", 2, |_, _| {}, vec![("Creature List", vec![c])])
     };
     let near = camera(Vec3::new(10.0, 10.0, 1.0), 5.0, 0.4, 0.3);
+    // (One scene of each, which every arm draws: their meshes in the same
+    // chunks of the pool.)
+    let big = Pane::new(gpu, game, big(), at_rest, SIZE);
+    let small = Pane::new(gpu, game, small(), near, (700, 1000));
     let mut arms = [
         Arm {
-            name: "a second view between its frames",
+            name: "a second view through its renderer",
             renderer: renderer(gpu, true),
-            pane: Pane::new(gpu, game, big(), at_rest, SIZE),
-            after: Some(Pane::new(gpu, game, small(), near, (700, 1000))),
+            pane: big.sharing(gpu),
+            after: Some(small.sharing(gpu)),
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
+        },
+        Arm {
+            name: "a second view, a renderer its own",
+            renderer: renderer(gpu, true),
+            pane: big.sharing(gpu),
+            after: Some(small.sharing(gpu)),
+            apart: Some(renderer(gpu, true)),
+            t: Times::default(),
+            counts: String::new(),
+            chunks: 0,
         },
         Arm {
             name: "the area alone",
             renderer: renderer(gpu, true),
-            pane: Pane::new(gpu, game, big(), at_rest, SIZE),
+            pane: big,
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
     ];
     println!(
@@ -492,16 +624,20 @@ fn far_creature(gpu: &Gpu, game: &GameData) {
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(true), corner, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
         Arm {
             name: "no creature",
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(false), corner, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
     ];
     println!(
@@ -556,16 +692,20 @@ fn flames(gpu: &Gpu, game: &GameData) {
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(true), whole, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
         Arm {
             name: "no flames",
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(false), whole, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
     ];
     println!(
@@ -671,16 +811,20 @@ fn tints(gpu: &Gpu, game: &GameData) {
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(true), whole, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
         Arm {
             name: "untinted",
             renderer: renderer(gpu, true),
             pane: Pane::new(gpu, game, make(false), whole, SIZE),
             after: None,
+            apart: None,
             t: Times::default(),
             counts: String::new(),
+            chunks: 0,
         },
     ];
     println!(
@@ -774,6 +918,7 @@ fn colored_npcs(gpu: &Gpu, game: &GameData, label: &str) {
         let from = load();
         let mut opened = Vec::new();
         let mut memory = None;
+        let clocks = mg_testkit::clocks::Clocks::start(crate::sclk_file(&gpu.device));
         for _ in 0..3 {
             let mut r = renderer(gpu, false);
             wait(gpu);
@@ -790,15 +935,17 @@ fn colored_npcs(gpu: &Gpu, game: &GameData, label: &str) {
             pane.view.time += 1.0 / FPS;
         }
         let (textures, bytes, meshes) = memory.unwrap_or_default();
+        let clocks = clocks.finish();
         let each: Vec<String> =
             opened.iter().map(|(w, c)| format!("{:.0} ({:.0})", ms(*w), ms(*c))).collect();
         println!(
             "  R12, R13, {what} (load {from} to {}): {plain} with a plain head; {textures} \
              textures kept, {:.1} MiB, {meshes} meshes drawn; the first frame {} ms (on the \
-             processor)",
+             processor); {}",
             load(),
             bytes as f64 / (1024.0 * 1024.0),
-            each.join(", ")
+            each.join(", "),
+            mg_testkit::clocks::said(&clocks)
         );
     }
 }

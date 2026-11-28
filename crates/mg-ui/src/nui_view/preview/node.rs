@@ -18,6 +18,11 @@ pub(super) struct Renderer<'a> {
     pub(super) selected_bounds: &'a mut Option<Rect>,
     pub(super) ancestor_disabled: bool,
     pub(super) context_prefix: Option<&'a str>,
+    /// The window's revision (its generation, and Interact's session's
+    /// stamp where that is what is drawn), where it is known not to have
+    /// changed since the last pass: what is worked out of it alone (a long
+    /// chart's series) is kept under it.
+    pub(super) revision: Option<(u64, Option<u64>)>,
     /// A row of a column with a control of its own width after it: the
     /// row's path, and the right edge its last button without a width
     /// stretches to (`Renderer::children`).
@@ -329,7 +334,7 @@ impl Renderer<'_> {
         let painted_bounds = choices.iter().fold(rect, |bounds, item| bounds.union(*item));
         let response = ui.interact(
             if live { painted_bounds } else { rect },
-            ui.id().with(("canvas", source_path, row)),
+            ui.scope_id().with(("canvas", source_path, row)),
             if !editable {
                 Sense::hover()
             } else if !live || matches!(ty, "slider" | "sliderf") {
@@ -340,7 +345,7 @@ impl Renderer<'_> {
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
+                egui::Role::Button,
                 true,
                 format!(
                     "{} {}{}",
@@ -562,7 +567,7 @@ impl Renderer<'_> {
             "image" => Self::image(c),
             "options" | "tabbar" => Self::choices(ui, c),
             "color_picker" => Self::color_picker(ui, c),
-            "chart" => Self::chart(ui, c),
+            "chart" => self.chart(ui, c),
             "spacer" => {}
             other => {
                 let (p, body, node) = (&c.p, c.body, c.node);

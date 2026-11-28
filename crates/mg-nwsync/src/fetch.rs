@@ -5,7 +5,18 @@
 //! or canceled goes on from there the next time.
 //!
 //! [`Fetch`] is the seam: `mg` and the window give [`Client`] (feature
-//! `http`), the tests answers of their own ([`from_fn`]).
+//! `http`) or, for a repository folder on this computer (a `file://`
+//! source), [`Folder`] ([`for_settings`] picks), the tests answers of
+//! their own ([`from_fn`]).
+//!
+//! A folder's files are read in place, without a server, and go through
+//! the same steps as a server's: checked against their SHA-1 and copied
+//! into the cache, its `latest/` and `used/` marks kept as for a server.
+//! The cache so stays whole on its own: a module opens offline whatever
+//! becomes of the folder (a removable or network drive gone, the
+//! repository pruned or published again), and a clean-up of either never
+//! takes what the other holds. The cost is the disk space of the data
+//! copied.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +25,7 @@ use std::time::Duration;
 use crate::manifest::{self, Entry};
 use crate::{
     Cache, Found, GameStorage, ManifestFrom, Origins, Settings, Sha1, Survey, Wanted, find,
-    parse_sha1, sha1_hex, survey, unpack_checked,
+    parse_sha1, sha1_hex, survey_until, unpack_checked,
 };
 
 /// The most of a manifest that is read (a large persistent world's, 220,000 resources, is
@@ -22,6 +33,12 @@ use crate::{
 pub const MANIFEST_LIMIT: u64 = 256 << 20;
 /// The most of a side file (`latest`, `.json`, `.origin`) that is read.
 pub const SIDE_LIMIT: u64 = 64 << 20;
+/// The most of a data file whose size the manifest doesn't say (one the
+/// game kept without its file: every size 0) that is read. The largest
+/// resource seen on a persistent world's server is 49.8 MB; five times
+/// that leaves room, and [`JOBS`] of them at once are 2 GiB of memory at
+/// most, not the 8 GiB a gigabyte each would be.
+pub const UNKNOWN_SIZE_LIMIT: u64 = 256 << 20;
 /// How many data files are downloaded at once, unless told.
 pub const JOBS: usize = 8;
 /// How many times a data file is asked for before it is given up.
@@ -50,6 +67,57 @@ pub fn from_fn(
         }
     }
     Arc::new(Answers(answer))
+}
+
+/// A repository folder on this computer, read in place: `base` is the
+/// source's `file://` URL as [`at`] builds the files' addresses from it.
+#[derive(Debug, Clone)]
+pub struct Folder {
+    base: String,
+    root: std::path::PathBuf,
+}
+
+impl Folder {
+    /// The folder a `file://` source names; `None` for a server.
+    pub fn of(url: &str) -> Option<Folder> {
+        let root = crate::local_folder(url)?;
+        Some(Folder { base: at(url, ""), root })
+    }
+}
+
+impl Fetch for Folder {
+    fn get(&self, url: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
+        let rel =
+            url.strip_prefix(&self.base).ok_or_else(|| format!("{url} is not in the folder"))?;
+        // (A path of the repository's own, nothing above or beside it.)
+        let rel = std::path::Path::new(rel);
+        if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("{url} is not in the folder"));
+        }
+        if !self.root.is_dir() {
+            return Err(format!("the repository folder {} is not there", self.root.display()));
+        }
+        let path = self.root.join(rel);
+        let said = |e: std::io::Error| format!("{}: {e}", path.display());
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => m,
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(said(e)),
+        };
+        if meta.len() > limit {
+            return Err(format!("{} is larger than it should be", path.display()));
+        }
+        use std::io::Read as _;
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        let file = std::fs::File::open(&path).map_err(said)?;
+        // (Read to the limit: a file grown since it was looked at.)
+        file.take(limit + 1).read_to_end(&mut bytes).map_err(said)?;
+        if bytes.len() as u64 > limit {
+            return Err(format!("{} is larger than it should be", path.display()));
+        }
+        Ok(Some(bytes))
+    }
 }
 
 /// A file of the repository at `url`.
@@ -110,8 +178,9 @@ pub struct Resolved {
 }
 
 /// The manifest of `settings`, the server asked: its latest (kept as the
-/// one to use when it can't be asked), or the pinned one, downloaded into
-/// the cache where neither the cache nor the game's storage has it.
+/// one to use when it can't be asked, once it is here), or the pinned
+/// one, downloaded into the cache where neither the cache nor the game's
+/// storage has it.
 /// Where the server can't be reached, the newest one here ([`find`]),
 /// with a warning; an error where there is none.
 pub fn resolve(
@@ -124,12 +193,7 @@ pub fn resolve(
     let wanted = match settings.manifest {
         Wanted::Pinned(sha) => sha,
         Wanted::Latest => match latest(fetch, url) {
-            Ok(sha) => {
-                cache
-                    .set_latest(url, &sha)
-                    .map_err(|e| format!("{}: {e}", cache.root().display()))?;
-                sha
-            }
+            Ok(sha) => sha,
             Err(e) => {
                 let found = find(url, Wanted::Latest, Some(cache), game).map_err(|none| {
                     format!("{url} could not be asked for its latest manifest ({e}), and {none}")
@@ -145,10 +209,22 @@ pub fn resolve(
         },
     };
     let server_latest = matches!(settings.manifest, Wanted::Latest).then_some(wanted);
+    // (The server's latest is kept as the one to use offline only once it
+    // is here: one named and then not given would be kept, and kept from
+    // a prune, with nothing here to read it from.)
+    let keep_latest = || match server_latest {
+        Some(sha) => {
+            cache.set_latest(url, &sha).map_err(|e| format!("{}: {e}", cache.root().display()))
+        }
+        None => Ok(()),
+    };
     if let Ok(found) = find(url, Wanted::Pinned(wanted), Some(cache), game) {
-        // (The game's has no origins: they are asked for, where the server
-        // has them.)
-        if found.from == ManifestFrom::GameStorage && found.origins.is_none() {
+        keep_latest()?;
+        // (The game's has no origins, and one kept before the server
+        // published them has none either: they are asked for, where the
+        // server has them now. Publishing them again doesn't change the
+        // manifest's SHA-1.)
+        if found.origins.is_none() {
             let hex = sha1_hex(&wanted);
             if let Ok(Some(side)) =
                 fetch.get(&at(url, &format!("manifests/{hex}.origin")), SIDE_LIMIT)
@@ -166,10 +242,17 @@ pub fn resolve(
     }
     match get_manifest(fetch, url, &wanted, cache) {
         Ok(entries) => {
+            keep_latest()?;
             let origins = cache
                 .manifest(&wanted, "origin")
                 .map(|b| Origins::parse(&String::from_utf8_lossy(&b)));
-            let found = Found { sha1: wanted, entries, from: ManifestFrom::Server, origins };
+            let includes_module = crate::source::includes_module(&wanted, Some(cache), game);
+            let from = match crate::local_folder(url) {
+                Some(_) => ManifestFrom::Folder,
+                None => ManifestFrom::Server,
+            };
+            let at = crate::source::time_of(&wanted, from, Some(cache), game);
+            let found = Found { sha1: wanted, entries, from, origins, includes_module, at };
             Ok(Resolved { found, server_latest, warnings: Vec::new() })
         }
         Err(e) if matches!(settings.manifest, Wanted::Pinned(_)) => Err(e),
@@ -231,8 +314,8 @@ fn one(fetch: &dyn Fetch, url: &str, sha: &Sha1, size: u32, cache: &Cache) -> Re
     let hex = sha1_hex(sha);
     let path = format!("data/sha1/{}/{}/{hex}", &hex[0..2], &hex[2..4]);
     // (Compressed data is no bigger than the bytes and a header, but for
-    // data that doesn't compress; a size not known: a gigabyte.)
-    let limit = if size == 0 { 1 << 30 } else { u64::from(size) * 2 + (1 << 20) };
+    // data that doesn't compress; a size not known: `UNKNOWN_SIZE_LIMIT`.)
+    let limit = if size == 0 { UNKNOWN_SIZE_LIMIT } else { u64::from(size) * 2 + (1 << 20) };
     let stored = fetch
         .get(&at(url, &path), limit)?
         .ok_or_else(|| "the server doesn't have it".to_string())?;
@@ -333,7 +416,8 @@ pub enum Step {
 
 /// The manifest of `settings` resolved ([`resolve`]) and the data files
 /// neither the game's storage nor the cache has downloaded into the
-/// cache ([`download`]).
+/// cache ([`download`]). Stopped while it looks, the error is
+/// [`crate::CANCELED`]; while it downloads, [`Downloaded::stopped`].
 pub fn pull(
     fetch: &dyn Fetch,
     settings: &Settings,
@@ -346,7 +430,7 @@ pub fn pull(
     step(Step::Asking);
     let resolved = resolve(fetch, settings, cache, game)?;
     step(Step::Looking);
-    let before = survey(&resolved.found.entries, game, Some(cache))?;
+    let before = survey_until(&resolved.found.entries, game, Some(cache), stop)?;
     let progress = |p: Progress| step(Step::Downloading(p));
     let downloaded = if before.missing.is_empty() || stop() {
         Downloaded { stopped: stop(), ..Default::default() }
@@ -359,37 +443,120 @@ pub fn pull(
 #[cfg(feature = "http")]
 pub use client::Client;
 
+/// What makes the requests for `settings`: a repository folder's
+/// [`Folder`], else the [`Client`], signed in where [`Settings::auth`]
+/// is for the server's host. A sign-in for a server over plain `http://`
+/// to another computer is refused, not sent where anyone on the way
+/// could read it.
+#[cfg(feature = "http")]
+pub fn for_settings(settings: &Settings) -> Result<Arc<dyn Fetch>, String> {
+    if let Some(f) = Folder::of(&settings.url) {
+        return Ok(Arc::new(f));
+    }
+    if let Some(why) = settings.auth.as_ref().and_then(|a| a.refused_for(&settings.url)) {
+        return Err(why);
+    }
+    Ok(Arc::new(Client::new().with_auth(settings.auth.clone())))
+}
+
 #[cfg(feature = "http")]
 mod client {
     //! What is sent is the request alone: `GET` of the address with
-    //! `User-Agent: Moonglow/<version>`. No identifier, cookie or token;
-    //! a proxy is used where the environment names one (`HTTPS_PROXY`).
+    //! `User-Agent: Moonglow/<version>`, and the builder's sign-in
+    //! ([`crate::Auth`]) to its own host where there is one. No
+    //! identifier or cookie; a proxy is used where the environment names
+    //! one (`HTTPS_PROXY`). Redirects are followed here, not by ureq, so
+    //! that the sign-in goes on only to the same scheme, host and port as
+    //! the address first asked.
 
     use std::time::Duration;
 
     use super::Fetch;
+    use crate::Auth;
+    use crate::auth::{origin_of, redirected};
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
     const READ_TIMEOUT: Duration = Duration::from_secs(30);
+    const REDIRECTS: usize = 5;
 
     /// The requests, with ureq (rustls, its own certificates). A server
-    /// may be HTTP or HTTPS, as the game's NWSync allows.
+    /// may be HTTP or HTTPS, as the game's NWSync allows. Its `Debug`
+    /// never shows the sign-in's secret.
     #[derive(Debug, Clone)]
     pub struct Client {
         agent: ureq::Agent,
+        auth: Option<Auth>,
+    }
+
+    /// The agent: through a proxy the environment names where `proxy`.
+    fn agent(proxy: bool) -> ureq::Agent {
+        let config = ureq::Agent::config_builder()
+            .user_agent(format!("Moonglow/{}", mg_core::release::version()))
+            // (Followed in `get`, which decides where the sign-in goes.)
+            .max_redirects(0)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(READ_TIMEOUT))
+            .timeout_per_read(Some(READ_TIMEOUT));
+        let config = if proxy { config } else { config.proxy(None) };
+        config.build().into()
     }
 
     impl Client {
         pub fn new() -> Client {
-            let agent = ureq::Agent::config_builder()
-                .user_agent(format!("Moonglow/{}", mg_core::release::version()))
-                .max_redirects(5)
-                .timeout_connect(Some(CONNECT_TIMEOUT))
-                .timeout_recv_response(Some(READ_TIMEOUT))
-                .timeout_per_read(Some(READ_TIMEOUT))
-                .build()
-                .into();
-            Client { agent }
+            Client { agent: agent(true), auth: None }
+        }
+
+        /// Signed in with `auth` (sent to its host alone). A sign-in to
+        /// this computer, the one sent over plain HTTP, goes through no
+        /// proxy (`HTTP_PROXY`), which would read it on the way.
+        pub fn with_auth(mut self, auth: Option<Auth>) -> Client {
+            if auth.as_ref().is_some_and(|a| crate::auth::loopback(&a.host)) {
+                self.agent = agent(false);
+            }
+            self.auth = auth;
+            self
+        }
+
+        /// Whether the sign-in goes with a request of `url`, as the
+        /// address ureq connects to reads (`ureq::http::Uri`) and as
+        /// [`Auth::sent_to`] does: both, or not at all.
+        fn sent_to<'a>(&'a self, url: &str) -> Option<&'a Auth> {
+            let a = self.auth.as_ref()?;
+            let uri: ureq::http::Uri = url.parse().ok()?;
+            let host = uri.host()?.trim_end_matches('.').to_ascii_lowercase();
+            let https = uri.scheme_str().is_some_and(|s| s.eq_ignore_ascii_case("https"));
+            let userinfo = uri.authority().is_some_and(|au| au.as_str().contains('@'));
+            let ok = !userinfo
+                && host == a.host
+                && (https || crate::auth::loopback(&host))
+                && a.sent_to(url);
+            ok.then_some(a)
+        }
+
+        /// What is said of a refusal (401, 403), with why the sign-in
+        /// was or wasn't sent, never what it is.
+        fn refused(&self, code: u16, sent: bool, first: bool) -> String {
+            match &self.auth {
+                Some(a) if sent => format!(
+                    "the server answered {code}: it refused the sign-in ({} from \
+                     .moonglow/user.toml)",
+                    a.said()
+                ),
+                Some(a) if !first => format!(
+                    "the server answered {code} at the address it redirected to, which the \
+                     sign-in for {} is not sent to",
+                    a.host
+                ),
+                Some(a) => format!(
+                    "the server answered {code}: the sign-in in .moonglow/user.toml is for {}, \
+                     not this server",
+                    a.host
+                ),
+                None => format!(
+                    "the server answered {code}: it asks for a sign-in (a token, or a user and \
+                     password, in [nwsync] of .moonglow/user.toml)"
+                ),
+            }
         }
     }
 
@@ -401,19 +568,59 @@ mod client {
 
     impl Fetch for Client {
         fn get(&self, url: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
-            let mut answer = match self.agent.get(url).call() {
-                Ok(a) => a,
-                Err(ureq::Error::StatusCode(404 | 410)) => return Ok(None),
-                Err(ureq::Error::StatusCode(code)) => {
-                    return Err(format!("the server answered {code}"));
+            let origin = origin_of(url);
+            let mut at = url.to_string();
+            let mut hops = 0;
+            let mut answer = loop {
+                let first = hops == 0;
+                let sent = self.sent_to(&at).filter(|_| first || origin_of(&at) == origin);
+                let mut request = self.agent.get(&at);
+                if let Some(a) = sent {
+                    let mut value =
+                        ureq::http::HeaderValue::from_str(&a.header()).map_err(|_| {
+                            "the sign-in in .moonglow/user.toml can't be sent: it \
+                                      has a line break or control character in it"
+                        })?;
+                    value.set_sensitive(true);
+                    request = request.header(ureq::http::header::AUTHORIZATION, value);
                 }
-                Err(ureq::Error::HostNotFound) => {
-                    return Err("the server's name was not found (not connected?)".into());
+                let a = match request.call() {
+                    Ok(a) => a,
+                    Err(ureq::Error::StatusCode(404 | 410)) => return Ok(None),
+                    Err(ureq::Error::StatusCode(code @ (401 | 403))) => {
+                        return Err(self.refused(code, sent.is_some(), first));
+                    }
+                    Err(ureq::Error::StatusCode(code)) => {
+                        return Err(format!("the server answered {code}"));
+                    }
+                    Err(ureq::Error::HostNotFound) => {
+                        return Err("the server's name was not found (not connected?)".into());
+                    }
+                    Err(ureq::Error::Timeout(_)) => {
+                        return Err("the server didn't answer in time".into());
+                    }
+                    Err(e) => return Err(e.to_string()),
+                };
+                if !a.status().is_redirection() {
+                    break a;
                 }
-                Err(ureq::Error::Timeout(_)) => {
-                    return Err("the server didn't answer in time".into());
+                hops += 1;
+                let to = (a.headers().get(ureq::http::header::LOCATION))
+                    .and_then(|l| l.to_str().ok())
+                    .and_then(|l| redirected(&at, l))
+                    .filter(
+                        |to| matches!(origin_of(to), Some((s, ..)) if s == "http" || s == "https"),
+                    );
+                match to {
+                    Some(to) if hops <= REDIRECTS => at = to,
+                    Some(_) => return Err("the server redirected too many times".into()),
+                    None => {
+                        return Err(format!(
+                            "the server answered {} without an address to go to",
+                            a.status().as_u16()
+                        ));
+                    }
                 }
-                Err(e) => return Err(e.to_string()),
             };
             if answer.body().content_length().is_some_and(|n| n > limit) {
                 return Err(format!("{url} is larger than it should be"));
@@ -426,5 +633,41 @@ mod client {
                 .map(Some)
                 .map_err(|e| format!("the download broke off: {e}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A data file of a size not known (a manifest the game kept without
+    /// its file) is read to a limit a few of at once can hold in memory.
+    #[test]
+    fn a_size_not_known_is_read_to_a_bounded_limit() {
+        let limits = Arc::new(Mutex::new(Vec::new()));
+        let seen = limits.clone();
+        struct Limits(Arc<Mutex<Vec<u64>>>);
+        impl Fetch for Limits {
+            fn get(&self, _: &str, limit: u64) -> Result<Option<Vec<u8>>, String> {
+                self.0.lock().unwrap().push(limit);
+                Ok(None)
+            }
+        }
+        let cache = Cache::new(mg_testkit::scratch_dir("nwsync-fetch-limit"));
+        let sha = mg_core::sha1::sha1(b"x");
+        let d = download(
+            &Limits(seen),
+            "https://a.example",
+            &[(sha, 0), (mg_core::sha1::sha1(b"y"), 1000)],
+            &cache,
+            Options::default(),
+            &|_| {},
+            &|| false,
+        );
+        assert_eq!(d.failed.len(), 2);
+        let mut limits = limits.lock().unwrap().clone();
+        limits.sort();
+        assert_eq!(limits, [1000 * 2 + (1 << 20), UNKNOWN_SIZE_LIMIT]);
+        assert!(limits.iter().all(|l| *l <= 256 << 20), "{limits:?}");
     }
 }

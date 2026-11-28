@@ -94,6 +94,9 @@ pub enum Id {
     ReorientCamera,
     TestModule,
     TestChoose,
+    /// Test Module's local server stopped (and the game joined to it):
+    /// offered while one runs.
+    StopTestServer,
     PackTarget,
     /// A nasher project's files its include leaves out, taken in.
     TakeInLeftOut,
@@ -311,6 +314,7 @@ pub const MENUS: [(&str, &[Item]); 8] = [
             Do(Id::RoundTrip),
             Do(Id::TestModule),
             Do(Id::TestChoose),
+            Do(Id::StopTestServer),
             Do(Id::PackTarget),
             Do(Id::TakeInLeftOut),
             Separator,
@@ -619,6 +623,11 @@ impl Id {
                 "Test Module, Choose Character",
                 "The game asks which character to play",
             ),
+            Id::StopTestServer => (
+                "stop-test-server",
+                "Stop Test Server",
+                "Stop Test Module's local server and the game that joined it",
+            ),
             Id::PackTarget => (
                 "pack-target",
                 "Pack the Project's Module",
@@ -795,6 +804,7 @@ impl Id {
             Id::PackTarget | Id::TakeInLeftOut => {
                 app.ws.as_ref().is_some_and(|ws| ws.module.project.is_some())
             }
+            Id::StopTestServer => app.local_run_under_way(),
             _ => true,
         }
     }
@@ -922,6 +932,7 @@ impl Id {
             | Id::GoToStart
             | Id::TestModule
             | Id::TestChoose => open,
+            Id::StopTestServer => app.local_run_under_way(),
         }
     }
 
@@ -957,6 +968,7 @@ impl Id {
             Id::BuilderCode => "Open a module in a folder or a nasher project first",
             Id::ClaimsTable => "The project keeps no claims table",
             Id::TakeInLeftOut => "nasher.cfg leaves no files out",
+            Id::StopTestServer => "No local test server is running",
             Id::ExportChanged if open && !app.unsaved_module_editors().is_empty() => {
                 "Nothing changed in the module yet: save the editors with unsaved changes first"
             }
@@ -1021,6 +1033,10 @@ impl Id {
             Id::TestModule | Id::TestChoose if !app.test_may_start() => return,
             Id::TestModule => Action::SaveThen(Box::new(Action::TestModule)),
             Id::TestChoose => Action::SaveThen(Box::new(Action::TestModuleChoose)),
+            Id::StopTestServer => {
+                app.stop_local_run();
+                return;
+            }
             Id::PackTarget => Action::PackTarget,
             Id::TakeInLeftOut => Action::TakeInLeftOut,
             Id::Manual => Action::OpenTab(Tab::Manual),
@@ -1214,7 +1230,7 @@ pub(crate) fn ui_scale(app: &Moonglow) -> u16 {
 /// Where the context keeps [`Moonglow::largest_ui_scale`] (for Options'
 /// Interface size row).
 pub(crate) fn largest_ui_scale_id() -> egui::Id {
-    egui::Id::new("largest-ui-scale")
+    egui::Id::unique("largest-ui-scale")
 }
 
 /// Why an interface size is not offered (View › Interface Size, Options).
@@ -1646,6 +1662,10 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     // (Read before the menus are drawn: a row chosen is chosen this frame.)
     let pressed = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
     if was_open.is_some() && !ctx.egui_wants_keyboard_input() {
+        // (The arrow keys are the menus' here, not egui's own menu keys,
+        // which since 0.37 move the keyboard's focus from row to row and
+        // would take Enter for the row they had come to.)
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         if pressed(Key::ArrowDown) {
             if keys.path.is_empty() {
                 keys.path = vec![keys.first(0)];
@@ -1699,7 +1719,7 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     // (egui's menu bar takes the width it is given: given the menus' own,
     // as they took it in the last frame, the Top Bar's buttons follow
     // them. When that changes, the frame is drawn again.)
-    let width_id = ui.id().with("menu-bar-width");
+    let width_id = ui.scope_id().with("menu-bar-width");
     let start = ui.cursor().min.x;
     let width = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(ui.available_width());
     let size = egui::vec2(width.min(ui.available_width()), ui.available_height());
@@ -1707,7 +1727,7 @@ pub(crate) fn menu_bar(app: &mut Moonglow, ui: &mut Ui) {
     ui.allocate_ui_with_layout(size, layout, |ui| {
         type MenuJobs = (u32, egui::FontFamily, std::sync::Arc<[egui::WidgetText]>);
         let font = egui::TextStyle::Button.resolve(ui.style());
-        let jobs_id = ui.id().with("menu-bar-jobs");
+        let jobs_id = ui.scope_id().with("menu-bar-jobs");
         let font_key = (font.size.to_bits(), font.family.clone());
         let jobs = ui
             .data(|d| d.get_temp::<MenuJobs>(jobs_id))
@@ -2172,8 +2192,8 @@ impl CommandRow {
 }
 
 /// The id of a tick's room in a menu row ([`tick_atoms`]).
-fn tick_id() -> egui::Id {
-    egui::Id::new("menu-tick")
+fn tick_id() -> egui::IdSalt {
+    egui::IdSalt::new("menu-tick")
 }
 
 /// A menu row's words after a tick's room (an icon's, 16 px).
@@ -2218,7 +2238,7 @@ fn paint_tick(
     name: &str,
 ) {
     let enabled = r.enabled();
-    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, name));
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, name));
     if let Some(room) = room.filter(|_| on && ui.is_rect_visible(r.rect)) {
         let color = ui.style().interact_selectable(r, lit).text_color();
         Icon::Check.paint(ui.painter(), room, color);
@@ -2527,6 +2547,7 @@ mod tests {
         let mut app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
         app.settings.ui_scale = scale;
         let mut h = egui_kittest::Harness::builder()
+            .with_context_setup(mg_uikit::FieldLabels::install)
             .with_size(egui::vec2(1280.0, 720.0))
             .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
         h.run();
@@ -2631,6 +2652,7 @@ mod tests {
     fn first_frames(scale: Option<u16>, zoom: f32) -> Vec<(f32, u16, Vec<egui::Vec2>)> {
         let app = Moonglow::new(None, Box::new(crate::NoDialogs::default()));
         let mut h = egui_kittest::Harness::builder()
+            .with_context_setup(mg_uikit::FieldLabels::install)
             .with_size(egui::vec2(1280.0, 720.0))
             .build_ui_state(|ui, app: &mut Moonglow| app.ui(ui), app);
         // (The harness drew frames as it was made, at 100%: this run

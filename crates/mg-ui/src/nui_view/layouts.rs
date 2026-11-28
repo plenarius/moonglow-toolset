@@ -126,6 +126,58 @@ pub(super) fn canvas_context(doc: &Value, s: &Settings, state: &State) -> Option
     Some((shown, prefix))
 }
 
+/// The variant edited, shown inside its window ([`canvas_context`]): the
+/// window put together and where the variant is in it, with what it was
+/// put together of.
+pub(in crate::nui_view) struct Context {
+    /// The window's generation and Interact's session's stamp where its
+    /// window is what is shown ([`State::window_gen`],
+    /// `interaction::Session::revision`), and the variant's name; `None`
+    /// where it is not to be kept.
+    at: Option<(u64, Option<u64>, String)>,
+    pub(super) doc: Value,
+    pub(super) prefix: String,
+}
+
+/// [`canvas_context`] of `doc` (the window, or what is shown in its place)
+/// and `s`, taken as it was last put together where the window is known not
+/// to have changed since (`trusted`: the generation proven in this pass,
+/// `at` being of it): a variant of 304 controls was put together anew each
+/// frame (277 µs, the review of November 2026's N13). `at` is `None` where
+/// what is shown is not the window's own (a gesture under way); the
+/// document is then not to be kept ([`Context::keep`]).
+pub(in crate::nui_view) fn kept_context(
+    doc: &Value,
+    s: &Settings,
+    state: &mut State,
+    at: Option<(u64, Option<u64>)>,
+    trusted: bool,
+) -> Option<Context> {
+    let kept = state.context.take();
+    let view = state.edit_view.as_deref()?;
+    let of = at.map(|(generation, session)| (generation, session, view.to_owned()));
+    if let Some(of) = of.as_ref().filter(|_| trusted)
+        && let Some(kept) = kept.filter(|k| k.at.as_ref() == Some(of))
+    {
+        debug_assert!(
+            canvas_context(doc, s, state).is_some_and(|(d, p)| d == kept.doc && p == kept.prefix),
+            "a variant's window changed while kept"
+        );
+        return Some(kept);
+    }
+    state.walks.contexts += 1;
+    let (doc, prefix) = canvas_context(doc, s, state)?;
+    Some(Context { at: of, doc, prefix })
+}
+
+impl Context {
+    /// Whether it may be taken in a later frame: put together of the
+    /// window's own (not a gesture's copy).
+    pub(in crate::nui_view) fn keep(&self) -> bool {
+        self.at.is_some()
+    }
+}
+
 /// The JSON pointer of the group with ID `id` in `node` (itself at
 /// `path`), the first in the order of its keys. (Put together on the way
 /// back from the group, not as a path for every value passed on the way
@@ -569,14 +621,17 @@ mod tests {
             serde_json::to_vec(&doc).unwrap(),
         );
         ws.module.set(ResKey::parse("swap_test", ResType::TXT).unwrap(), settings.bytes());
-        Harness::builder().with_size(egui::vec2(1300.0, 1200.0)).build_ui_state(
-            |ui, app: &mut Moonglow| {
-                let key = ResKey::parse("swap_test", ResType::JUI).unwrap();
-                super::super::panels::test_frame(app, ui, key);
-                app.run_actions();
-            },
-            app,
-        )
+        Harness::builder()
+            .with_context_setup(mg_uikit::FieldLabels::install)
+            .with_size(egui::vec2(1300.0, 1200.0))
+            .build_ui_state(
+                |ui, app: &mut Moonglow| {
+                    let key = ResKey::parse("swap_test", ResType::JUI).unwrap();
+                    super::super::panels::test_frame(app, ui, key);
+                    app.run_actions();
+                },
+                app,
+            )
     }
 
     fn read(h: &Harness<'_, Moonglow>) -> (Value, Settings) {

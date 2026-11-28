@@ -128,6 +128,17 @@ named!(MissingFeats: Ask, Add, Refuse);
 named!(ShadowQuality: Fast, High);
 named!(GraphicsBackend: Automatic, Vulkan, Direct3d12, Metal);
 named!(OpenEditors: Tabs, Floating);
+named!(TestStarts: Game, Command);
+
+/// Options › Test Module › Test Module starts: the game on the module, as
+/// Aurora's F9 does, or a command of the builder's own (a server of
+/// theirs with NWNX, in WSL: GitHub issue 52).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum TestStarts {
+    #[default]
+    Game,
+    Command,
+}
 
 /// Options › General › Editors › Open editors: where an editor opens
 /// when nothing of its kind has a place kept for it
@@ -789,6 +800,12 @@ pub struct Settings {
     /// them (in every area view). Off by default, as Aurora draws nothing
     /// there and the area's edge shows plainest so.
     pub tile_border: bool,
+    /// The area view's Player's Light switch is on: in a dim area, the
+    /// game's player's vision light at the start location
+    /// ([`mg_area::player_light`]), in every area view. Off by default (the
+    /// owner's ruling). Written only when true: an older Moonglow ignores it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub player_light: bool,
     /// The 3D views' Shaders switch (the area header's Lighting popover, the
     /// model view's): the game's own shaders draw what they can, a material's
     /// custom ones among them (`docs/shaders-proposal.md`). `None`: as
@@ -1137,6 +1154,30 @@ pub struct Settings {
     pub drag_windows_anywhere: bool,
     /// Options > General: Minimize Toolset on test module.
     pub minimize_on_test: bool,
+    /// Options › Test Module: what Test Module starts.
+    pub test_starts: TestStarts,
+    /// Options › Test Module: the command run in place of the game
+    /// ([`TestStarts::Command`]), `{module_path}` and `{module_name}`
+    /// filled in (`test_module::fill_in`), by the system's shell.
+    pub test_command: String,
+    /// Options › Test Module: Then start the game: once a server answers
+    /// at [`Settings::test_address`], the game joins it.
+    pub test_joins: bool,
+    /// The server's address the game joins; empty:
+    /// `test_module::DEFAULT_ADDRESS`.
+    pub test_address: String,
+    /// The server's player password, if it has one (kept as typed, in
+    /// these settings: a test server's).
+    pub test_password: String,
+    /// Options › Test Module: Quick start: a project whose module a local
+    /// server tests (with NWNX) is joined with the project's character in
+    /// [`Settings::test_characters`], alone in the server's vault (the
+    /// player still confirms it once on the list).
+    pub test_quick_start: bool,
+    /// The character each project's quick start takes, by the project's
+    /// folder: the `.bic` chosen last (only read).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub test_characters: std::collections::BTreeMap<PathBuf, PathBuf>,
     // (`test_without_steam`, Options > General's Start a Steam copy of the
     // game through Steam for a test, unticked, was retired in 5.1.0: a
     // test follows Read Steam Workshop content,
@@ -1916,6 +1957,21 @@ mod tests {
         let on = Settings { tile_border: true, ..Settings::default() };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert!(back.tile_border);
+    }
+
+    /// The area view's Player's Light: off by default and for settings
+    /// saved before it was (and not written while off); on, kept.
+    #[test]
+    fn the_player_s_light_is_off_by_default_and_kept() {
+        assert!(!Settings::default().player_light);
+        let old: Settings = serde_json::from_str(r#"{"no_grass":true}"#).unwrap();
+        assert!(!old.player_light);
+        assert!(!serde_json::to_string(&Settings::default()).unwrap().contains("player_light"));
+        let on = Settings { player_light: true, ..Settings::default() };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.player_light);
+        let back = Settings::read_fields(&on.saved_text()).expect("it reads").0;
+        assert!(back.player_light);
     }
 
     /// Smooth scrolling: on by default and for settings saved before it
@@ -2877,11 +2933,11 @@ mod tests {
             let retired = ["toolbar_icons_only", "test_without_steam"];
             let kept: Vec<_> =
                 old.into_iter().filter(|(n, _)| !retired.contains(&n.as_str())).collect();
-            // (Eight fields came after the file, Anti-aliasing, two from
+            // (Thirteen fields came after the file, Anti-aliasing, two from
             // develop's Builders' asks, M5's W1's, 5.2.0's W6's Smooth
-            // scrolling, W7's Colored icons, W5's Show declarations in tips
-            // and the fork's bundled plugins: written at their defaults, the
-            // rest as it was.)
+            // scrolling, W7's Colored icons, 5.5.0's six of Options › Test
+            // Module, W5's Show declarations in tips and the fork's bundled
+            // plugins: written at their defaults, the rest as it was.)
             let (added, written): (Vec<_>, Vec<_>) = fields_of(&back)
                 .expect("fields")
                 .into_iter()
@@ -2894,6 +2950,12 @@ mod tests {
                 ("appearance_portrait", "false"),
                 ("no_smooth_scrolling", "false"),
                 ("colored_icons", "false"),
+                ("test_starts", "Game"),
+                ("test_command", "\"\""),
+                ("test_joins", "false"),
+                ("test_address", "\"\""),
+                ("test_password", "\"\""),
+                ("test_quick_start", "false"),
                 ("no_symbol_tips", "false"),
             ]
             .map(|(n, v)| (n.to_string(), v.to_string()));

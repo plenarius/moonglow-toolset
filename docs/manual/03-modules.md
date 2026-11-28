@@ -3,7 +3,7 @@ type: Manual Page
 title: Modules
 description: Modules - opening and saving, where things are used and renaming, find and replace, advanced search, nasher projects, merging in git (mg merge-gff as the merge driver), the project file (moonglow.toml), your builder code, described variables (variables.toml), claimed and protected areas (the claims table), the project's commands (File › Project, update and submit), recovering unsaved work, Module Properties, haks and talk tables, the hak editor, the 2DA editor, import and export.
 tags: [manual, modules, haks, nasher]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T21:15:27Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-27T22:21:06Z }
 ---
 
 # Modules
@@ -686,9 +686,35 @@ with it.
   kept; where they overlap is not looked at), a store's panes by pane,
   an encounter's creatures by blueprint, an item's properties by
   property and subtype, a creature's special abilities by spell.
-- **Every other list** (tiles, skills, conversation nodes) is merged by
-  place: an item is its number in the list, and two items added at one
-  place are a conflict.
+- **A conversation's lines** (NPC entries and PC replies) are numbered by
+  their place in their list, and its links name them by number.
+  Moonglow's Conversation Editor adds a line at the end of its list, so
+  two builders who add lines to one conversation both keep theirs: their
+  lines are numbered after yours, and their links with them (links to a
+  line owned elsewhere too). A line's links merge link by link, a link
+  being the line it leads to; lines both changed merge field by field;
+  the word count both changed is the sum of the two changes. A side that
+  deleted a line (which renumbers every line after it), moved a line
+  under another, or numbered the lines in another order has lines at
+  numbers that were other lines': merged by number with a side that
+  changed lines too, a change would land on the wrong line. That is one
+  **conflict** of all the lines, `CONFLICT /(lines): EntryList 3,
+  ReplyList 4, StartingList 1 -> ours EntryList 3, ReplyList 3,
+  StartingList 1, theirs …`, settled with one side's lines whole
+  (`--prefer`); what isn't lines (the end scripts, the delays) merges
+  as ever. A side that deleted lines merges with one that changed none.
+  Aurora numbers a conversation's lines anew each time it saves one, so
+  a line added there renumbers others, and merging it with another
+  builder's lines is that conflict. So is the next merge of two
+  branches that both go on adding lines after one merged the other's:
+  the merged branch has the other's lines at numbers after its own,
+  which the other branch doesn't, and a rebase of several commits that
+  add lines onto a branch that added lines too meets the same at its
+  second commit. Merge such a conversation by hand, in Moonglow (or
+  take one side's lines with `--prefer` and add the other's again).
+- **Every other list** (tiles, skills) is merged by place: an item is
+  its number in the list, and two items added at one place are a
+  conflict.
 - A list only one side changed is that side's list as it is, order and
   all. Where both changed one of those merged item by item, the order
   one side gave the base's items is kept, and each side's new items go
@@ -707,12 +733,55 @@ runs the driver at the repository's top); `--project DIR` names the
 project where it is somewhere else. A merge that equals your file leaves
 it untouched, byte for byte; one that equals theirs is their file.
 
-**On a conflict** the command exits with an error and writes nothing.
-It prints each conflict with its path, for example `CONFLICT
+**On a conflict** the command exits with an error and leaves your file
+as it was. It prints each conflict with its path, for example `CONFLICT
 /Placeable List[plc_chest "CHEST" at 10, 4.5]/Tag: "CHEST" -> ours
 "RED", theirs "BLUE"`. Git then marks the file as unmerged and leaves
-your version in it. To settle it, take one side's for every conflict in
-that file from git's three copies:
+your version in it.
+
+Beside it the command writes a **conflict file**, the file's name with
+`.conflicts` added (`src/area1.git.json.conflicts`; not `.json`, so
+that a nasher project doesn't take it for a resource): the edits that
+make your version the merge, in the form `mg apply` reads ([Edit
+files](11-command-line.md#setting-fields-and-edit-files)). First
+come their changes that conflict with nothing, then their side of each
+conflict, and each edit says which in its `note`:
+
+```json
+{ "version": 1, "label": "Merge area1.git: theirs' changes, and theirs' side of 1 conflict",
+  "edits": [
+    { "op": "insert_item", "resource": "area1.git", "list": "/Placeable List",
+      "index": 2, "item": { "__struct_id": 9, "Tag": { "type": "cexostring", "value": "RUG" } },
+      "note": "merged: theirs' change, which conflicts with nothing (keep it)" },
+    { "op": "set_field", "resource": "area1.git", "field": "/Placeable List[0]/Tag",
+      "value": { "type": "cexostring", "value": "BLUE" },
+      "note": "conflict 1 of 1, theirs' side: /Placeable List[plc_chest \"CHEST\" at 10, 4.5]/Tag (ours \"RED\", theirs \"BLUE\"); take this out to keep ours'" }
+  ] }
+```
+
+Applied as it is, it takes their side of every conflict. To keep yours
+of one, take that conflict's edits out of the file, and keep the rest in
+their order. Conflicts whose edits overlap (both sides reordered a list
+and both changed a value in it: the order's edits put items in other
+places) are one group, said in its note (`conflicts 1 and 2 of 2`):
+take both out or neither.
+Then apply it to the project (the folder with `nasher.cfg`) or the
+module folder, and tell git the file is merged:
+
+```sh
+mg apply . src/area1.git.json.conflicts
+git add src/area1.git.json
+rm src/area1.git.json.conflicts
+```
+
+"Ours" and "theirs" are git's: in a `git merge` or `git pull`, ours
+is the branch you are on and theirs the one merged into it; in a `git
+rebase`, ours is the branch you rebase onto and theirs your own
+commits. With `--json`, `conflict_file` names the file and each
+conflict's `edits` lists its edits by their place in it (0 first).
+
+Or take one side's for every conflict in that file from git's three
+copies:
 
 ```sh
 git show :1:src/area1.git.json > base.json
@@ -762,7 +831,7 @@ beside it, named by it, as its folder holds other modules too:
 `krezk.moonglow.toml` (and `krezk.variables.toml`, below) beside
 `krezk.mod`. There, what is a checkout's or a
 builder's own is not read (the log says so): `[claims]`, `[commands]`,
-`[plugins]`, `[builder]`, `[nwsync]`'s `upload` and `cache`, and
+`[plugins]`, `[builder]`, `[nwsync]`'s `upload`, `cache` and sign-in, and
 `.moonglow/user.toml` are a module folder's or a nasher project's. The
 rest of `[nwsync]` is read there (`source`, `manifest`, `keep`), so a
 `.mod` handed out with its file beside it opens with its NWSync
@@ -895,10 +964,15 @@ Names are matched by globs, whatever their case: `*` any characters,
 | `[claims] protected` | areas (ResRefs, globs) whose Tag and ResRef are [kept](#protected-areas), besides those the table says are merged | none |
 | `[commands]` | the project's [commands](#the-projects-commands), each by its name (letters, digits, `_`, `-`): its text, or `{ run = "…", windows = "…", unix = "…", label = "…" }` (`windows` and `unix` in place of `run` on those systems; `label` its name in the menu) | none |
 | `[nwsync] upload` | the command [Upload](09-build-and-test.md#uploading-to-the-web-server) (Build › Publish to NWSync) runs to send the NWSync folder to the web server, once for each part in turn (`{part}`: `data`, `manifests`, `latest`; `{folder}` the folder), in the folder: its text, or `{ run = "…", windows = "…", unix = "…", input = true }`. Asked about before it first runs, as the commands are. In `.moonglow/user.toml` too, where it wins over the team's | the one in Options › Folders |
-| `[nwsync] source` | the NWSync server players download the module's haks and talk table from, as nwserver's `-nwsyncurl` gives it (`"https://nwsync.example.org"`): Moonglow reads that content from it, [without the hak files](09-build-and-test.md#nwsync-content-instead-of-haks), from the game's own NWSync storage and Moonglow's cache, over the haks on disk. In `.moonglow/user.toml` too, where it wins over the team's, and beside a `.mod` (`krezk.moonglow.toml`) | the haks are read from disk alone |
+| `[nwsync] source` | the NWSync server players download the module's haks and talk table from, as nwserver's `-nwsyncurl` gives it (`"https://nwsync.example.org"`), or a [repository folder](09-build-and-test.md#nwsync-content-instead-of-haks) (`"file:///srv/nwsync"`, on Windows with its drive, `"file:///D:/nwsync"`; a whole path; or `"../nwsync"`: a path starting `./` or `../` is from the project's folder, a `.mod`'s from its folder): Moonglow reads that content from it, [without the hak files](09-build-and-test.md#nwsync-content-instead-of-haks), from the game's own NWSync storage and Moonglow's cache, over the haks on disk. In `.moonglow/user.toml` too, where it wins over the team's, and beside a `.mod` (`krezk.moonglow.toml`) | the haks are read from disk alone |
 | `[nwsync] manifest` | which of the server's manifests: `"latest"` (the newest the server names, or the newest here when it can't be asked), or one manifest's SHA-1, to stay on it. In `.moonglow/user.toml` too, where it wins | `"latest"` |
 | `[nwsync] cache` | the folder Moonglow downloads NWSync data into (a whole path; a first download of a persistent world's content can be gigabytes). From `.moonglow/user.toml` alone: the team's file can't choose where Moonglow writes, nor a `.mod`'s file beside it (a `.mod` has no `.moonglow/user.toml`: Moonglow's own cache is used) | `nwsync` in Moonglow's cache folder (`~/.cache/moonglow`, `%LOCALAPPDATA%\Moonglow\cache`, `~/Library/Caches/Moonglow`) |
+| `[nwsync] token`, or `user` and `password` | the sign-in to a [private NWSync server](09-build-and-test.md#a-private-server): a token (`Authorization: Bearer`), or a user and password (`Basic`). From `.moonglow/user.toml` alone: in the team's file (or beside a `.mod`) it is refused, with the file and line, and never sent. Never shown | none |
+| `[nwsync] host` | the server the sign-in is sent to (`"nwsync.example.org"`), alone: no other host, port or scheme, and no plain `http://` but to this computer. From `.moonglow/user.toml` alone | the host of `source` in `.moonglow/user.toml`; without either, no sign-in is sent (said) |
 | `[nwsync] keep` | how many manifests last used a clean-up of Moonglow's NWSync cache keeps besides the module's own ([Cleaning up the cache](09-build-and-test.md#cleaning-up-the-cache)). In `.moonglow/user.toml` too, where it wins, and beside a `.mod` | 3 |
+| `[nwnx] use` | the servers Moonglow runs for the module (`mg serve`, `mg test`, `mg watch --serve`, [Test Module](09-build-and-test.md#test-module-with-nwnx)) load [NWNX](11-command-line.md#nwnx) (`true`), for every builder who has a `home` set; a builder's own `use = false` (in `.moonglow/user.toml`, which wins) turns it off for them. Linux only: on Windows and macOS the server runs without it, and the Log says so once | NWNX is not used |
+| `[nwnx] home` | NWNX's folder on this machine, the one with `Binaries/` (`NWNX_Core.so` and the plugins) and `NWScript/`: a whole path, `~/` from your home, or from the project's root. The team's is a default; yours, in `.moonglow/user.toml`, wins | none: NWNX is off |
+| `[nwnx] env` | a file of `NAME=value` lines for the server (NWNX's settings: `NWNX_CORE_SKIP_ALL=y`, `NWNX_UTIL_SKIP=n`…), from the project's root; Moonglow adds `LD_PRELOAD` and `NWNX_CORE_LOAD_PATH` itself. In `.moonglow/user.toml` too, where it wins | NWNX's own defaults (every plugin loads) |
 | `[plugins] folder` | the folder of the project's own plugins, from the project's root, inside it ([A project's own plugins](15-plugins.md#a-projects-own-plugins)) | `plugins` |
 | `[plugins."<plugin id>"]` | the values of a plugin's settings of scope `project`, by setting (the id in quotes: it has dots in it). The Plugins tab's Settings… and the plugin itself write them here, the rest of the file as written | the settings' defaults |
 | `[palette.<id>]` | a [palette grouping](#palette-groupings): another way the palettes show their blueprints (Group by), any number of them | the palettes by category alone |
@@ -1648,7 +1722,10 @@ volume of a set (`name.part1.rar`), is unpacked first: Moonglow says
 so. Put the haks in order (highest priority first). Moonglow copies
 them into the user folder's `hak` and `tlk` (asking before replacing
 different files of the same names), lists the haks at the top of the
-module's list and names the talk table. Undo takes back the module's changes; the copies stay.
+module's list and names the talk table. A window shows how far the copy
+is, by its bytes, with **Cancel**: canceled, nothing is copied (each
+file is written beside its place and moved there only once all of them
+are) and the module is as it was. Undo takes back the module's changes; the copies stay.
 `mg attach` does the same from the command line.
 
 A custom talk table (`.tlk`) gives the strings numbered from 16,777,216
@@ -2151,7 +2228,15 @@ folder's files, subfolders included, to look over and save.
   ask of each changed hak by its name, and then go on. The hak editor
   itself reads all of a hak past 2 GiB: extract the resources past the
   mark, or remove the others and use **Save As…**, to split it in two.
-  Saving the module saves open haks too (Ctrl+S is the module's Save).
+  Saving the module saves open haks too (Ctrl+S is the module's Save):
+  the module is written at once, and each changed hak after it, in turn,
+  with the same window and **Cancel**. What the save was for waits for
+  the haks: Test Module (and a project's pack), File › Exit, File ›
+  Close or opening another module go on once they are written, and the
+  plugins hear of the save then. A hak that could not be written, or
+  whose save was canceled, stops it there: its question is asked (saying
+  why, where it failed), and **Don't Save** goes on. A second save asked
+  for while a hak is written is refused, and the log says why.
 - **Reloading:** saving a hak the module uses reads it again.
 - **The game's own haks** (in its `data/hk`, also when opened through a
   folder that is a link into the game's) aren't written: **Save As…**

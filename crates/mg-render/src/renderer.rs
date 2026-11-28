@@ -157,6 +157,9 @@ struct TextureEntry {
     /// The game cuts a mesh by it (`NO_DISCARD` 0): it has alpha, or its
     /// TXI's `alphamean` is below 1 (that decides, where given).
     cut: bool,
+    /// Its alpha mean as the client takes it ([`client_alpha_mean`]):
+    /// static placeables' see-through meshes are drawn by it.
+    alpha_mean: f32,
     blending: Blending,
     env: Option<String>,
     decal: bool,
@@ -236,6 +239,11 @@ struct Slots {
     names: [Option<String>; SLOTS],
     /// The MTR they resolve to (lower case), if any.
     mtr: Option<String>,
+    /// Whether that MTR's own TXI (of its name, `name.txi` beside
+    /// `name.mtr`) says `blending punchthrough`: a mesh whose bitmap
+    /// names the MTR is a cut-out by it ([`Renderer::surface`]). Read
+    /// with the slots, once a material, not once a surface.
+    mtr_cut: bool,
     /// MTR parameters (0: none).
     specularity: f32,
     /// How far a custom pair may offset the mesh, meters: the largest of
@@ -320,6 +328,37 @@ fn alpha_in(t: &mg_image::Texture) -> bool {
     }
 }
 
+/// A texture's alpha mean as the client takes it (`CAurTextureBasic`
+/// +0x30, read from its code and confirmed by running it:
+/// `docs/findings.md`, "Static placeables' see-through meshes go by their
+/// textures' alpha means"). A PLT's is 0.5 (`ConstructImage`); a BioWare
+/// DDS's its header's (read with the image, after the TXI, so over a TXI
+/// `alphamean`); else a TXI's `alphamean`; else, of a picture stored
+/// uncompressed, the mean of its texels' alpha (`ImageGetAlphaMean`: an
+/// `f32` sum of each over 255, in order, by their count; 1 without an
+/// alpha channel); of a compressed one, 0.5 with an alpha channel (DXT3,
+/// DXT5), else 1.
+fn client_alpha_mean(t: &mg_image::Texture, txi: &mg_image::txi::Txi, plt: bool) -> f32 {
+    if plt {
+        return 0.5;
+    }
+    if let Some(header) = t.alpha_mean {
+        return header;
+    }
+    if let Some(mean) = txi.alpha_mean() {
+        return mean;
+    }
+    match (t.format, t.mips.first()) {
+        (mg_image::Format::Rgba8, Some(level)) if t.has_alpha => {
+            let texels = level.as_chunks::<4>().0;
+            let sum = texels.iter().fold(0f32, |s, p| s + f32::from(p[3]) / 255.0);
+            if texels.is_empty() { 0.0 } else { sum / texels.len() as f32 }
+        }
+        (mg_image::Format::Bc2 | mg_image::Format::Bc3, _) => 0.5,
+        _ => 1.0,
+    }
+}
+
 /// Whether a fragment shader's source switches the environment map off.
 fn env_switched_off(source: &str) -> bool {
     defines(source, "ENVIRONMENT_MAP", "0")
@@ -360,6 +399,9 @@ struct Surface {
     /// The game cuts it by its texture's alpha (`NO_DISCARD` 0, with the
     /// draw's own reasons: [`crate::game::no_discard`]).
     cut: bool,
+    /// Its texture's alpha mean as the client takes it
+    /// ([`TextureEntry::alpha_mean`]; 1 untextured).
+    alpha_mean: f32,
     /// What chooses the game's stock pair for it.
     traits: crate::game::Traits,
     /// It reflects an environment map, and that is a cube map.
@@ -421,6 +463,10 @@ struct Draw<'a> {
     twosided: bool,
     depth: f32,
     hint: u32,
+    /// A mesh of mesh `alpha` under 1 drawn in one part: where it comes
+    /// among those of its hint ([`see_through_order`]); [`UNORDERED`]
+    /// for any other draw.
+    order: u16,
     /// Its uniforms' place among the frame's.
     uniform: u32,
     /// Its material's bind group, in [`Renderer::groups`].
@@ -446,9 +492,57 @@ struct Draw<'a> {
     receives: bool,
     /// A see-through draw of the game's that reads the framebuffer's copy
     /// (shiny water with `transparencyhint`, a material's
-    /// `sample_framebuffer`): after the copy, which is made after the
-    /// other see-through meshes' solid parts.
+    /// `sample_framebuffer`), both its parts: after the copy, which is
+    /// made after the other see-through meshes, their soft parts too.
     late: bool,
+}
+
+/// [`Draw::order`] of a draw that is not a mesh of `alpha` under 1 drawn
+/// in one part.
+const UNORDERED: u16 = u16::MAX;
+
+/// The order among themselves of the meshes of mesh `alpha` under 1
+/// drawn in one part (`ordered`), as the client draws them: a static
+/// placeable's (`Some`, its texture's alpha mean) before the dynamic
+/// ones', by the mean, the highest first; the client draws its static
+/// geometry's meshes by texture (`Scene::AddPartsToDrawBuckets` walks
+/// `meshbuckets` in `AurTextureGetOrdering`'s order, the textures sorted
+/// by alpha mean, the highest first) into the draw buckets before the
+/// sorted dynamic objects' (`batch9_static_alpha_mean` in
+/// `client_render.rs`). Those of one mean, and the dynamic ones, keep the
+/// depth's order (the client leaves textures of one mean to `std::sort`
+/// over its whole static texture list, an order Moonglow can't know).
+/// Only these draws are put in this order, in the places the depth gave
+/// them ([`in_client_order`]): how the client orders them against other
+/// see-through meshes was not read.
+fn see_through_order(ordered: bool, static_mean: Option<f32>) -> u16 {
+    match (ordered, static_mean) {
+        (false, _) => UNORDERED,
+        // (Means of 0 to 2 in 15 bits, the highest the smallest.)
+        (true, Some(mean)) => 0x7FFF - (mean.clamp(0.0, 2.0) * 16383.5) as u16,
+        (true, None) => 0x8000,
+    }
+}
+
+/// Puts the ordered draws ([`see_through_order`]) of each run of `draws`
+/// sorted by `keys` (one pass and hint) in their order, in the places
+/// they hold: the other draws keep theirs, and those of one order their
+/// depth's.
+fn in_client_order(keys: &[(u64, u32)], draws: &mut [Draw<'_>]) {
+    let mut start = 0;
+    while start < keys.len() {
+        let run = keys[start].0 >> 32;
+        let end = start + keys[start..].iter().take_while(|k| k.0 >> 32 == run).count();
+        let places: Vec<usize> = (start..end).filter(|&k| draws[k].order != UNORDERED).collect();
+        if places.len() > 1 {
+            let mut ordered: Vec<Draw<'_>> = places.iter().map(|&k| draws[k]).collect();
+            ordered.sort_by_key(|d| d.order);
+            for (&k, d) in places.iter().zip(ordered) {
+                draws[k] = d;
+            }
+        }
+        start = end;
+    }
 }
 
 /// A mesh's pipeline of the game's programs, and a see-through one's
@@ -561,6 +655,12 @@ pub struct Renderer {
     line_copy_pipeline: wgpu::RenderPipeline,
     /// The frame's copies of its line shapes, shape after shape.
     line_copy_buffer: wgpu::Buffer,
+    /// The boxes' edges and lines ([`crate::Scene::boxes`]): the unit
+    /// cube's edges as quads (made once), and the frame's copies.
+    box_edge_pipeline: wgpu::RenderPipeline,
+    box_line_pipeline: wgpu::RenderPipeline,
+    box_cube: wgpu::Buffer,
+    box_buffer: wgpu::Buffer,
     /// What each view keeps from one of its frames to the next.
     views: crate::views::Views<ViewState>,
     /// Animated and dangly meshes' vertices, rewritten every frame.
@@ -573,31 +673,30 @@ pub struct Renderer {
     /// number names there.
     draw_buffer: wgpu::Buffer,
     order_buffer: wgpu::Buffer,
-    frame_group: Option<wgpu::BindGroup>,
-    /// The shadows' mask the frame group binds (0: white) and the view
-    /// it is kept for.
-    frame_mask: (u64, Option<u64>),
+    /// The frame group's buffers' generation (the lights', bones', draws'
+    /// and their order's): one more each time one of them is made again,
+    /// larger, and every view's frame group ([`ViewState::frame_group`])
+    /// is made again on its buffers.
+    frame_buffers: u64,
     batcher: Batcher,
     white: Arc<GpuTexture>,
     white_cube: Arc<GpuTexture>,
-    textures: HashMap<String, Option<Arc<TextureEntry>>>,
-    /// Total GPU bytes held across loaded entries in [`Renderer::textures`].
-    textures_bytes: u64,
-    /// The PLTs' palettes, kept while the textures are.
-    palettes: Arc<crate::Palettes>,
+    /// What is kept of the source the frame draws from (its textures and
+    /// what is worked out of them), and of the others ([`Cache`]).
+    cache: Cache,
+    /// The source [`Renderer::cache`] is of ([`Assets::source`]: 0, the
+    /// source of all that give none).
+    source: u64,
+    /// The other sources' caches, by their sources.
+    caches: HashMap<u64, Cache>,
     /// When the materials and textures were last drawn, and how much of
     /// what isn't drawn lately is kept ([`kept`]).
     kept: kept::Kept,
-    slots: HashMap<SlotKey, Arc<Slots>>,
-    /// The materials' bind groups, and each material's place among them.
-    materials: HashMap<MaterialKey, u32>,
+    /// The materials' bind groups (each source's, at places of their own:
+    /// [`Cache::materials`]).
     groups: Vec<Option<wgpu::BindGroup>>,
     /// Evicted slots in `groups` and `material_keys` ready for reuse.
     free_materials: Vec<u32>,
-    /// Each model's meshes' surfaces, as its instances dress it (two-generation
-    /// cache: misses promote out of `surfaces_prev` before clearing).
-    surfaces: HashMap<SurfaceKey, Arc<[Surface]>>,
-    surfaces_prev: HashMap<SurfaceKey, Arc<[Surface]>>,
     /// Environment maps' names, numbered from 1 (0: none).
     names: HashMap<String, u32>,
     /// Instances' texture renames, numbered from 1 (0: none), by a sum of
@@ -607,11 +706,6 @@ pub struct Renderer {
     renames_made: u32,
     /// Instances' material values, numbered from 1 (0: none).
     value_sets: values::ValueSets,
-    /// Slots with an instance's material values in their MTR's parameters,
-    /// by the slots' place and the values' number: kept, as the game's
-    /// programs keep a material's values by where its parameters are
-    /// ([`crate::game::GameShaders`]'s templates).
-    valued: HashMap<(usize, u32), Arc<Slots>>,
     samplers: HashMap<(bool, bool), wgpu::Sampler>,
     env_sampler: wgpu::Sampler,
     /// A frame's uniforms, bones, replaced vertices, particles, lights,
@@ -631,11 +725,9 @@ pub struct Renderer {
     light_set: Vec<u32>,
     line_vertices: Vec<LineVertex>,
     line_copies: Vec<LineCopyRaw>,
+    box_copies: Vec<BoxRaw>,
     particle_draws: Vec<(ParticleBlend, u32, std::ops::Range<u32>, Option<usize>)>,
     particle_softness: Vec<f32>,
-    /// The particles' materials, by their texture's name: a batch's is
-    /// found by that alone (kept while the materials are).
-    particle_materials: HashMap<Option<String>, u32>,
     /// How many draws the last frame made: Moonglow's, the game's solid
     /// ones and its others.
     made: (usize, usize, usize),
@@ -649,6 +741,62 @@ pub struct Renderer {
     pub textures_apart: bool,
     /// What the last frame drew.
     pub drawn: Drawn,
+}
+
+/// What the renderer keeps of one source of textures ([`Assets::source`]:
+/// the area's load order, a hak's whose model the model viewer draws):
+/// its textures and what is worked out of them by name, which another
+/// source may give otherwise under the same names. The frame's source's
+/// is [`Renderer::cache`], swapped in as a frame draws from another (a
+/// hak's model beside an area view: twice a frame, nothing read again);
+/// a source's is let go of with the source ([`Cache::watch`]), and its
+/// textures not drawn lately as the others' are ([`kept`]).
+#[derive(Default)]
+struct Cache {
+    textures: HashMap<String, Option<Arc<TextureEntry>>>,
+    /// Total GPU bytes held across loaded entries in [`Cache::textures`].
+    textures_bytes: u64,
+    /// The PLTs' palettes, kept while the textures are.
+    palettes: Arc<crate::Palettes>,
+    slots: HashMap<SlotKey, Arc<Slots>>,
+    /// The materials, by their places among the renderer's groups
+    /// ([`Renderer::groups`]).
+    materials: HashMap<MaterialKey, u32>,
+    /// Each model's meshes' surfaces, as its instances dress it (two-generation
+    /// cache: misses promote out of `surfaces_prev` before clearing).
+    surfaces: HashMap<SurfaceKey, Arc<[Surface]>>,
+    surfaces_prev: HashMap<SurfaceKey, Arc<[Surface]>>,
+    /// Slots with an instance's material values in their MTR's parameters,
+    /// by the slots' place and the values' number: kept, as the game's
+    /// programs keep a material's values by where its parameters are
+    /// ([`crate::game::GameShaders`]'s templates).
+    valued: HashMap<(usize, u32), Arc<Slots>>,
+    /// The particles' materials, by their texture's name: a batch's is
+    /// found by that alone (kept while the materials are).
+    particle_materials: HashMap<Option<String>, u32>,
+    /// Whether the source is still held (`None`: the source of all that
+    /// give none, never let go of).
+    watch: Option<std::sync::Weak<u64>>,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (f.debug_struct("Cache"))
+            .field("textures", &self.textures.len())
+            .field("textures_bytes", &self.textures_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Cache {
+    /// Inserts or replaces a texture, keeping `textures_bytes` exact.
+    fn insert_texture(&mut self, name: String, entry: Option<Arc<TextureEntry>>) {
+        let added = entry.as_ref().map_or(0, |e| e.bytes);
+        if let Some(Some(prev)) = self.textures.insert(name, entry) {
+            self.textures_bytes = self.textures_bytes.saturating_sub(prev.bytes);
+        }
+        self.textures_bytes += added;
+    }
 }
 
 /// What a view keeps from one of its frames to the next
@@ -667,6 +815,14 @@ struct ViewState {
     stencil: Option<crate::volume::StencilTarget>,
     /// The shadows' mask, while the view's frames lay shadows.
     mask: Option<crate::shadow::Mask>,
+    /// The frame's bind group (its uniforms, lights, bones, draws, their
+    /// order and the view's shadows' mask), with the buffers' generation
+    /// it was made on ([`Renderer::frame_buffers`]) and the mask's number
+    /// (0: white): kept for the view, as its mask is. (One for the
+    /// renderer, made again whenever another view's frame had come
+    /// between, cost a large area's frame drawn beside a model view a
+    /// fiftieth of a millisecond.)
+    frame_group: Option<(u64, u64, wgpu::BindGroup)>,
     /// The soft particles' bind group on the view's framebuffer copies
     /// (their number): one for the renderer, two views with soft particles
     /// in a frame made it again each.
@@ -678,7 +834,7 @@ struct ViewState {
     /// Cached bind groups on immutable [`Targets`] (`render_targets` only).
     copy_group: Option<wgpu::BindGroup>,
     sun_darken_group: Option<(u64, wgpu::BindGroup)>,
-    lights_darken_group: Option<wgpu::BindGroup>,
+    lights_darken_group: Option<(u64, wgpu::BindGroup)>,
     vol_copy_group: Option<wgpu::BindGroup>,
     vol_darken_groups: [Option<wgpu::BindGroup>; 2],
 }
@@ -687,6 +843,7 @@ impl ViewState {
     /// Lets go of the bind groups on the targets of the view the state was
     /// last drawn for.
     fn forget_groups(&mut self) {
+        self.frame_group = None;
         self.copy_group = None;
         self.sun_darken_group = None;
         self.lights_darken_group = None;
@@ -757,9 +914,20 @@ pub struct Drawn {
     /// The sun's shadow map was drawn in this frame: not where the view's
     /// map held the frame's casters as they are already.
     pub sun_map_drawn: bool,
+    /// The lights' maps drawn in this frame: not those whose tiles held
+    /// their creatures as they are already.
+    pub light_maps_drawn: usize,
+    /// The frame's bind group was made in this frame: not where the
+    /// view's own was kept from its frame before (another view's frames
+    /// between them leave it be), on the same buffers and mask.
+    pub frame_group_made: bool,
     /// The meshes whose lights were chosen anew: not as an earlier frame
     /// chose them for the same ball.
     pub lights_chosen: usize,
+    /// The boxes drawn ([`crate::Scene::boxes`]), and the draws they took:
+    /// one for their edges (where any has one) and one for their lines.
+    pub boxes: usize,
+    pub box_draws: usize,
 }
 
 /// A line's end ([`crate::Line`]), in world space.
@@ -786,6 +954,82 @@ impl LineCopyRaw {
         attributes: &wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4],
     };
 }
+
+/// A [`crate::BoxCopy`] as its draws read it (`line.wgsl`'s `BoxIn`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct BoxRaw {
+    transform: [[f32; 4]; 4],
+    line_color: [f32; 4],
+    edge_color: [f32; 4],
+    /// The line's width and the edge's, pixels (0: none).
+    widths: [f32; 2],
+}
+
+impl BoxRaw {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<BoxRaw>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &wgpu::vertex_attr_array![
+            2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
+            6 => Float32x4, 7 => Float32x4, 8 => Float32x2,
+        ],
+    };
+
+    fn of(b: &crate::BoxCopy) -> BoxRaw {
+        let edge = b.edge.unwrap_or(crate::BoxStroke { width: 0.0, color: [0.0; 4] });
+        BoxRaw {
+            transform: cols(b.transform),
+            line_color: b.line.color,
+            edge_color: edge.color,
+            widths: [b.line.width, edge.width],
+        }
+    }
+}
+
+/// The unit cube's edges as its corners' pairs (`box_corners`' order:
+/// bit 0 x, bit 1 y, bit 2 z).
+const CUBE_EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 3),
+    (3, 2),
+    (2, 0),
+    (4, 5),
+    (5, 7),
+    (7, 6),
+    (6, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
+
+/// The unit cube's edges, each a quad of two triangles: for each corner
+/// of a quad, the edge's two ends with which end the corner is at and its
+/// side (`line.wgsl`'s `BoxIn`'s `a` and `b`).
+fn box_cube_vertices() -> Vec<[[f32; 4]; 2]> {
+    let corner = |i: usize| [(i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32];
+    let mut out = Vec::with_capacity(CUBE_EDGES.len() * 6);
+    for (a, b) in CUBE_EDGES {
+        let (a, b) = (corner(a), corner(b));
+        for (end, side) in
+            [(0.0, -1.0), (1.0, -1.0), (1.0, 1.0), (0.0, -1.0), (1.0, 1.0), (0.0, 1.0)]
+        {
+            out.push([[a[0], a[1], a[2], end], [b[0], b[1], b[2], side]]);
+        }
+    }
+    out
+}
+
+/// The unit cube's edges' quads' corners, as the boxes' draws read them.
+const BOX_CUBE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: 32,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4],
+};
+
+/// How many corners the unit cube's edges' quads have.
+const BOX_CUBE_CORNERS: u32 = 12 * 6;
 
 /// A shape's line ends, as its copies' draws read them.
 const SHAPE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -851,6 +1095,7 @@ fn load_texture(
                 gpu,
                 alpha: false,
                 cut: false,
+                alpha_mean: 1.0,
                 blending: txi.blending(),
                 env: None,
                 decal: false,
@@ -891,6 +1136,9 @@ fn texture_entry(
     role: Role,
     lost: Option<Arc<TextureEntry>>,
 ) -> Option<TextureEntry> {
+    // (Its alpha mean, from the picture as read.)
+    let plt = crate::assets::split_colors(name).1.is_some();
+    let alpha_mean = client_alpha_mean(&t.texture, &t.txi, plt);
     // What the rippling procedure makes of the picture where it doesn't
     // ripple it: of a DDS, a flat gray (the client loses its picture);
     // with `distort 0`, the channels scaled and moved.
@@ -906,7 +1154,6 @@ fn texture_entry(
     // procedure takes it: a compressed texture is a DDS to it.)
     // (A name in colors is a PLT's colored copy: only a PLT is asked for
     // so, `Assets::takes_colors`.)
-    let plt = crate::assets::split_colors(name).1.is_some();
     let compressed = (role.compressed(t.txi.blending(), plt) && !t.txi.arturo())
         .then(|| crate::texture::compressed(gpu, &t.texture, t.txi.mipmap()))
         .flatten();
@@ -923,6 +1170,7 @@ fn texture_entry(
         cube: false,
         alpha,
         cut,
+        alpha_mean,
         gpu,
         blending: t.txi.blending(),
         // (Water reflects its `bumpyshinytexture`, as the game's shiny
@@ -1054,6 +1302,8 @@ struct Waiting;
 /// they read, uploaded.
 struct TextureReader {
     assets: Arc<dyn Assets + Send + Sync>,
+    /// Its source ([`Assets::source`]), whose textures alone it reads.
+    source: u64,
     ask: std::sync::mpsc::Sender<(String, Role)>,
     read: std::sync::mpsc::Receiver<(String, u64, Option<Arc<TextureEntry>>)>,
     /// The names asked for and not yet read.
@@ -1135,8 +1385,10 @@ impl TextureReader {
             started += 1;
         }
         // (No thread to read on: textures are read as they are met.)
+        let source = assets.source().map_or(0, mg_resman::Identity::id);
         (started > 0).then(|| TextureReader {
             assets,
+            source,
             ask,
             read,
             asked: Default::default(),
@@ -1368,9 +1620,11 @@ impl Renderer {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(
-                        !sky && !matches!(pass, Pass::Additive | Pass::Fringe),
-                    ),
+                    // (A see-through mesh's soft part lays its depth too, as
+                    // the client's does: what is drawn after it behind it,
+                    // shiny water, particles, the same mesh's farther
+                    // faces, is hidden: `soft::reading_soft_depth`.)
+                    depth_write_enabled: Some(!sky && pass != Pass::Additive),
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: Default::default(),
                     bias: if matches!(pass, Pass::Additive | Pass::Fringe) {
@@ -1569,6 +1823,52 @@ impl Renderer {
             "fs_plain",
             &[Some(SHAPE_LAYOUT), Some(LineCopyRaw::LAYOUT)],
         );
+        // The boxes: the lines' shader and blending, over everything (no
+        // depth test), each edge a quad of two triangles; their edges and
+        // their lines by two vertex entry points.
+        let box_pipeline_of = |label, entry| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&line_layout),
+                vertex: wgpu::VertexState {
+                    module: &line_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(BOX_CUBE_LAYOUT), Some(BoxRaw::LAYOUT)],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
+                fragment: Some(wgpu::FragmentState {
+                    module: &line_shader,
+                    entry_point: Some("fs_box"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let box_edge_pipeline = box_pipeline_of("box edges", "vs_box_edge");
+        let box_line_pipeline = box_pipeline_of("box lines", "vs_box_line");
+        let box_cube = {
+            use wgpu::util::DeviceExt;
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("box cube"),
+                contents: bytemuck::cast_slice(&box_cube_vertices()),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
         let buffer = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -1649,6 +1949,10 @@ impl Renderer {
             line_buffer: buffer("lines", 1 << 16, wgpu::BufferUsages::VERTEX),
             line_copy_pipeline,
             line_copy_buffer: buffer("line copies", 1 << 12, wgpu::BufferUsages::VERTEX),
+            box_edge_pipeline,
+            box_line_pipeline,
+            box_cube,
+            box_buffer: buffer("boxes", 1 << 12, wgpu::BufferUsages::VERTEX),
             views: Default::default(),
             dynamic_buffer: buffer("dynamic vertices", 1 << 16, wgpu::BufferUsages::VERTEX),
             frame_buffer,
@@ -1656,8 +1960,7 @@ impl Renderer {
             bone_buffer: buffer("bones", 64 * 64, wgpu::BufferUsages::STORAGE),
             draw_buffer: buffer("draws", draw_size * 64, wgpu::BufferUsages::STORAGE),
             order_buffer: buffer("draw order", 4 * 64, wgpu::BufferUsages::STORAGE),
-            frame_group: None,
-            frame_mask: (0, None),
+            frame_buffers: 0,
             batcher: Batcher::default(),
             white: Arc::new(GpuTexture::solid(gpu, "white", [255; 4])),
             white_cube: Arc::new(GpuTexture::upload_cube(gpu, "white cube", &{
@@ -1665,21 +1968,16 @@ impl Renderer {
                     mg_image::Rgba { width: 1, height: 1, data: vec![255; 4] }.into_texture(false);
                 std::array::from_fn(|_| face.clone())
             })),
-            textures: HashMap::new(),
-            textures_bytes: 0,
-            palettes: Arc::default(),
+            cache: Cache::default(),
+            source: 0,
+            caches: HashMap::new(),
             kept: Default::default(),
-            slots: HashMap::new(),
-            materials: HashMap::new(),
             groups: Vec::new(),
             free_materials: Vec::new(),
-            surfaces: HashMap::new(),
-            surfaces_prev: HashMap::new(),
             names: HashMap::new(),
             renames: HashMap::new(),
             renames_made: 0,
             value_sets: Default::default(),
-            valued: HashMap::new(),
             samplers: HashMap::new(),
             env_sampler,
             uniforms: Vec::new(),
@@ -1696,9 +1994,9 @@ impl Renderer {
             light_set: Vec::new(),
             line_vertices: Vec::new(),
             line_copies: Vec::new(),
+            box_copies: Vec::new(),
             particle_draws: Vec::new(),
             particle_softness: Vec::new(),
-            particle_materials: HashMap::new(),
             made: (0, 0, 0),
             reader: None,
             textures_apart: false,
@@ -1706,43 +2004,91 @@ impl Renderer {
         }
     }
 
-    /// Forgets loaded textures (after the resources change).
+    /// Forgets loaded textures (after the resources change): every
+    /// source's.
     pub fn clear_textures(&mut self) {
         if let Some(r) = &mut self.reader {
             r.forget();
         }
-        self.textures.clear();
-        self.textures_bytes = 0;
-        self.palettes = Arc::default();
-        self.slots.clear();
+        // (The source drawn from stays the one drawn from.)
+        self.cache = Cache { watch: self.cache.watch.take(), ..Cache::default() };
+        self.caches.clear();
         // (What the surfaces are kept by, numbered anew with them: the
         // instances' value sets, texture renames and environment maps'
         // names were numbered for good, across modules.)
-        self.valued.clear();
         self.value_sets.clear();
         self.renames.clear();
         self.renames_made = 0;
         self.names.clear();
-        self.materials.clear();
-        self.particle_materials.clear();
         self.kept.materials.clear();
         self.groups.clear();
         self.material_keys.clear();
         self.free_materials.clear();
-        self.surfaces.clear();
-        self.surfaces_prev.clear();
         self.game.clear();
         self.game_pipelines.clear();
         self.game_keys_pending.clear();
     }
 
-    /// Inserts or replaces a texture cache entry, keeping `textures_bytes` exact.
-    fn insert_texture(&mut self, name: String, entry: Option<Arc<TextureEntry>>) {
-        let added = entry.as_ref().map_or(0, |e| e.bytes);
-        if let Some(Some(prev)) = self.textures.insert(name, entry) {
-            self.textures_bytes = self.textures_bytes.saturating_sub(prev.bytes);
+    /// Draws from `source` from now on ([`Assets::source`]): its cache
+    /// taken out of the others (made, the first time), the one drawn from
+    /// before put among them. The same source as before: nothing done.
+    fn use_source(&mut self, source: Option<&mg_resman::Identity>) {
+        let id = source.map_or(0, mg_resman::Identity::id);
+        if id == self.source {
+            return;
         }
-        self.textures_bytes += added;
+        let cache = (self.caches.remove(&id))
+            .unwrap_or_else(|| Cache { watch: source.map(|s| s.watch()), ..Cache::default() });
+        let before = std::mem::replace(&mut self.cache, cache);
+        self.caches.insert(self.source, before);
+        self.source = id;
+    }
+
+    /// Lets go of the caches of the sources let go of ([`Cache::watch`]),
+    /// with the materials, bind groups and pipelines' places that were
+    /// theirs: says how many.
+    fn let_go_of_gone_sources(&mut self) -> usize {
+        let gone: Vec<u64> = (self.caches.iter())
+            .filter(|(_, c)| c.watch.as_ref().is_some_and(|w| w.strong_count() == 0))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &gone {
+            if let Some(c) = self.caches.remove(id) {
+                self.forget_cache(c);
+            }
+            self.game.forget_source(*id);
+        }
+        gone.len()
+    }
+
+    /// Lets go of what `cache` held beyond itself: its materials' places
+    /// among the groups, and the game's pipelines kept by its slots (by
+    /// where they were: another's made there later must not find them).
+    fn forget_cache(&mut self, cache: Cache) {
+        let mats: std::collections::HashSet<u32> = cache.materials.values().copied().collect();
+        self.free_groups(&mats);
+        let places: std::collections::HashSet<usize> = (cache.slots.values())
+            .chain(cache.valued.values())
+            .map(|s| Arc::as_ptr(s) as usize)
+            .collect();
+        self.game_pipelines.retain(|at, _| !places.contains(&at.0));
+        self.game_keys_pending.retain(|at, _| !places.contains(&at.0));
+    }
+
+    /// Frees the materials at `gone` among the groups (for others to be
+    /// made there), and what the game's programs kept of them. What names
+    /// them in a cache is the caller's to forget.
+    fn free_groups(&mut self, gone: &std::collections::HashSet<u32>) {
+        for &slot in gone {
+            let idx = slot as usize;
+            self.material_keys[idx] = None;
+            self.groups[idx] = None;
+            self.free_materials.push(slot);
+            if let Some(at) = self.kept.materials.get_mut(idx) {
+                *at = 0;
+            }
+        }
+        self.game.forget_materials_in(gone);
     }
 
     /// Whether a mesh is one the game's shaders draw (with them on): one
@@ -1912,7 +2258,7 @@ impl Renderer {
     fn slots(&mut self, assets: &dyn Assets, mat: &crate::model::Material) -> Arc<Slots> {
         let key: SlotKey =
             (mat.texture.clone(), mat.maps.clone(), mat.mtr.clone(), mat.normal_mapped);
-        if let Some(s) = self.slots.get(&key) {
+        if let Some(s) = self.cache.slots.get(&key) {
             return s.clone();
         }
         let (mtr_name, mtr) = [mat.mtr.as_deref(), mat.texture.as_deref()]
@@ -1920,7 +2266,9 @@ impl Renderer {
             .flatten()
             .find_map(|n| assets.material(n).map(|m| (n.to_ascii_lowercase(), m)))
             .unzip();
-        let mut out = Slots { mtr: mtr_name, ..Slots::default() };
+        let mtr_cut = mtr_name.as_deref().and_then(|m| assets.txi(m));
+        let mtr_cut = mtr_cut.is_some_and(|t| t.blending() == Blending::Punchthrough);
+        let mut out = Slots { mtr: mtr_name, mtr_cut, ..Slots::default() };
         out.names[0] = mat.texture.clone();
         for (i, m) in mat.maps.iter().enumerate() {
             out.names[i + 1] = m.clone();
@@ -2002,14 +2350,14 @@ impl Renderer {
             }
         }
         let out = Arc::new(out);
-        self.slots.insert(key, out.clone());
+        self.cache.slots.insert(key, out.clone());
         out
     }
 
     /// The bind group for a material key (its place in
     /// [`Renderer::groups`]), made on first use.
     fn material_group(&mut self, gpu: &Gpu, assets: &dyn Assets, key: &MaterialKey) -> u32 {
-        if let Some(group) = self.materials.get(key) {
+        if let Some(group) = self.cache.materials.get(key) {
             return *group;
         }
         let textures: Vec<Option<Arc<TextureEntry>>> = key
@@ -2065,7 +2413,7 @@ impl Renderer {
             self.material_keys.push(Some(key.clone()));
             at
         };
-        self.materials.insert(key.clone(), at);
+        self.cache.materials.insert(key.clone(), at);
         at
     }
 
@@ -2116,7 +2464,7 @@ impl Renderer {
         let Some(values) = self.value_sets.get(id).cloned() else { return slots };
         let Some(mtr) = slots.mtr.as_deref() else { return slots };
         let key = (Arc::as_ptr(&slots) as usize, id);
-        if let Some(s) = self.valued.get(&key) {
+        if let Some(s) = self.cache.valued.get(&key) {
             return s.clone();
         }
         let declares = |n: &str| slots.params.iter().any(|(p, _)| p.eq_ignore_ascii_case(n));
@@ -2140,7 +2488,7 @@ impl Renderer {
             }
             Arc::new(s)
         };
-        self.valued.insert(key, out.clone());
+        self.cache.valued.insert(key, out.clone());
         out
     }
 
@@ -2164,14 +2512,14 @@ impl Renderer {
             plt: inst.plt_colors,
             values: inst.material_values.as_ref().map_or(0, |v| self.values_id(v)),
         };
-        if let Some(surfaces) = self.surfaces.get(&key) {
+        if let Some(surfaces) = self.cache.surfaces.get(&key) {
             return Some(surfaces.clone());
         }
-        if let Some(surfaces) = self.surfaces_prev.remove(&key) {
-            if self.surfaces.len() >= SURFACES_KEPT {
-                self.surfaces_prev = std::mem::take(&mut self.surfaces);
+        if let Some(surfaces) = self.cache.surfaces_prev.remove(&key) {
+            if self.cache.surfaces.len() >= SURFACES_KEPT {
+                self.cache.surfaces_prev = std::mem::take(&mut self.cache.surfaces);
             }
-            self.surfaces.insert(key, surfaces.clone());
+            self.cache.surfaces.insert(key, surfaces.clone());
             return Some(surfaces);
         }
         // (A texture still being read: none of the model's, for now. Every
@@ -2188,10 +2536,10 @@ impl Renderer {
             })
             .collect();
         let surfaces: Arc<[Surface]> = made.into_iter().collect::<Option<_>>()?;
-        if self.surfaces.len() >= SURFACES_KEPT {
-            self.surfaces_prev = std::mem::take(&mut self.surfaces);
+        if self.cache.surfaces.len() >= SURFACES_KEPT {
+            self.cache.surfaces_prev = std::mem::take(&mut self.cache.surfaces);
         }
-        self.surfaces.insert(key, surfaces.clone());
+        self.cache.surfaces.insert(key, surfaces.clone());
         Some(surfaces)
     }
 
@@ -2259,6 +2607,28 @@ impl Renderer {
         let (blending, env, decal, clamp, has_alpha, cut) = match &tex {
             Some(t) => (t.blending, t.env.clone(), t.decal, t.clamp, t.alpha, t.cut),
             None => (Blending::Default, None, false, (false, false), false, false),
+        };
+        // A cut-out by the TXI of the name the mesh binds: where its bitmap
+        // names an MTR, the MTR's TXI (`name.txi` beside `name.mtr`), not
+        // its texture's, whose `blending punchthrough` the client leaves
+        // blended by its alpha (`soft::reading_punch_cut` in
+        // `client_render`, 2026-11-27). (An MTR by `materialname` keeps
+        // its texture's TXI: read only with the bitmap that texture. A
+        // bitmap renamed by its instance to an MTR's name, unread, too.)
+        let bitmap_mtr = slots.mtr.as_deref().filter(|m| {
+            mat.mtr.as_deref().is_none_or(|n| !n.eq_ignore_ascii_case(m))
+                && slots.names[0].as_deref().is_some_and(|n| n.eq_ignore_ascii_case(m))
+                && names[0].as_deref().is_some_and(|n| n.eq_ignore_ascii_case(m))
+        });
+        let blending = match bitmap_mtr {
+            Some(_) if tex.is_some() && blending != Blending::Additive => {
+                if slots.mtr_cut {
+                    Blending::Punchthrough
+                } else {
+                    Blending::Default
+                }
+            }
+            _ => blending,
         };
         // The environment map a mesh reflects: its texture's (TXI
         // `envmaptexture`), else its object's (placeables.2da
@@ -2330,6 +2700,7 @@ impl Renderer {
             ripple: tex.as_ref().and_then(|t| t.ripple),
             water: tex.as_ref().is_some_and(|t| t.water),
             has_alpha,
+            alpha_mean: tex.as_ref().map_or(1.0, |t| t.alpha_mean),
             reflects,
             // (An environment-mapped texture's alpha is its reflectivity.)
             cut: cut && !env_mapped,
@@ -2360,7 +2731,7 @@ impl Renderer {
             }
             t.clone()
         };
-        if let Some(t) = self.textures.get(name) {
+        if let Some(t) = self.cache.textures.get(name) {
             return stamped(t);
         }
         if let Some(base) = name.strip_suffix(LOST_SUFFIX) {
@@ -2368,12 +2739,12 @@ impl Renderer {
         }
         // (A texture that breaks what reads it is none, as on the threads
         // that read them apart.)
-        let palettes = self.palettes.clone();
+        let palettes = self.cache.palettes.clone();
         let entry = crate::guard::guarded(name, || {
             load_texture(gpu, assets, name, &palettes, role).map(Arc::new)
         });
         let entry = stamped(&entry.flatten());
-        self.insert_texture(name.to_string(), entry.clone());
+        self.cache.insert_texture(name.to_string(), entry.clone());
         entry
     }
 
@@ -2388,14 +2759,15 @@ impl Renderer {
         role: Role,
     ) -> Result<Option<Arc<TextureEntry>>, Waiting> {
         let now = self.kept.now;
-        if let Some(t) = self.textures.get(name) {
+        if let Some(t) = self.cache.textures.get(name) {
             if let Some(e) = t {
                 e.used.store(now, std::sync::atomic::Ordering::Relaxed);
             }
             return Ok(t.clone());
         }
         match &mut self.reader {
-            Some(r) if self.textures_apart => {
+            // (Only the reader's own source's: another's are read here.)
+            Some(r) if self.textures_apart && r.source == self.source => {
                 if r.asked.insert(name.to_string()) {
                     let _ = r.ask.send((name.to_string(), role));
                 }
@@ -2488,8 +2860,18 @@ impl Renderer {
             }
             taken.push((name, entry));
         }
-        for (name, entry) in taken {
-            self.insert_texture(name, entry);
+        // (Into its source's cache, drawn from now or not; none where
+        // that was let go of.)
+        let source = r.source;
+        let cache = if source == self.source {
+            Some(&mut self.cache)
+        } else {
+            self.caches.get_mut(&source)
+        };
+        if let Some(cache) = cache {
+            for (name, entry) in taken {
+                cache.insert_texture(name, entry);
+            }
         }
     }
 
@@ -2612,6 +2994,7 @@ impl Renderer {
         }
         // (What isn't drawn lately let go of, where it is too much.)
         self.begin_kept();
+        self.use_source(assets.source());
         self.let_go_of_stale_textures();
         if let Some(v) = &mut self.volumes {
             v.meshes.begin(self.kept.now);
@@ -2646,7 +3029,7 @@ impl Renderer {
             fog_color: scene.fog.map_or([0.0; 4], |f| f.color.extend(1.0).to_array()),
             light_params: {
                 let (max_inv, falloff) = attenuation_params();
-                [max_inv, falloff, 0.0, size.1 as f32]
+                [max_inv, falloff, size.0 as f32, size.1 as f32]
             },
             time: [scene.time, 0.0, 0.0, 0.0],
         };
@@ -2700,8 +3083,7 @@ impl Renderer {
                 color: l.color.extend(if l.ambient_only { -r2 } else { r2 }).to_array(),
             }
         }));
-        let mut frame_dirty = self.frame_group.is_none();
-        frame_dirty |= upload(
+        let mut frame_dirty = upload(
             gpu,
             &mut self.light_buffer,
             "lights",
@@ -2901,11 +3283,11 @@ impl Renderer {
                     let flag = |b: bool| if b { 1.0 } else { 0.0 };
                     // See-through of its own, whatever the instance's opacity.
                     // (A cut-out is solid where it is not cut: its rim is not
-                    // blended, as the client draws it.)
-                    let see_through = (surface.has_alpha
-                        && !surface.reflects
-                        && surface.blending != Blending::Punchthrough)
-                        || mat.transparency_hint > 0
+                    // blended, as the client draws it, `transparencyhint 1`
+                    // or not: `soft::reading_punch_cut` in `client_render`.)
+                    let cut_out = surface.blending == Blending::Punchthrough;
+                    let see_through = (surface.has_alpha && !surface.reflects && !cut_out)
+                        || (mat.transparency_hint > 0 && !cut_out)
                         || slots.effect.is_some_and(|e| e.blend);
                     let pass = if fade_color.is_some() {
                         Pass::SkyFade
@@ -2936,6 +3318,14 @@ impl Renderer {
                         && surface.blending != Blending::Punchthrough;
                     let sort_depth =
                         if ordered { instance_depth } else { -view.transform_point3(centre).z };
+                    // (A static placeable's by its texture's alpha mean,
+                    // before the dynamic ones'. Tiles' are in the client's
+                    // static buckets too, untried there: theirs keep the
+                    // depth's order.)
+                    let order = see_through_order(
+                        ordered,
+                        (inst.receives_shadows && !inst.tile).then_some(surface.alpha_mean),
+                    );
                     // A mesh solid of its own in an instance drawn see-through
                     // (a tile or a blueprint about to be placed): its depth is
                     // laid first, so that the instance's nearer surfaces hide
@@ -3114,6 +3504,7 @@ impl Renderer {
                                         twosided: slots.twosided,
                                         depth: sort_depth,
                                         hint: mat.transparency_hint,
+                                        order,
                                         uniform: 0,
                                         material: surface.material,
                                         mesh,
@@ -3140,6 +3531,7 @@ impl Renderer {
                                         twosided: slots.twosided,
                                         depth: sort_depth,
                                         hint: mat.transparency_hint,
+                                        order,
                                         uniform: 0,
                                         material: surface.material,
                                         mesh,
@@ -3264,6 +3656,7 @@ impl Renderer {
                         twosided: slots.twosided,
                         depth: sort_depth,
                         hint: mat.transparency_hint,
+                        order,
                         uniform: uniforms.len() as u32,
                         material: surface.material,
                         mesh,
@@ -3352,16 +3745,19 @@ impl Renderer {
         let mut keys = std::mem::take(&mut self.sort_keys);
         keys.clear();
         keys.extend(draws.iter().enumerate().map(|(i, d)| {
-            // (The see-through draws that read the framebuffer's copy: after
-            // it, and so after the other see-through meshes' solid parts.)
+            // (The see-through draws that read the framebuffer's copy, both
+            // their parts: after it, and so after the other see-through
+            // meshes, their soft parts too, which hide the water behind
+            // them as the client's do.)
             let rank: u64 = match d.pass {
                 Pass::Sky => 0,
                 Pass::SkyFade => 1,
                 Pass::Opaque => 2,
-                Pass::Blend if d.late => 4,
+                Pass::Blend if d.late => 5,
+                Pass::Fringe if d.late => 6,
                 Pass::Blend => 3,
-                Pass::Fringe => 5,
-                Pass::Additive => 6,
+                Pass::Fringe => 4,
+                Pass::Additive => 7,
             };
             let key = if matches!(d.pass, Pass::Sky | Pass::SkyFade | Pass::Opaque) {
                 // (What the shadows fall on first.)
@@ -3386,6 +3782,7 @@ impl Renderer {
         }));
         keys.sort_unstable();
         let mut draws: Vec<Draw<'_>> = keys.iter().map(|&(_, i)| draws[i as usize]).collect();
+        in_client_order(&keys, &mut draws);
         self.sort_keys = keys;
 
         // Draws of one mesh become one draw of as many instances, where
@@ -3562,13 +3959,17 @@ impl Renderer {
             of: all_copies.map(|c| c.id),
         }));
         let mask_id = mask.map_or(0, |m| m.id);
-        frame_dirty |= self.frame_mask != (mask_id, all_copies.map(|c| c.id));
 
         // Bind groups.
+        // (The view's frame group, made again where a buffer it binds was,
+        // or its mask.)
         if frame_dirty {
-            self.frame_mask = (mask_id, all_copies.map(|c| c.id));
+            self.frame_buffers += 1;
+        }
+        let made_on = (self.frame_buffers, mask_id);
+        if kept_view.frame_group.as_ref().is_none_or(|(g, m, _)| (*g, *m) != made_on) {
             let mask_view = mask.map_or(&self.white.view, |m| &m.view);
-            self.frame_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frame"),
                 layout: &self.frame_layout,
                 entries: &[
@@ -3597,8 +3998,11 @@ impl Renderer {
                         resource: wgpu::BindingResource::TextureView(mask_view),
                     },
                 ],
-            }));
+            });
+            kept_view.frame_group = Some((made_on.0, made_on.1, group));
+            self.drawn.frame_group_made = true;
         }
+        let frame_group = kept_view.frame_group.as_ref().map(|(.., g)| g.clone());
 
         // Particles: punch-through, then blended by render order, then
         // additive; their textures bind like meshes'.
@@ -3633,7 +4037,7 @@ impl Renderer {
         let mut particle_softness = std::mem::take(&mut self.particle_softness);
         particle_softness.clear();
         for b in &batches {
-            let group = match self.particle_materials.get(&b.texture) {
+            let group = match self.cache.particle_materials.get(&b.texture) {
                 Some(group) => *group,
                 None => {
                     // (Its picture read as a particle's first, so that
@@ -3645,7 +4049,7 @@ impl Renderer {
                     names[0] = b.texture.clone();
                     let key: MaterialKey = (names, "chrome1".into(), (false, false));
                     let group = self.material_group(gpu, assets, &key);
-                    self.particle_materials.insert(b.texture.clone(), group);
+                    self.cache.particle_materials.insert(b.texture.clone(), group);
                     group
                 }
             };
@@ -3768,6 +4172,22 @@ impl Renderer {
         // The line shapes: the lines of those not drawn last frame sent,
         // and every copy; each shape's copies drawn by one draw.
         let shapes = self.line_shapes(gpu, &scene.line_shapes, &mut kept_view.shapes);
+        // The boxes' copies (none sent where there are none), and whether
+        // any has an edge to draw under the lines.
+        let mut box_copies = std::mem::take(&mut self.box_copies);
+        box_copies.clear();
+        box_copies.extend(scene.boxes.iter().map(BoxRaw::of));
+        let box_edges = box_copies.iter().any(|b| b.widths[1] > 0.0);
+        if !box_copies.is_empty() {
+            upload(
+                gpu,
+                &mut self.box_buffer,
+                "boxes",
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                &box_copies,
+                0,
+            );
+        }
         // The game's shaders' blocks and bind groups (the solid draws sorted
         // above).
         // (Those after the framebuffer's copy, last.)
@@ -3865,11 +4285,11 @@ impl Renderer {
                 self.drawn.sun_map_drawn = maps.cast(gpu, &mut encoder, plan, &mut kept_view.sun);
             }
             if let Some(plan) = &light_plan {
-                maps.cast_lights(gpu, &mut encoder, plan);
+                self.drawn.light_maps_drawn = maps.cast_lights(gpu, &mut encoder, plan);
             }
         }
         {
-            let frame_group = self.frame_group.as_ref().expect("frame group built above");
+            let frame_group = frame_group.as_ref().expect("frame group built above");
             // (Cut for the framebuffer's copy: the multisampled picture is
             // resolved at the end of the second pass alone.)
             let first_resolve = if copying.is_some() { None } else { resolve };
@@ -4013,10 +4433,10 @@ impl Renderer {
                     game_drawn = true;
                     own_lost = true;
                 }
-                // (The framebuffer's copy after the see-through meshes'
-                // solid parts, as the client's water reads it: before what
-                // reads it, the soft parts and what is added.)
-                let past_copy = d.late || matches!(d.pass, Pass::Fringe | Pass::Additive);
+                // (The framebuffer's copy after the see-through meshes, as
+                // the client's water reads it: before what reads it and
+                // what is added.)
+                let past_copy = d.late || d.pass == Pass::Additive;
                 if !copied && past_copy {
                     drop(pass);
                     pass = Self::copy_framebuffer(
@@ -4154,6 +4574,22 @@ impl Renderer {
                     pass.draw(0..shape.ends, copies.clone());
                 }
             }
+            // The boxes, over everything: every edge, then every line.
+            if !box_copies.is_empty() {
+                let copies = 0..box_copies.len() as u32;
+                pass.set_bind_group(0, &self.particle_frame, &[]);
+                pass.set_vertex_buffer(0, self.box_cube.slice(..));
+                pass.set_vertex_buffer(1, self.box_buffer.slice(..));
+                if box_edges {
+                    pass.set_pipeline(&self.box_edge_pipeline);
+                    pass.draw(0..BOX_CUBE_CORNERS, copies.clone());
+                    self.drawn.box_draws += 1;
+                }
+                pass.set_pipeline(&self.box_line_pipeline);
+                pass.draw(0..BOX_CUBE_CORNERS, copies);
+                self.drawn.box_draws += 1;
+                self.drawn.boxes = box_copies.len();
+            }
         }
         gpu.queue.submit([encoder.finish()]);
         drop(draws);
@@ -4163,6 +4599,7 @@ impl Renderer {
         self.particle_draws = particle_draws;
         self.particle_softness = particle_softness;
         self.line_vertices = line_vertices;
+        self.box_copies = box_copies;
         kept_view.reach = reach_cache;
         self.views.put(view_key, kept_view);
     }
@@ -4183,13 +4620,10 @@ impl Renderer {
     }
 
     /// Lets go of the bind groups on the framebuffer copies numbered `id`.
+    /// (The view's frame group, which binds its mask, goes with what is
+    /// kept for the view.)
     fn forget_copies(&mut self, id: u64) {
         self.game.forget_framebuffer(id);
-        // (The frame group binds the view's mask: made again.)
-        if self.frame_mask.1 == Some(id) {
-            self.frame_group = None;
-            self.frame_mask = (0, None);
-        }
     }
 
     /// How many views have something kept for them, for tests.
@@ -4679,6 +5113,41 @@ pub(crate) fn sky_place(camera: &Camera) -> Mat4 {
 mod tests {
     use super::{LOST_RIPPLE_GRAY, procedure_picture, ripple_of};
     use glam::{Mat4, Vec3};
+
+    /// A texture's alpha mean as the client's, from each source it reads:
+    /// a PLT's 0.5; a BioWare DDS's header over its TXI; a TXI's
+    /// `alphamean`; an uncompressed picture's texels (1 without alpha); a
+    /// compressed one's 0.5 with alpha, else 1. And the order it gives:
+    /// the highest first, before every draw that isn't a static mesh's.
+    #[test]
+    fn a_texture_s_alpha_mean_is_the_client_s() {
+        use super::{client_alpha_mean, see_through_order};
+        use mg_image::{Format, Rgba, txi::Txi};
+        let none = Txi::default();
+        let txi = Txi::parse(b"alphamean 0.25");
+        let picture = |a: &[u8]| {
+            let data = a.iter().flat_map(|&a| [9, 9, 9, a]).collect();
+            Rgba { width: a.len() as u32, height: 1, data }.into_texture(true)
+        };
+        let mean = client_alpha_mean(&picture(&[255, 200, 100, 0]), &none, false);
+        let sum = [255u8, 200, 100, 0].iter().fold(0f32, |s, &a| s + f32::from(a) / 255.0);
+        assert_eq!(mean, sum / 4.0);
+        assert_eq!(client_alpha_mean(&picture(&[255, 0]), &txi, false), 0.25);
+        assert_eq!(client_alpha_mean(&picture(&[255, 0]), &none, true), 0.5);
+        let mut opaque = picture(&[255, 255]);
+        opaque.has_alpha = false;
+        assert_eq!(client_alpha_mean(&opaque, &none, false), 1.0);
+        let compressed = |format| mg_image::Texture { format, ..picture(&[255]) };
+        assert_eq!(client_alpha_mean(&compressed(Format::Bc3), &none, false), 0.5);
+        assert_eq!(client_alpha_mean(&compressed(Format::Bc1), &none, false), 1.0);
+        let bioware = mg_image::Texture { alpha_mean: Some(0.7), ..compressed(Format::Bc3) };
+        assert_eq!(client_alpha_mean(&bioware, &txi, false), 0.7);
+        let order: Vec<u16> = [Some(1.0), Some(0.961), Some(0.9), Some(0.3), None]
+            .map(|mean| see_through_order(true, mean))
+            .to_vec();
+        assert!(order.is_sorted_by(|a, b| a < b), "{order:?}");
+        assert_eq!(see_through_order(false, Some(1.0)), super::UNORDERED);
+    }
 
     /// The sky is around the camera at ground level for every camera the
     /// game can have (at most `GAME_CAMERA_REACH` from its target, over a

@@ -7,6 +7,9 @@
 //! module of its subject; what several share goes in `common`.
 
 mod common;
+// (Moonglow's cache folder the tests' own, set before `main`.)
+#[path = "../support/own_cache.rs"]
+mod own_cache;
 
 mod appearance_tab;
 mod area_header;
@@ -59,6 +62,7 @@ mod outline_color;
 mod outliner;
 mod palettes;
 mod part_emitters;
+mod player_light;
 mod plugin_kinds;
 mod plugins;
 mod preview_panel;
@@ -75,6 +79,7 @@ mod script_header;
 mod script_keys;
 mod scripts;
 mod search;
+mod selection_boxes;
 mod shell;
 mod sounds;
 mod status_bar;
@@ -82,6 +87,7 @@ mod status_hints;
 mod table_panels;
 mod tables;
 mod talk_panels;
+mod test_module_local;
 mod tile_edges;
 mod tile_properties;
 mod tiles;

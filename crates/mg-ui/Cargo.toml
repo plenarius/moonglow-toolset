@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 log = "0.4"
-egui.workspace = true
+egui = { workspace = true, features = ["serde"] }
 egui-wgpu.workspace = true
 egui_commonmark.workspace = true
 egui_dock.workspace = true
@@ -30,6 +30,7 @@ mg-nwsync = { workspace = true, features = ["http"] }
 mg-module.workspace = true
 mg-nui.workspace = true
 mg-plugin = { workspace = true, features = ["net"] }
+mg-serve.workspace = true
 mg-preview = { workspace = true, features = ["render", "usage"] }
 mg-render.workspace = true
 mg-resman.workspace = true

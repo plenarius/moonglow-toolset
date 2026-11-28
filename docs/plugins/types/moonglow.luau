@@ -1,5 +1,5 @@
 --!strict
--- The types of Moonglow's plugin API, version 0.10, for editors that check
+-- The types of Moonglow's plugin API, version 0.11, for editors that check
 -- Luau (luau-lsp): point the alias "moonglow" at this file in a `.luaurc`
 -- in or above your plugin's folder, and `require("@moonglow")` is typed
 -- and completed:
@@ -435,7 +435,7 @@ export type Element = string | {
 
 local mg = {}
 
-mg.api = "0.10"
+mg.api = "0.11"
 -- The Layonara build's own API (nil elsewhere).
 mg.layonara_api = "1"
 
@@ -545,6 +545,41 @@ export type VarDescription = {
 mg.vars = {
     describe = function(name: string): VarDescription? return nil end,
     described = function(): { VarDescription } return {} end,
+}
+
+-- How much of a manifest's data is here, as last looked.
+export type NwSyncSurvey = {
+    resources: number,
+    data_files: number,
+    in_game_storage: number,
+    in_cache: number,
+    missing: number,
+    missing_bytes: number,
+}
+
+-- The module's NWSync content as the job began (API 0.11). Never the
+-- sign-in.
+export type NwSyncStatus = {
+    off: boolean,
+    source: string,
+    signed_in: boolean,
+    manifest: string?,
+    from: string?,
+    arrived: number?,
+    resources: number?,
+    haks: { string },
+    by_origins: boolean,
+    haks_missing: { string },
+    newer_on_disk: { string },
+    survey: NwSyncSurvey?,
+    syncing: boolean,
+    cleaning: boolean,
+}
+
+-- The module's NWSync content (API 0.11): nil where its project names
+-- no NWSync source.
+mg.nwsync = {
+    status = function(): NwSyncStatus? return nil end,
 }
 
 -- JSON, losslessly (Layonara API 1): a whole number past 2^53 decodes as a raw

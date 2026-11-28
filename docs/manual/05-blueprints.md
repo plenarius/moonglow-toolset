@@ -3,7 +3,7 @@ type: Manual Page
 title: Blueprints
 description: Blueprints - the palettes in the Right Dock (types, Standard and Custom, search, List and Gallery, Group by, categories, the right-click menu), the Appearance Gallery, the blueprint editors (header with OK and Cancel, the page list and pages on one scroll, sections in columns, each kind's pages including a creature's Sound set and Faction on Basic), the wizards, Update Instances, and instances in the Properties panel.
 tags: [manual, blueprints, palettes]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-25T20:08:28Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-27T09:12:48Z }
 ---
 
 # Blueprints
@@ -158,7 +158,9 @@ top. The game's categories are the starting point; with a change the
 module gets a list of its own, kept in the module (`placeablepal.itp` for
 placeables, and so on: the palette skeleton that content packs ship in
 their haks), and the blueprints' Category lists and the custom palette
-follow it.
+follow it. A new category takes the list's next free number (one a
+removed category had is given again only once the later ones are
+taken), up to 255 categories in all.
 - **Drag a row** to move it: onto another's upper half to go before it,
   onto its lower half to go after it, or into it if it is a group; held
   near the list's top or bottom, it scrolls the list, as the wheel does
@@ -332,7 +334,7 @@ whose header holds **Placeables**, **Creatures** and **Doors** (which
 table's appearances), **Find**, the size slider and the count ("838
 appearances (appearance.2da)", or "12 of 838" while Find narrows it;
 where the tab is narrow, the slider and the count go into the header's
-**⋯** (More)); under it a line says what a click does, with **Use
+**…** (More)); under it a line says what a click does, with **Use
 the Selection** where it was opened for one object (with a placeable
 selected in the area and the Placeables shown: "A click takes a
 placeable to place. Right click gives it to the 1 placeable
@@ -863,7 +865,7 @@ Shared parts:
   model is one header row:
   **Animation**, **Play** or **Pause**, **Frame**, the **Lights**,
   **Shadow** and **Shaders** switches and **Export Files…**, with what
-  has no room in its **⋯** (More), and **Pop Out**, always there; the
+  has no room in its **…** (More), and **Pop Out**, always there; the
   panel's own header says the model's name, its nodes, meshes and parts
   and its supermodel. The Status Bar gives the view's ways beside it:
   Drag to turn the view, Right Drag or Middle Drag to move it, Wheel to
@@ -975,12 +977,14 @@ that names none, or one portraits.2da lacks, leaves the portrait as it is.
   parts, it gets them (each 1, no belt or shoulders) and head 1 in the
   same step, since the game draws no body without them. A head of 0, or
   none, is no head: the game draws the neck alone. **Pop
-  Out**, in the Preview's **⋯** (More), moves the model to a tab or window of its
+  Out**, in the Preview's **…** (More), moves the model to a tab or window of its
   own (to keep elsewhere); the panel says so, and **Bring Back** returns
   it there.
 - **Feats** shows the feats the creature has beside the list to choose
   from, under **Assigned**; a feat's remove button (**Remove** and its
-  name) takes it away.
+  name) takes it away. As in Aurora, **OK** writes the creature's feats
+  in the order of their names, whether or not anything changed (one step
+  of Undo of its own).
 - **Feats** and **Spells** are found by name (**Find**) and by category:
   the toolset's categories of feats (combat, defensive, magical…), and
   spells' talent categories (harmful ranged, beneficial healing…).

@@ -4,8 +4,12 @@
 //! module by name in the user directory's `modules` folder, so the module
 //! must be saved there.
 
+use mg_module::links::{link_dir, link_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+pub mod local;
+pub use local::{Character, Join, LocalPlan, LocalRun, Progress};
 
 /// The game client of the install at `root`, for this platform.
 pub fn client_binary(root: &Path) -> Option<PathBuf> {
@@ -60,12 +64,20 @@ pub fn steam_copy(client: &Path) -> bool {
 /// content too (Options › Folders' Read Steam Workshop content,
 /// [`crate::Settings::test_through_steam`]).
 pub fn command(client: &Path, user_dir: &Path, module: &str, choose: bool, steam: bool) -> Command {
+    let mut c = client_command(client, user_dir, steam);
+    let how = if choose { "+LoadNewModule" } else { "+TestNewModule" };
+    c.arg(how).arg(module);
+    c
+}
+
+/// The client from its own folder, given its user directory, and told
+/// whether it is Steam's ([`command`]).
+fn client_command(client: &Path, user_dir: &Path, steam: bool) -> Command {
     let mut c = Command::new(client);
     if let Some(dir) = client.parent() {
         c.current_dir(dir);
     }
-    let how = if choose { "+LoadNewModule" } else { "+TestNewModule" };
-    c.arg("-userdirectory").arg(user_dir).arg(how).arg(module);
+    c.arg("-userdirectory").arg(user_dir);
     // A Steam copy told which game it is reaches Steam when Steam is
     // running and is expected to load what Steam brings it (the Workshop
     // items subscribed to: overrides of the game's textures, materials),
@@ -93,6 +105,105 @@ pub fn command(client: &Path, user_dir: &Path, module: &str, choose: bool, steam
         }
     }
     c
+}
+
+/// The game joining a server for a test (Options › Test Module's Then
+/// start the game): the client, from its own folder, with `+connect` (and
+/// `+password` where the server has one). The game shows the server's
+/// character list. `steam` as for [`command`].
+pub fn join_command(
+    client: &Path,
+    user_dir: &Path,
+    address: &str,
+    password: &str,
+    steam: bool,
+) -> Command {
+    let mut c = client_command(client, user_dir, steam);
+    c.arg("+connect").arg(address);
+    if !password.is_empty() {
+        c.arg("+password").arg(password);
+    }
+    c
+}
+
+/// The player's own characters, for the quick start's character: each
+/// How the game joins Test Module's local server: with `chosen`, the
+/// project's character, where Options › Test Module's quick start is `on`
+/// and the file is there, else at the character list; and what the Log
+/// says of it (with the quick start on).
+pub fn quick_start_join(on: bool, chosen: Option<&Path>) -> (Join, Option<(crate::Level, String)>) {
+    use crate::Level;
+    if !on {
+        return (Join::CharacterList, None);
+    }
+    let said = match chosen {
+        Some(bic) if bic.is_file() => {
+            let text = format!(
+                "Test Module: joining with {} (confirm it once on the character list)",
+                bic.display()
+            );
+            return (
+                Join::QuickStart(Character::Bic(bic.to_path_buf())),
+                Some((Level::Info, text)),
+            );
+        }
+        Some(bic) => (
+            Level::Warning,
+            format!(
+                "Test Module: the quick start's character {} is gone: the game shows your own \
+                 characters",
+                bic.display()
+            ),
+        ),
+        None => (
+            Level::Info,
+            "Test Module: no character chosen for the quick start (Options › Test Module): the \
+             game shows your own characters"
+                .into(),
+        ),
+    };
+    (Join::CharacterList, Some(said))
+}
+
+/// `.bic` of the user folder's `localvault` (read, never written) with the
+/// name it carries (first and last, in English), else its file's name;
+/// in the order of their names.
+pub fn local_characters(user_dir: &Path) -> Vec<(String, PathBuf)> {
+    use mg_core::lang::{Gender, Language};
+    let Ok(entries) = std::fs::read_dir(user_dir.join("localvault")) else { return Vec::new() };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bic")))
+        .map(|path| {
+            let gff = std::fs::read(&path).ok().and_then(|b| mg_gff::Gff::read(&b).ok());
+            let part = |label: &str| {
+                let text =
+                    gff.as_ref()?.root.locstring(label)?.text(Language::ENGLISH, Gender::Male)?;
+                Some(text.trim().to_string()).filter(|t| !t.is_empty())
+            };
+            let name =
+                [part("FirstName"), part("LastName")].into_iter().flatten().collect::<Vec<_>>();
+            let name = match name.is_empty() {
+                true => path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                false => name.join(" "),
+            };
+            (name, path)
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()).then(a.1.cmp(&b.1)));
+    found
+}
+
+/// Options › Test Module's address of the server the game joins, when none
+/// is typed: the game's own port on this machine.
+pub const DEFAULT_ADDRESS: &str = "127.0.0.1:5121";
+
+/// Options › Test Module's command with `{module_path}` and
+/// `{module_name}` filled in, as they are: a builder whose module's path
+/// may have spaces puts quotes around it, as the shell wants.
+pub fn fill_in(line: &str, module_path: &Path, module_name: &str) -> String {
+    line.replace("{module_path}", &module_path.display().to_string())
+        .replace("{module_name}", module_name)
 }
 
 /// The log's line for a test of a Steam copy of the game, which says
@@ -141,7 +252,9 @@ pub(crate) fn let_game_run(mut child: std::process::Child) {
 /// Whether a game Moonglow started for a test is still running. A second
 /// test would write the test module under it (Test From Here writes it
 /// anew each time), and the game then reports a corrupt module.
-pub(crate) fn game_running() -> bool {
+/// (Public for the UI tests: a stand-in game that ends at once is known
+/// until its wait is over.)
+pub fn game_running() -> bool {
     !GAMES.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
 }
 
@@ -291,52 +404,9 @@ pub(crate) fn other_games() -> Vec<Running> {
 /// ([`content_user_dir`]).
 pub const CONTENT_USER_DIR: &str = "test-user";
 
-/// Links `to` to the folder `from`: a symbolic link, else (Windows,
-/// without the right to make one) a junction.
-fn link_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(from, to)
-    }
-    #[cfg(windows)]
-    {
-        if std::os::windows::fs::symlink_dir(from, to).is_ok() {
-            return Ok(());
-        }
-        let made =
-            Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(to).arg(from).output()?;
-        if made.status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(String::from_utf8_lossy(&made.stderr).trim().to_string()))
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (from, to);
-        Err(std::io::Error::other("no links on this system"))
-    }
-}
-
-/// Links `to` to the file `from`: a symbolic link (Unix); a hard link,
-/// else a symbolic link, else a copy (Windows).
-fn link_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(from, to)
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::hard_link(from, to)
-            .or_else(|_| {
-                #[cfg(windows)]
-                return std::os::windows::fs::symlink_file(from, to);
-                #[cfg(not(windows))]
-                Err(std::io::Error::other("no links"))
-            })
-            .or_else(|_| std::fs::copy(from, to).map(|_| ()))
-    }
-}
+/// What the Status Bar calls the writing of a module's haks from its
+/// NWSync content for Test Module.
+pub const WRITE_TITLE: &str = "Write Haks from NWSync";
 
 /// Whether there is anything at `path`, a link that leads nowhere
 /// included.
@@ -368,7 +438,8 @@ pub fn with_content(
         .unwrap_or_else(|| Err("the project names no NWSync server".into()))?;
     let content = content_of(module, install, &files);
     content_user_dir(real, dir, &content)?;
-    Ok(files.summary())
+    // (And the files on disk used over the manifest, by the rule.)
+    Ok(std::iter::once(files.summary()).chain(files.notes()).collect::<Vec<_>>().join("\n"))
 }
 
 /// What the content user directory's `hak` and `tlk` hold for a module:
@@ -392,14 +463,22 @@ pub fn content_of(
             content.haks.push((file, found));
         }
     }
+    // (The feminine table from where the table comes from.)
     if let Some((name, path)) = &files.tlk {
         content.tlks.push((name.into(), path.clone()));
+        if let Some((name, path)) = &files.tlk_f {
+            content.tlks.push((name.into(), path.clone()));
+        }
     } else if let Some(tlk) = module.custom_tlk().ok().flatten()
-        && let (Some(file), Some(dir)) =
-            (mg_resman::named_file(&tlk, "tlk"), install.user_folder("tlk"))
-        && dir.join(&file).is_file()
+        && let Some(dir) = install.user_folder("tlk")
     {
-        content.tlks.push((file.clone(), dir.join(file)));
+        for name in [tlk.clone(), mg_module::talk::feminine(&tlk)] {
+            if let Some(file) = mg_resman::named_file(&name, "tlk")
+                && dir.join(&file).is_file()
+            {
+                content.tlks.push((file.clone(), dir.join(file)));
+            }
+        }
     }
     content
 }
@@ -411,8 +490,11 @@ pub fn content_of(
 /// as on any test), and `hak` and `tlk` are folders of `dir`'s own with
 /// links to the content's files. `nwn.ini` is copied without its `HAK`
 /// and `TLK` aliases (the game would look for haks where they lead).
-/// Nothing of the player's folder is written; links made before are
-/// kept, and what the game made in `dir` stays.
+/// Nothing of the player's folder is written. Each run makes again the
+/// link (or, on Windows without one, the copy) of each of the player's
+/// files: a copy kept would never follow the player's file again. A
+/// folder's link made before is kept, and what the game made in `dir`
+/// that the player's folder has no entry of stays.
 ///
 /// The game can't read NWSync on a module of its own, and Moonglow
 /// never writes into the player's `hak` folder.
@@ -426,12 +508,27 @@ pub fn content_user_dir(real: &Path, dir: &Path, content: &Content) -> Result<()
     for entry in std::fs::read_dir(real).map_err(|e| err(real, e))?.flatten() {
         let name = entry.file_name();
         let to = dir.join(&name);
-        if own(&name) || is_there(&to) {
+        if own(&name) {
             continue;
         }
         let from = entry.path();
-        let made = if from.is_dir() { link_dir(&from, &to) } else { link_file(&from, &to) };
-        made.map_err(|e| err(&to, e))?;
+        if from.is_dir() {
+            // (A folder's link, or a folder the game made before the
+            // player had one, kept.)
+            if !is_there(&to) {
+                link_dir(&from, &to).map_err(|e| err(&to, e))?;
+            }
+            continue;
+        }
+        // (A file's link, hard link or copy, made by the run before: made
+        // again. Only `dir`'s own entry is removed, never the player's
+        // file; a folder there of the game's making is left alone.)
+        if std::fs::symlink_metadata(&to).is_ok_and(|m| !m.is_dir()) {
+            std::fs::remove_file(&to).map_err(|e| err(&to, e))?;
+        }
+        if !is_there(&to) {
+            link_file(&from, &to).map_err(|e| err(&to, e))?;
+        }
     }
     // nwn.ini, without the aliases of the folders that are dir's own.
     let ini = real.join("nwn.ini");
@@ -479,11 +576,111 @@ pub fn content_user_dir(real: &Path, dir: &Path, content: &Content) -> Result<()
 mod tests {
     use super::*;
 
+    /// GitHub issue 52: the command's module filled in as it is, each time
+    /// it is named.
+    #[test]
+    fn a_test_command_has_its_module_filled_in() {
+        let path = Path::new("/home/b/My Modules/Ravenloft.mod");
+        let line = "wsl.exe -- bash -lc \"~/start.sh '{module_path}' {module_name} {module_name}\"";
+        assert_eq!(
+            fill_in(line, path, "Ravenloft"),
+            "wsl.exe -- bash -lc \"~/start.sh '/home/b/My Modules/Ravenloft.mod' Ravenloft \
+             Ravenloft\""
+        );
+        assert_eq!(fill_in("run {other}", path, "R"), "run {other}", "only the two");
+    }
+
+    /// The quick start's characters: the localvault's `.bic`s by the names
+    /// they carry, a file without one (or not a character at all) by its
+    /// file's name, other files left out; none without a localvault.
+    #[test]
+    fn local_characters_are_listed_by_name() {
+        use mg_core::lang::{Gender, Language};
+        use mg_core::locstring::LocString;
+        let dir = mg_testkit::scratch_dir("ui-local-characters");
+        assert!(local_characters(&dir).is_empty());
+        let vault = dir.join("localvault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let bic = |first: &str, last: &str| {
+            let mut g = mg_gff::Gff::new(*b"BIC ");
+            let name = |t: &str| {
+                mg_gff::Value::LocString(LocString::from_text(Language::ENGLISH, Gender::Male, t))
+            };
+            g.root.set("FirstName", name(first));
+            g.root.set("LastName", name(last));
+            g.to_bytes().unwrap()
+        };
+        std::fs::write(vault.join("zed.bic"), bic("Anya", "Vorn")).unwrap();
+        std::fs::write(vault.join("bard.BIC"), bic("Mirela", "")).unwrap();
+        std::fs::write(vault.join("broken.bic"), b"not a gff").unwrap();
+        std::fs::write(vault.join("notes.txt"), b"x").unwrap();
+        let names: Vec<_> = local_characters(&dir)
+            .into_iter()
+            .map(|(n, p)| (n, p.file_name().unwrap().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Anya Vorn".into(), "zed.bic".into()),
+                ("broken".into(), "broken.bic".into()),
+                ("Mirela".into(), "bard.BIC".into()),
+            ] as [(String, String); 3]
+        );
+    }
+
+    /// The quick start's join: off, the list and nothing said; on, the
+    /// character where its file is, else the list, said so.
+    #[test]
+    fn the_quick_start_joins_with_the_chosen_character() {
+        use crate::Level;
+        let dir = mg_testkit::scratch_dir("ui-quick-start-join");
+        let bic = dir.join("hero.bic");
+        std::fs::write(&bic, b"BIC V3.2").unwrap();
+        assert_eq!(quick_start_join(false, Some(&bic)), (Join::CharacterList, None));
+        let (join, said) = quick_start_join(true, Some(&bic));
+        assert_eq!(join, Join::QuickStart(Character::Bic(bic.clone())));
+        let (level, text) = said.unwrap();
+        assert!(level == Level::Info && text.contains("confirm it once"), "{text}");
+        let gone = dir.join("gone.bic");
+        let (join, said) = quick_start_join(true, Some(&gone));
+        assert_eq!(join, Join::CharacterList);
+        assert_eq!(said.unwrap().0, Level::Warning);
+        let (join, said) = quick_start_join(true, None);
+        assert_eq!(join, Join::CharacterList);
+        assert!(said.unwrap().1.contains("no character chosen"));
+    }
+
+    /// The game joining a test's server: its user directory, `+connect`,
+    /// and `+password` only where there is one; no module; Steam told as
+    /// for a test of its own.
+    #[test]
+    fn the_game_joins_a_server_with_connect() {
+        let args = |c: &Command| {
+            c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        };
+        let client = Path::new("/nwn/bin/linux-x86/nwmain-linux");
+        let c = join_command(client, Path::new("/u"), "127.0.0.1:5121", "", false);
+        assert_eq!(args(&c), ["-userdirectory", "/u", "+connect", "127.0.0.1:5121"]);
+        assert_eq!(c.get_current_dir(), Some(Path::new("/nwn/bin/linux-x86")));
+        let c = join_command(client, Path::new("/u"), "10.0.0.2:5122", "pw", false);
+        assert_eq!(
+            args(&c),
+            ["-userdirectory", "/u", "+connect", "10.0.0.2:5122", "+password", "pw"]
+        );
+        // A Steam copy is told of Steam as for a test of its own.
+        let steam =
+            Path::new("/lib/steamapps/common/Neverwinter Nights/bin/linux-x86/nwmain-linux");
+        let c = join_command(steam, Path::new("/u"), "127.0.0.1:5121", "pw", false);
+        let removed = c.get_envs().filter(|(_, v)| v.is_none()).count();
+        assert_eq!(removed, 2, "not started through Steam");
+        assert_eq!(join_command(steam, Path::new("/u"), "a", "b", true).get_envs().count(), 2);
+    }
+
     /// The content user directory: the player's folder linked thing by
     /// thing but for `hak` and `tlk`, which hold the content (and none of
     /// what was linked there before), `nwn.ini` without its hak and talk
-    /// table aliases; the player's folder unchanged.
-    #[cfg(unix)]
+    /// table aliases; the player's folder unchanged. On every system (CI
+    /// runs it on Windows: junctions, hard links).
     #[test]
     fn a_content_user_directory() {
         let root = mg_testkit::scratch_dir("ui-content-user-dir");
@@ -510,6 +707,8 @@ mod tests {
         let dir = root.join("test-user");
         content_user_dir(&real, &dir, &content).unwrap();
         assert_eq!(std::fs::read(dir.join("localvault/me.bic")).unwrap(), b"me");
+        // (A symbolic link; on Windows one or a junction, which Rust takes
+        // for one too.)
         assert!(std::fs::symlink_metadata(dir.join("modules")).unwrap().is_symlink());
         assert_eq!(std::fs::read(dir.join("settings.tml")).unwrap(), b"x = 1");
         assert_eq!(std::fs::read(dir.join("hak/pw_parts.hak")).unwrap(), b"from nwsync");
@@ -535,6 +734,50 @@ mod tests {
             std::fs::read_dir(real.join("hak")).unwrap().flatten().map(|e| e.file_name()).collect();
         names.sort();
         assert_eq!(names, ["old.hak"]);
+    }
+
+    /// A file of the player's is linked again at every run: a copy of it
+    /// (Windows, where a hard link fails across drives) or a link the
+    /// game replaced follows the player's file, where it was kept frozen
+    /// at the first test. `nwn.ini` is made again too. What the game made
+    /// in the directory that the player has no entry of stays, and the
+    /// player's folder is as it was.
+    #[test]
+    fn a_content_user_directory_follows_the_player_s_files() {
+        let root = mg_testkit::scratch_dir("ui-content-user-dir-again");
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("localvault")).unwrap();
+        std::fs::write(real.join("settings.tml"), b"x = 1").unwrap();
+        std::fs::write(real.join("cdkey.ini"), b"key").unwrap();
+        std::fs::write(real.join("nwn.ini"), "[Alias]\nHAK=/h\n[Game Options]\nA=1\n").unwrap();
+        let dir = root.join("test-user");
+        content_user_dir(&real, &dir, &Content::default()).unwrap();
+        // (As a copy left by the run before: a file of the directory's own,
+        // the player's as it was then.)
+        std::fs::remove_file(dir.join("settings.tml")).unwrap();
+        std::fs::write(dir.join("settings.tml"), b"x = 1").unwrap();
+        // (What the game made of its own, and the options it saved.)
+        std::fs::create_dir_all(dir.join("currentgame.0")).unwrap();
+        std::fs::write(dir.join("currentgame.0/a.txt"), b"game").unwrap();
+        std::fs::write(dir.join("game_made.txt"), b"game").unwrap();
+        std::fs::write(dir.join("nwn.ini"), "[Game Options]\nA=2\n").unwrap();
+        // The player changes their settings, and tests again.
+        std::fs::write(real.join("settings.tml"), b"x = 2").unwrap();
+        content_user_dir(&real, &dir, &Content::default()).unwrap();
+        assert_eq!(std::fs::read(dir.join("settings.tml")).unwrap(), b"x = 2");
+        assert_eq!(std::fs::read(dir.join("cdkey.ini")).unwrap(), b"key");
+        let ini = std::fs::read_to_string(dir.join("nwn.ini")).unwrap();
+        assert_eq!(ini, "[Alias]\n[Game Options]\nA=1\n", "made again from the player's");
+        assert_eq!(std::fs::read(dir.join("currentgame.0/a.txt")).unwrap(), b"game");
+        assert_eq!(std::fs::read(dir.join("game_made.txt")).unwrap(), b"game");
+        // The player's folder: its files as the player left them, nothing
+        // added.
+        assert_eq!(std::fs::read(real.join("settings.tml")).unwrap(), b"x = 2");
+        assert_eq!(std::fs::read(real.join("cdkey.ini")).unwrap(), b"key");
+        let mut names: Vec<_> =
+            std::fs::read_dir(&real).unwrap().flatten().map(|e| e.file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["cdkey.ini", "localvault", "nwn.ini", "settings.tml"]);
     }
 
     /// A program running is found by its name, with its arguments where
